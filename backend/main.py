@@ -55,6 +55,11 @@ DUMMY_METRICS: dict[str, dict] = {
 
 RULES_PATH = Path(__file__).resolve().parent.parent / "rules" / "rules.yaml"
 
+def get_rules_runtime() -> dict:
+    # load fresh each time for debugging (and to avoid reload issues)
+    return load_rules()
+
+
 
 def load_rules() -> dict:
     if RULES_PATH.exists():
@@ -85,7 +90,6 @@ def load_rules() -> dict:
     }
 
 
-RULES = load_rules()
 
 
 def eval_rule(metric_value, operator: str, value) -> bool:
@@ -97,11 +101,17 @@ def eval_rule(metric_value, operator: str, value) -> bool:
 
 
 def evaluate_alerts(metrics: dict) -> list[Alert]:
+    rules = load_rules()  # <-- jedes Mal laden
     alerts: list[Alert] = []
-    for r in RULES.get("rules", []):
+
+    for r in rules.get("rules", []):
         metric = r.get("metric")
         operator = r.get("operator")
         value = r.get("value")
+
+        if metric is None or operator is None:
+            continue
+
         metric_value = metrics.get(metric)
 
         if eval_rule(metric_value, operator, value):
@@ -113,7 +123,9 @@ def evaluate_alerts(metrics: dict) -> list[Alert]:
                     explanation=r["explanation"],
                 )
             )
+
     return alerts
+
 
 
 def summarize_severity(alerts: list[Alert]) -> tuple[Severity, Optional[str]]:
@@ -194,3 +206,39 @@ def get_case(case_id: str):
         bfs_complete=bool(metrics.get("bfs_complete", False)),
         alerts=alerts,
     )
+
+
+@app.get("/api/debug/rules")
+def debug_rules():
+    rules = get_rules_runtime()
+    return {
+        "rules_path": str(RULES_PATH),
+        "rules_loaded_keys": list(rules.keys()),
+        "rules_count": len(rules.get("rules", [])),
+        "rules_sample": rules.get("rules", [])[:2],
+    }
+
+
+@app.get("/api/debug/rules")
+def debug_rules():
+    rules = load_rules()
+    return {
+        "rules_path": str(RULES_PATH),
+        "exists": RULES_PATH.exists(),
+        "rules_loaded_keys": list(rules.keys()) if isinstance(rules, dict) else str(type(rules)),
+        "rules_count": len(rules.get("rules", [])) if isinstance(rules, dict) else None,
+        "rules_sample": (rules.get("rules", [])[:5] if isinstance(rules, dict) else None),
+    }
+
+
+@app.get("/api/debug/eval/{case_id}")
+def debug_eval(case_id: str):
+    metrics = DUMMY_METRICS.get(case_id, {})
+    rules = load_rules()
+    alerts = evaluate_alerts(metrics)
+    return {
+        "case_id": case_id,
+        "metrics": metrics,
+        "rules_count": len(rules.get("rules", [])) if isinstance(rules, dict) else None,
+        "alerts": [a.model_dump() for a in alerts],
+    }

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { fetchCases } from "./api";
-import type { CaseSummary, Severity } from "./types";
+import { fetchCases, fetchCaseDetail } from "./api";
+import type { CaseSummary, CaseDetail, Severity } from "./types";
 
 function severityColor(severity: Severity): string {
   switch (severity) {
@@ -16,51 +16,116 @@ function severityColor(severity: Severity): string {
 export default function App() {
   const [cases, setCases] = useState<CaseSummary[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+
+  const [selectedCaseId, setSelectedCaseId] = useState<string | null>(null);
+  const [detail, setDetail] = useState<CaseDetail | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
 
   useEffect(() => {
     fetchCases()
-      .then((data) => {
-        setCases(data);
-        setError(null);
-      })
-      .catch((err) => {
-        console.error("fetchCases failed:", err);
-        setError(err?.message ?? String(err));
-      })
-      .finally(() => setLoading(false));
+      .then(setCases)
+      .catch((err) => setError(err?.message ?? String(err)));
   }, []);
+
+  useEffect(() => {
+    if (!selectedCaseId) {
+      setDetail(null);
+      setDetailError(null);
+      return;
+    }
+
+    setDetailLoading(true);
+    fetchCaseDetail(selectedCaseId)
+      .then((d) => {
+        setDetail(d);
+        setDetailError(null);
+      })
+      .catch((err) => setDetailError(err?.message ?? String(err)))
+      .finally(() => setDetailLoading(false));
+  }, [selectedCaseId]);
 
   return (
     <main style={{ padding: "1rem", fontFamily: "sans-serif" }}>
       <h1>Dashboard – Station ST01</h1>
 
-      {loading && <p>Lade Daten…</p>}
       {error && <p style={{ color: "red" }}>Fehler: {error}</p>}
 
-      {!loading && !error && (
-        <div style={{ display: "grid", gap: "0.75rem", maxWidth: 600 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 360px", gap: "1rem", alignItems: "start" }}>
+        {/* Left: Cards */}
+        <div style={{ display: "grid", gap: "0.75rem" }}>
           {cases.map((c) => (
-            <div
+            <button
               key={c.case_id}
+              onClick={() => setSelectedCaseId(c.case_id)}
               style={{
+                textAlign: "left",
                 padding: "0.75rem 1rem",
                 borderRadius: 6,
                 background: severityColor(c.severity),
-                border: "1px solid #ddd",
+                border: selectedCaseId === c.case_id ? "2px solid #333" : "1px solid #ddd",
+                cursor: "pointer",
               }}
             >
-              <div style={{ fontWeight: 600 }}>{c.case_id}</div>
+              <div style={{ fontWeight: 700 }}>{c.case_id}</div>
               <div>Status: {c.severity}</div>
-              {c.top_alert && (
-                <div style={{ marginTop: 4, fontSize: "0.9em" }}>
-                  ⚠ {c.top_alert}
-                </div>
-              )}
-            </div>
+              {c.top_alert && <div style={{ marginTop: 4 }}>⚠ {c.top_alert}</div>}
+            </button>
           ))}
         </div>
-      )}
+
+        {/* Right: Detail Panel */}
+        <aside
+          style={{
+            border: "1px solid #ddd",
+            borderRadius: 6,
+            padding: "0.75rem 1rem",
+            background: "#fff",
+            minHeight: 200,
+          }}
+        >
+          {!selectedCaseId && <p>Fall auswählen, um Details zu sehen.</p>}
+
+          {selectedCaseId && detailLoading && <p>Lade Details…</p>}
+
+          {selectedCaseId && detailError && <p style={{ color: "red" }}>Fehler: {detailError}</p>}
+
+          {detail && !detailLoading && !detailError && (
+            <div>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{detail.case_id}</h2>
+                <button onClick={() => setSelectedCaseId(null)}>✕</button>
+              </div>
+
+              <p style={{ marginTop: 8 }}>
+                <strong>Station:</strong> {detail.station_id}
+                <br />
+                <strong>Eintritt:</strong> {detail.admission_date}
+                <br />
+                <strong>HONOS:</strong> {detail.honos ?? "—"}
+                <br />
+                <strong>BSCL:</strong> {detail.bscl ?? "—"}
+                <br />
+                <strong>BFS vollständig:</strong> {detail.bfs_complete ? "Ja" : "Nein"}
+              </p>
+
+              <h3 style={{ marginBottom: 6, fontSize: "1rem" }}>Alerts</h3>
+              {detail.alerts.length === 0 ? (
+                <p>Keine Alerts.</p>
+              ) : (
+                <ul style={{ paddingLeft: 18, marginTop: 0 }}>
+                  {detail.alerts.map((a) => (
+                    <li key={a.rule_id}>
+                      <strong>{a.severity}:</strong> {a.message}
+                      <div style={{ fontSize: "0.9em", opacity: 0.9 }}>{a.explanation}</div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </aside>
+      </div>
     </main>
   );
 }

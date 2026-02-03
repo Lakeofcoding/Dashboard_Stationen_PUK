@@ -1,0 +1,16 @@
+rules:
+  - id: HONOS_HIGH
+    severity: CRITICAL
+    metric: honos
+    operator: ">="
+    value: 30
+    message: "HONOS-Wert kritisch erhöht"
+    explanation: "HONOS ≥ 30 gilt als kritisch (MVP-Regel)."
+
+  - id: BSCL_MISSING
+    severity: WARN
+    metric: bscl
+    operator: is_null
+    value: null
+    message: "BSCL fehlt"
+    explanation: "BSCL wurde noch nicht erfasst (MVP-Regel)."
