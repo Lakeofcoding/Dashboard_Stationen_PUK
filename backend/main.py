@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Literal, Optional
-from datetime import date
+from typing import Any, Literal, Optional
 import yaml
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
+from zoneinfo import ZoneInfo
 
 from app.ack_store import AckStore
 from app.auth import AuthContext, get_auth_context, require_role
@@ -60,6 +60,29 @@ def _startup():
 Severity = Literal["OK", "WARN", "CRITICAL"]
 
 
+def today_local() -> date:
+    """Business date for acknowledgement expiry (Europe/Zurich)."""
+    return datetime.now(ZoneInfo("Europe/Zurich")).date()
+
+
+def _parse_iso_dt(s: str) -> datetime:
+    # Handle trailing Z
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    return datetime.fromisoformat(s)
+
+
+def _acked_today(acked_at_iso: str) -> bool:
+    """Acks are only valid until the next business day."""
+    try:
+        dt = datetime.fromisoformat(acked_at_iso)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return False
+    return dt.astimezone(ZoneInfo("Europe/Zurich")).date() == today_local()
+
+
 class Alert(BaseModel):
     rule_id: str
     severity: Severity
@@ -82,22 +105,23 @@ class CaseSummary(BaseModel):
     severity: Severity
     top_alert: Optional[str] = None
 
+    # For station overview: counts of *active* (non-acked-today) alerts
+    critical_count: int = 0
+    warn_count: int = 0
+
     # case-level ack ("Fall vollständig") – only possible after discharge
     acked_at: Optional[str] = None
 
 
 class CaseDetail(CaseSummary):
-    honos_entry: Optional[int] = None
-    honos_discharge: Optional[int] = None
+    # For UI convenience
+    honos: Optional[int] = None
     bscl: Optional[int] = None
-
-    bfs_1: Optional[int] = None
-    bfs_2: Optional[int] = None
-    bfs_3: Optional[int] = None
+    bfs_complete: bool = False
 
     alerts: list[Alert] = Field(default_factory=list)
 
-    # rule_id -> acked_at (only if ack is valid for current condition_hash)
+    # rule_id -> acked_at (only if ack is valid today + matches condition_hash)
     rule_acks: dict[str, str] = Field(default_factory=dict)
 
 
@@ -221,7 +245,7 @@ DUMMY_CASES = [
     "bfs_1": 7, "bfs_2": 8, "bfs_3": 9,
 
     "isolations": [
-  { "start": "2026-01-10T08:00:00Z", "stop": null }
+  { "start": "2026-01-10T08:00:00Z", "stop": None }
 ]
   },
 
@@ -291,20 +315,119 @@ def enrich_case(c: dict) -> dict:
     station_id = c["station_id"]
     center = STATION_CENTER.get(station_id, "UNKNOWN")
     clinic = c.get("clinic") or CLINIC_DEFAULT
-    discharge_date = c.get("discharge_date")
+    discharge_date: date | None = c.get("discharge_date")
+    today = today_local()
 
-    missing_honos_entry = c.get("honos_entry") is None
-    missing_honos_discharge = discharge_date is not None and c.get("honos_discharge") is None
-    missing_bscl = c.get("bscl") is None
+    # --- BFS
     bfs_incomplete = any(c.get(k) is None for k in ("bfs_1", "bfs_2", "bfs_3"))
+
+    # --- Eintritt: HONOS/BSCL Pflicht; Eskalation nach 3 Tagen
+    honos_entry_total = c.get("honos_entry_total")
+    bscl_entry_total = c.get("bscl_total_entry")
+    days_since_admission = (today - c["admission_date"]).days
+
+    honos_entry_missing_over_3d = honos_entry_total is None and days_since_admission > 3
+    bscl_entry_missing_over_3d = bscl_entry_total is None and days_since_admission > 3
+
+    # --- Austritt: Pflicht im ±3 Tage Fenster; CRITICAL wenn >3 Tage nach Austritt
+    honos_discharge_total = c.get("honos_discharge_total")
+    bscl_discharge_total = c.get("bscl_total_discharge")
+
+    days_from_discharge: int | None = None
+    if discharge_date is not None:
+        days_from_discharge = (today - discharge_date).days
+
+    def _due_missing(total_val) -> bool:
+        if discharge_date is None:
+            return False
+        if total_val is not None:
+            return False
+        if days_from_discharge is None:
+            return False
+        # within +/- 3 days around discharge date
+        return abs(days_from_discharge) <= 3
+
+    honos_discharge_due_missing = _due_missing(honos_discharge_total)
+    bscl_discharge_due_missing = _due_missing(bscl_discharge_total)
+
+    honos_discharge_missing_over_3d_after_discharge = (
+        discharge_date is not None
+        and honos_discharge_total is None
+        and days_from_discharge is not None
+        and days_from_discharge > 3
+    )
+    bscl_discharge_missing_over_3d_after_discharge = (
+        discharge_date is not None
+        and bscl_discharge_total is None
+        and days_from_discharge is not None
+        and days_from_discharge > 3
+    )
+
+    # --- Differenzen
+    honos_delta = None
+    if honos_entry_total is not None and honos_discharge_total is not None:
+        honos_delta = honos_discharge_total - honos_entry_total
+
+    bscl_delta = None
+    if bscl_entry_total is not None and bscl_discharge_total is not None:
+        bscl_delta = bscl_discharge_total - bscl_entry_total
+
+    # --- Suizidalität bei Austritt
+    suicidality_discharge_high = False
+    if discharge_date is not None:
+        h = c.get("honos_discharge_suicidality")
+        b = c.get("bscl_discharge_suicidality")
+        suicidality_discharge_high = (h is not None and h >= 3) or (b is not None and b >= 3)
+
+    # --- Isolation
+    isolations = c.get("isolations") or []
+    isolation_multiple = len(isolations) > 1
+
+    now_utc = datetime.now(timezone.utc)
+    isolation_open_over_48h = False
+    for ep in isolations:
+        start = ep.get("start")
+        stop = ep.get("stop")
+        if not start:
+            continue
+        if stop is not None:
+            continue
+        try:
+            start_dt = _parse_iso_dt(start)
+            if start_dt.tzinfo is None:
+                start_dt = start_dt.replace(tzinfo=timezone.utc)
+            if (now_utc - start_dt.astimezone(timezone.utc)).total_seconds() > 48 * 3600:
+                isolation_open_over_48h = True
+                break
+        except Exception:
+            continue
 
     out = dict(c)
     out["center"] = center
     out["clinic"] = clinic
     out["_derived"] = {
-        "missing_honos_entry": missing_honos_entry,
-        "missing_honos_discharge": missing_honos_discharge,
-        "missing_bscl": missing_bscl,
+        # Eintritt
+        "honos_entry_missing_over_3d": honos_entry_missing_over_3d,
+        "bscl_entry_missing_over_3d": bscl_entry_missing_over_3d,
+
+        # Austritt
+        "honos_discharge_due_missing": honos_discharge_due_missing,
+        "honos_discharge_missing_over_3d_after_discharge": honos_discharge_missing_over_3d_after_discharge,
+        "bscl_discharge_due_missing": bscl_discharge_due_missing,
+        "bscl_discharge_missing_over_3d_after_discharge": bscl_discharge_missing_over_3d_after_discharge,
+
+        # Deltas
+        "honos_delta": honos_delta,
+        "bscl_delta": bscl_delta,
+
+        # Suizidalität
+        "suicidality_discharge_high": suicidality_discharge_high,
+
+        # Isolation
+        "isolation_open_over_48h": isolation_open_over_48h,
+        "isolation_multiple": isolation_multiple,
+
+        # BFS
         "bfs_incomplete": bfs_incomplete,
     }
     return out
@@ -366,6 +489,8 @@ def load_rules() -> dict:
 
 
 def eval_rule(metric_value, operator: str, value) -> bool:
+    if operator == ">":
+        return metric_value is not None and metric_value > value
     if operator == ">=":
         return metric_value is not None and metric_value >= value
     if operator == "is_null":
@@ -413,12 +538,24 @@ def evaluate_alerts(case: dict) -> list[Alert]:
     return alerts
 
 
-def summarize_severity(alerts: list[Alert]) -> tuple[Severity, Optional[str]]:
-    if any(a.severity == "CRITICAL" for a in alerts):
-        return "CRITICAL", next(a.message for a in alerts if a.severity == "CRITICAL")
-    if any(a.severity == "WARN" for a in alerts):
-        return "WARN", next(a.message for a in alerts if a.severity == "WARN")
-    return "OK", None
+def summarize_severity(alerts: list[Alert]) -> tuple[Severity, Optional[str], int, int]:
+    """Returns (severity, top_alert_text, critical_count, warn_count)."""
+    critical = [a for a in alerts if a.severity == "CRITICAL"]
+    warn = [a for a in alerts if a.severity == "WARN"]
+
+    critical_count = len(critical)
+    warn_count = len(warn)
+
+    if critical_count:
+        msg = critical[0].message if critical_count == 1 else f"{critical_count} kritische Alerts"
+        return "CRITICAL", msg, critical_count, warn_count
+
+    if warn_count:
+        # Requirement: if multiple warnings, show count in overview
+        msg = warn[0].message if warn_count == 1 else f"{warn_count} Warnungen"
+        return "WARN", msg, critical_count, warn_count
+
+    return "OK", None, 0, 0
 
 
 # -----------------------------------------------------------------------------
@@ -441,14 +578,39 @@ def list_cases(ctx: AuthContext = Depends(get_auth_context)):
     acks = ack_store.get_acks_for_cases(case_ids, station_id)
 
     case_level_acked_at: dict[str, str] = {}
+    # rule_acks_today[case_id][rule_id] = ack_row
+    rule_acks_today: dict[str, dict[str, Any]] = {}
     for a in acks:
         if a.ack_scope == "case" and a.scope_id == "*":
             case_level_acked_at[a.case_id] = a.acked_at
+            continue
+        if a.ack_scope == "rule" and _acked_today(a.acked_at):
+            rule_acks_today.setdefault(a.case_id, {})[a.scope_id] = a
 
     out: list[CaseSummary] = []
     for c in station_cases:
-        alerts = evaluate_alerts(c)
-        severity, top_alert = summarize_severity(alerts)
+        raw_alerts = evaluate_alerts(c)
+
+        # Suppress rule-acked alerts for the rest of the day (until next business day)
+        visible_alerts: list[Alert] = []
+        for al in raw_alerts:
+            arow = rule_acks_today.get(c["case_id"], {}).get(al.rule_id)
+            if not arow:
+                visible_alerts.append(al)
+                continue
+            if getattr(arow, "condition_hash", None) == al.condition_hash:
+                # acknowledged today -> hide
+                continue
+            # condition changed -> invalidate and show again
+            ack_store.invalidate_rule_ack_if_mismatch(
+                case_id=c["case_id"],
+                station_id=station_id,
+                rule_id=al.rule_id,
+                current_hash=al.condition_hash,
+            )
+            visible_alerts.append(al)
+
+        severity, top_alert, critical_count, warn_count = summarize_severity(visible_alerts)
 
         # fall out if ended AND case-acked
         if c.get("discharge_date") is not None and case_level_acked_at.get(c["case_id"]):
@@ -465,6 +627,8 @@ def list_cases(ctx: AuthContext = Depends(get_auth_context)):
                 discharge_date=c["discharge_date"],
                 severity=severity,
                 top_alert=top_alert,
+                critical_count=critical_count,
+                warn_count=warn_count,
                 acked_at=case_level_acked_at.get(c["case_id"]),
             )
         )
@@ -484,11 +648,9 @@ def get_case(case_id: str, ctx: AuthContext = Depends(get_auth_context)):
     if c["station_id"] != ctx.station_id:
         raise HTTPException(status_code=404, detail="Case not found")
 
-    alerts = evaluate_alerts(c)
-    severity, top_alert = summarize_severity(alerts)
-
+    raw_alerts = evaluate_alerts(c)
     # map current hash for active rules
-    current_hash: dict[str, str] = {a.rule_id: a.condition_hash for a in alerts}
+    current_hash: dict[str, str] = {a.rule_id: a.condition_hash for a in raw_alerts}
 
     acks = ack_store.get_acks_for_cases([case_id], ctx.station_id)
     acked_at: str | None = None
@@ -502,19 +664,24 @@ def get_case(case_id: str, ctx: AuthContext = Depends(get_auth_context)):
         if a.ack_scope == "rule":
             ch = current_hash.get(a.scope_id)
             if not ch:
-                # rule currently not active -> ignore in UI
+                # rule currently not active -> ignore
                 continue
 
-            if a.condition_hash == ch:
+            if _acked_today(a.acked_at) and a.condition_hash == ch:
+                # valid only for today; hides the alert
                 rule_acks[a.scope_id] = a.acked_at
-            else:
-                # invalidate once and write AUTO_REOPEN event
+            elif a.condition_hash != ch:
+                # condition changed -> invalidate once and show again
                 ack_store.invalidate_rule_ack_if_mismatch(
                     case_id=case_id,
                     station_id=ctx.station_id,
                     rule_id=a.scope_id,
                     current_hash=ch,
                 )
+
+    # Suppress alerts that were acknowledged today (rule-level)
+    visible_alerts = [a for a in raw_alerts if a.rule_id not in rule_acks]
+    severity, top_alert, critical_count, warn_count = summarize_severity(visible_alerts)
 
     return CaseDetail(
         case_id=c["case_id"],
@@ -526,14 +693,13 @@ def get_case(case_id: str, ctx: AuthContext = Depends(get_auth_context)):
         discharge_date=c["discharge_date"],
         severity=severity,
         top_alert=top_alert,
+        critical_count=critical_count,
+        warn_count=warn_count,
         acked_at=acked_at,
-        honos_entry=c.get("honos_entry"),
-        honos_discharge=c.get("honos_discharge"),
-        bscl=c.get("bscl"),
-        bfs_1=c.get("bfs_1"),
-        bfs_2=c.get("bfs_2"),
-        bfs_3=c.get("bfs_3"),
-        alerts=alerts,
+        honos=c.get("honos_entry_total"),
+        bscl=c.get("bscl_total_entry"),
+        bfs_complete=not (c.get("_derived") or {}).get("bfs_incomplete", False),
+        alerts=visible_alerts,
         rule_acks=rule_acks,
     )
 

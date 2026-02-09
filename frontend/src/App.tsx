@@ -1,3 +1,14 @@
+import "./index.css"
+import React from "react"
+import ReactDOM from "react-dom/client"
+
+
+ReactDOM.createRoot(document.getElementById("root")!).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+)
+
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CaseSummary, CaseDetail, Severity } from "./types";
 import { Toast } from "./Toast";
@@ -10,6 +21,7 @@ type AuthState = {
   stationId: string;
   userId: string;
   rolesCsv: string; // "VIEW_DASHBOARD,ACK_ALERT"
+  centerId: string;
 };
 
 
@@ -19,6 +31,7 @@ const LS_KEYS = {
   stationId: "dashboard.stationId",
   userId: "dashboard.userId",
   rolesCsv: "dashboard.rolesCsv",
+  centerId: "dashboard.centerId",
 };
 
 function severityColor(severity: Severity): string {
@@ -37,6 +50,7 @@ function loadAuth(): AuthState {
     stationId: localStorage.getItem(LS_KEYS.stationId) ?? "ST01",
     userId: localStorage.getItem(LS_KEYS.userId) ?? "demo",
     rolesCsv: localStorage.getItem(LS_KEYS.rolesCsv) ?? "VIEW_DASHBOARD,ACK_ALERT",
+    centerId: localStorage.getItem(LS_KEYS.centerId) ?? "C1",
   };
 }
 
@@ -44,6 +58,7 @@ function saveAuth(a: AuthState) {
   localStorage.setItem(LS_KEYS.stationId, a.stationId);
   localStorage.setItem(LS_KEYS.userId, a.userId);
   localStorage.setItem(LS_KEYS.rolesCsv, a.rolesCsv);
+  localStorage.setItem(LS_KEYS.centerId, a.centerId);
 }
 
 function parseRoles(csv: string): Set<string> {
@@ -95,6 +110,18 @@ async function ackCase(caseId: string, auth: AuthState): Promise<{ acked_at: str
   });
 }
 
+async function ackRule(
+  caseId: string,
+  ruleId: string,
+  auth: AuthState
+): Promise<{ acked_at: string }> {
+  return apiJson<{ acked_at: string }>("/api/ack", {
+    method: "POST",
+    headers: authHeaders(auth),
+    body: JSON.stringify({ case_id: caseId, ack_scope: "rule", scope_id: ruleId }),
+  });
+}
+
 export default function App() {
   const [auth, setAuth] = useState<AuthState>(() => loadAuth());
   const [stations, setStations] = useState<string[]>(["A1", "B0", "B2"]);
@@ -135,11 +162,11 @@ export default function App() {
 
         // Only show CRITICAL toast if:
         // - there is currently no toast open
-        // - case is CRITICAL and not acked
-        // - toast for that case wasn't shown already
+        // - there is at least 1 visible critical alert
+        // - toast for that case wasn't shown already (session)
         if (!toast) {
           const firstCritical = data.find(
-            (c) => c.severity === "CRITICAL" && !c.acked_at && !shownCriticalRef.current[c.case_id]
+            (c) => (c.critical_count ?? (c.severity === "CRITICAL" ? 1 : 0)) > 0 && !shownCriticalRef.current[c.case_id]
           );
           if (firstCritical) {
             setToast({
@@ -356,11 +383,15 @@ export default function App() {
             >
               <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
                 <div style={{ fontWeight: 700 }}>{c.case_id}</div>
-                {c.acked_at ? (
-                  <span style={{ fontSize: 12, opacity: 0.85 }}>✓ quittiert</span>
-                ) : c.severity === "CRITICAL" ? (
-                  <span style={{ fontSize: 12, opacity: 0.85 }}>‼ kritisch</span>
-                ) : null}
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  {!!(c.critical_count && c.critical_count > 0) && (
+                    <span style={{ fontSize: 12, opacity: 0.85 }}>‼ {c.critical_count}</span>
+                  )}
+                  {!!(c.warn_count && c.warn_count > 0) && (
+                    <span style={{ fontSize: 12, opacity: 0.85 }}>⚠ {c.warn_count}</span>
+                  )}
+                  {c.acked_at ? <span style={{ fontSize: 12, opacity: 0.85 }}>✓ quittiert</span> : null}
+                </div>
               </div>
 
               <div>Status: {c.severity}</div>
@@ -455,9 +486,47 @@ export default function App() {
                 <ul style={{ paddingLeft: 18, marginTop: 0 }}>
                   {detail.alerts.map((a) => (
                     <li key={a.rule_id} style={{ marginBottom: 10 }}>
-                      <strong>{a.severity}:</strong> {a.message}
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                        <div>
+                          <strong>{a.severity}:</strong> {a.message}
+                        </div>
+                        <button
+                          disabled={!canAck}
+                          onClick={async () => {
+                            if (!canAck) return;
+                            try {
+                              await ackRule(detail.case_id, a.rule_id, auth);
+                              // Refresh both list + detail so the alert disappears immediately
+                              const [newList, newDetail] = await Promise.all([
+                                fetchCases(auth),
+                                fetchCaseDetail(detail.case_id, auth),
+                              ]);
+                              setCases(newList);
+                              setDetail(newDetail);
+                              // clear toast if it refers to this case and no critical remains
+                              setToast((t) => {
+                                if (!t || t.caseId !== detail.case_id) return t;
+                                const updated = newList.find((x) => x.case_id === detail.case_id);
+                                if (!updated || (updated.critical_count ?? 0) === 0) return null;
+                                return t;
+                              });
+                            } catch (e: any) {
+                              setError(e?.message ?? String(e));
+                            }
+                          }}
+                          style={{
+                            padding: "6px 10px",
+                            borderRadius: 10,
+                            border: "1px solid #333",
+                            background: canAck ? "#fff" : "#eee",
+                            cursor: canAck ? "pointer" : "not-allowed",
+                          }}
+                          title={canAck ? "Alert quittieren (bis morgen ausgeblendet)" : "Keine Berechtigung"}
+                        >
+                          Quittieren
+                        </button>
+                      </div>
                       <div style={{ fontSize: "0.9em", opacity: 0.9 }}>{a.explanation}</div>
-                      {/* Rule-level ack could go here later (ack_scope="rule", scope_id=a.rule_id) */}
                     </li>
                   ))}
                 </ul>
@@ -493,4 +562,122 @@ export default function App() {
           </div>
     </main>
   );
-}
+const clinic = "Psychiatrische Universitätsklinik Zürich";
+  const center = auth.centerId ?? "—";   // falls noch nicht vorhanden, sonst Placeholder
+  const ward   = auth.stationId;
+
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-900">
+      {/* Topbar */}
+      <header className="border-b border-slate-200 bg-white">
+        <div className="mx-auto max-w-7xl px-6 py-5">
+          <div className="flex flex-col gap-1">
+            <div className="text-xl font-semibold tracking-tight">{clinic}</div>
+            <div className="text-sm text-slate-600">Dashboard Stationsmonitoring</div>
+          </div>
+
+          {/* Kontextzeile */}
+          <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 text-sm text-slate-700">
+            <span className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-3 py-1">
+              Klinik: <span className="ml-1 font-medium">PUK</span>
+            </span>
+            <span className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-3 py-1">
+              Zentrum: <span className="ml-1 font-medium">{center}</span>
+            </span>
+            <span className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-3 py-1">
+              Station: <span className="ml-1 font-medium">{ward}</span>
+            </span>
+
+            <span className="ml-auto text-xs text-slate-500">
+              User: <code className="rounded bg-slate-100 px-1 py-0.5">{auth.userId}</code>
+              {" · "}
+              Rollen: <code className="rounded bg-slate-100 px-1 py-0.5">{auth.rolesCsv || "—"}</code>
+            </span>
+          </div>
+        </div>
+      </header>
+
+      {/* Main */}
+      <main className="mx-auto max-w-7xl px-6 py-6">
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_420px]">
+          {/* Left: Fälle */}
+          <section className="space-y-3">
+            {/* optional toolbar */}
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                className="w-full max-w-lg rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-slate-300"
+                placeholder="Suche Fall-ID…"
+                // value/onChange falls ihr sucht
+              />
+              <button className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm hover:bg-slate-50">
+                Aktualisieren
+              </button>
+            </div>
+
+            <div className="space-y-2">
+              {cases.map((c) => (
+                <button
+                  key={c.case_id}
+                  onClick={() => setSelectedCaseId(c.case_id)}
+                  className={[
+                    "w-full rounded-2xl border bg-white p-4 text-left shadow-sm transition",
+                    "border-slate-200 hover:bg-slate-50",
+                    selectedCaseId === c.case_id ? "ring-2 ring-slate-300" : "",
+                    c.acked_at ? "opacity-70" : "",
+                  ].join(" ")}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold">{c.case_id}</div>
+                      <div className="mt-1 text-xs text-slate-600">
+                        Status: <span className="font-medium">{c.severity}</span>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 text-xs text-slate-700">
+                      {(c.critical_count ?? 0) > 0 && (
+                        <span className="rounded-full bg-red-50 px-2 py-1 text-red-700 ring-1 ring-red-100">
+                          ‼ {c.critical_count}
+                        </span>
+                      )}
+                      {(c.warn_count ?? 0) > 0 && (
+                        <span className="rounded-full bg-amber-50 px-2 py-1 text-amber-800 ring-1 ring-amber-100">
+                          ⚠ {c.warn_count}
+                        </span>
+                      )}
+                      {c.acked_at && (
+                        <span className="rounded-full bg-emerald-50 px-2 py-1 text-emerald-800 ring-1 ring-emerald-100">
+                          ✓ quittiert
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {c.top_alert && (
+                    <div className="mt-3 text-sm text-slate-700">
+                      <span className="font-medium">Hinweis:</span> {c.top_alert}
+                    </div>
+                  )}
+                </button>
+              ))}
+
+              {cases.length === 0 && !error && (
+                <div className="rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-600">
+                  Keine Fälle für diese Station.
+                </div>
+              )}
+            </div>
+          </section>
+
+          {/* Right: Detail */}
+          <aside className="lg:sticky lg:top-6">
+            <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+              {/* …dein Detail-Rendering, nur Klassen statt Inline-Style */}
+            </div>
+          </aside>
+        </div>
+      </main>
+    </div>
+  );
+}  
+

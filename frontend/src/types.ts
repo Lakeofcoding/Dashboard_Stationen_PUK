@@ -5,6 +5,7 @@ export interface Alert {
   severity: Severity;
   message: string;
   explanation: string;
+  condition_hash?: string;
 }
 
 export interface CaseSummary {
@@ -14,6 +15,8 @@ export interface CaseSummary {
   discharge_date: string | null;
   severity: Severity;
   top_alert?: string | null;
+  critical_count?: number;
+  warn_count?: number;
   acked_at?: string | null;
 }
 
