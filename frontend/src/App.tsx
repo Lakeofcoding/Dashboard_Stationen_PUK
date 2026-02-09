@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { CaseSummary, CaseDetail, Severity } from "./types";
+import type { CaseSummary, CaseDetail, Severity, Alert } from "./types";
 import { Toast } from "./Toast";
 
 type ToastState =
@@ -92,6 +92,14 @@ async function ackCase(caseId: string, auth: AuthState): Promise<{ acked_at: str
   });
 }
 
+async function ackRule(caseId: string, ruleId: string, auth: AuthState): Promise<{ acked_at: string }> {
+  return apiJson<{ acked_at: string }>("/api/ack", {
+    method: "POST",
+    headers: authHeaders(auth),
+    body: JSON.stringify({ case_id: caseId, ack_scope: "rule", scope_id: ruleId }),
+  });
+}
+
 export default function App() {
   const [auth, setAuth] = useState<AuthState>(() => loadAuth());
   const roles = useMemo(() => parseRoles(auth.rolesCsv), [auth.rolesCsv]);
@@ -166,7 +174,9 @@ export default function App() {
     setDetailLoading(true);
     fetchCaseDetail(selectedCaseId, auth)
       .then((d) => {
-        setDetail(d);
+        // Backend may omit rule_acks in early versions; normalize for UI.
+        const normalized = { ...d, rule_acks: d.rule_acks ?? {} };
+        setDetail(normalized);
         setDetailError(null);
       })
       .catch((err) => setDetailError(err?.message ?? String(err)))
@@ -367,13 +377,51 @@ export default function App() {
                 <p>Keine Alerts.</p>
               ) : (
                 <ul style={{ paddingLeft: 18, marginTop: 0 }}>
-                  {detail.alerts.map((a) => (
-                    <li key={a.rule_id} style={{ marginBottom: 10 }}>
-                      <strong>{a.severity}:</strong> {a.message}
-                      <div style={{ fontSize: "0.9em", opacity: 0.9 }}>{a.explanation}</div>
-                      {/* Rule-level ack could go here later (ack_scope="rule", scope_id=a.rule_id) */}
-                    </li>
-                  ))}
+                  {detail.alerts.map((a: Alert) => {
+                    const ruleAckedAt = detail.rule_acks?.[a.rule_id];
+                    return (
+                      <li key={a.rule_id} style={{ marginBottom: 10 }}>
+                        <strong>{a.severity}:</strong> {a.message}
+                        <div style={{ fontSize: "0.9em", opacity: 0.9 }}>{a.explanation}</div>
+
+                        <div style={{ marginTop: 6, display: "flex", gap: 10, alignItems: "center" }}>
+                          <span style={{ fontSize: 12, opacity: 0.8 }}>
+                            {ruleAckedAt ? `✓ Regel quittiert (${ruleAckedAt})` : "Regel nicht quittiert"}
+                          </span>
+
+                          {!ruleAckedAt && (
+                            <button
+                              disabled={!canAck}
+                              onClick={async () => {
+                                if (!canAck) return;
+                                try {
+                                  const res = await ackRule(detail.case_id, a.rule_id, auth);
+                                  setDetail({
+                                    ...detail,
+                                    rule_acks: { ...(detail.rule_acks ?? {}), [a.rule_id]: res.acked_at },
+                                  });
+                                } catch (e: any) {
+                                  setError(e?.message ?? String(e));
+                                }
+                              }}
+                              style={{
+                                padding: "6px 10px",
+                                borderRadius: 6,
+                                border: "1px solid #333",
+                                background: canAck ? "#333" : "#999",
+                                color: "white",
+                                fontWeight: 600,
+                                cursor: canAck ? "pointer" : "not-allowed",
+                              }}
+                              title={canAck ? "Diese Regel quittieren" : "Keine Berechtigung (ACK_ALERT fehlt)"}
+                            >
+                              Regel quittieren
+                            </button>
+                          )}
+                        </div>
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </div>

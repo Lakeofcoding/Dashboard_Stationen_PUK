@@ -1,15 +1,5 @@
 export type Severity = "OK" | "WARN" | "CRITICAL";
 
-export interface CaseSummary {
-  case_id: string;
-  station_id: string;
-  admission_date: string;
-  discharge_date: string | null;
-  severity: Severity;
-  top_alert: string | null;
-  acked_at: string | null; // <-- wichtig
-}
-
 export interface Alert {
   rule_id: string;
   severity: Severity;
@@ -17,9 +7,20 @@ export interface Alert {
   explanation: string;
 }
 
+export interface CaseSummary {
+  case_id: string;
+  station_id: string;
+  admission_date: string;
+  discharge_date: string | null;
+  severity: Severity;
+  top_alert?: string | null;
+  acked_at?: string | null;
+}
+
 export interface CaseDetail extends CaseSummary {
-  honos: number | null;
-  bscl: number | null;
+  honos?: number | null;
+  bscl?: number | null;
   bfs_complete: boolean;
   alerts: Alert[];
+  rule_acks: Record<string, string>; // rule_id -> acked_at
 }
