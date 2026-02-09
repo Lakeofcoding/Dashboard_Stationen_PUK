@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { CaseSummary, CaseDetail, Severity, Alert } from "./types";
+import type { CaseSummary, CaseDetail, Severity } from "./types";
 import { Toast } from "./Toast";
 
 type ToastState =
@@ -11,6 +11,9 @@ type AuthState = {
   userId: string;
   rolesCsv: string; // "VIEW_DASHBOARD,ACK_ALERT"
 };
+
+
+type MetaUser = { user_id: string; roles: string[] };
 
 const LS_KEYS = {
   stationId: "dashboard.stationId",
@@ -92,16 +95,17 @@ async function ackCase(caseId: string, auth: AuthState): Promise<{ acked_at: str
   });
 }
 
-async function ackRule(caseId: string, ruleId: string, auth: AuthState): Promise<{ acked_at: string }> {
-  return apiJson<{ acked_at: string }>("/api/ack", {
-    method: "POST",
-    headers: authHeaders(auth),
-    body: JSON.stringify({ case_id: caseId, ack_scope: "rule", scope_id: ruleId }),
-  });
-}
-
 export default function App() {
   const [auth, setAuth] = useState<AuthState>(() => loadAuth());
+  const [stations, setStations] = useState<string[]>(["A1", "B0", "B2"]);
+  const [metaUsers, setMetaUsers] = useState<MetaUser[]>([
+    { user_id: "demo", roles: ["VIEW_DASHBOARD", "ACK_ALERT"] },
+    { user_id: "pflege1", roles: ["VIEW_DASHBOARD"] },
+    { user_id: "arzt1", roles: ["VIEW_DASHBOARD", "ACK_ALERT"] },
+    { user_id: "manager1", roles: ["VIEW_DASHBOARD", "ACK_ALERT"] },
+  ]);
+  const [metaError, setMetaError] = useState<string | null>(null);
+
   const roles = useMemo(() => parseRoles(auth.rolesCsv), [auth.rolesCsv]);
   const canAck = roles.has("ACK_ALERT");
 
@@ -174,9 +178,7 @@ export default function App() {
     setDetailLoading(true);
     fetchCaseDetail(selectedCaseId, auth)
       .then((d) => {
-        // Backend may omit rule_acks in early versions; normalize for UI.
-        const normalized = { ...d, rule_acks: d.rule_acks ?? {} };
-        setDetail(normalized);
+        setDetail(d);
         setDetailError(null);
       })
       .catch((err) => setDetailError(err?.message ?? String(err)))
@@ -200,8 +202,76 @@ export default function App() {
     saveAuth(next);
   }
 
+  // Load station/user choices from backend (prototyp) so you don't need to know valid IDs.
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const st = await fetch("/api/meta/stations").then(r => r.ok ? r.json() : Promise.reject(new Error("meta/stations")));
+        if (alive && Array.isArray(st?.stations) && st.stations.length) {
+          setStations(st.stations);
+          if (!st.stations.includes(auth.stationId)) {
+            updateAuth({ stationId: st.stations[0] });
+          }
+        }
+      } catch (e: any) {
+        // keep defaults
+      }
+
+      try {
+        const us = await fetch("/api/meta/users").then(r => r.ok ? r.json() : Promise.reject(new Error("meta/users")));
+        if (alive && Array.isArray(us?.users) && us.users.length) {
+          setMetaUsers(us.users);
+          const u = us.users.find((x: MetaUser) => x.user_id === auth.userId) ?? us.users[0];
+          if (u) {
+            updateAuth({ userId: u.user_id, rolesCsv: (u.roles ?? []).join(",") });
+          }
+        }
+      } catch (e: any) {
+        if (!alive) return;
+        setMetaError("Meta-Endpoints nicht erreichbar (Fallback aktiv).");
+      }
+    })();
+
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // When user changes, derive roles automatically from meta list (no free-text roles).
+  useEffect(() => {
+    const u = metaUsers.find((x) => x.user_id === auth.userId);
+    if (u) {
+      const next = (u.roles ?? []).join(",");
+      if (next && next !== auth.rolesCsv) updateAuth({ rolesCsv: next });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [auth.userId, metaUsers]);
+
+  function splitRoles(rolesCsv: string): string[] {
+    return rolesCsv
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
   return (
-    <main style={{ padding: "1rem", fontFamily: "sans-serif" }}>
+    <main style={{ padding: "1rem", fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial" }}>
+      <style>{`
+        :root{ --app-bg:#f6f7fb; --card:#ffffff; --border:#e6e8ef; --text:#0f172a; --muted:#64748b; --shadow:0 6px 20px rgba(15,23,42,.06); }
+        body{ background:var(--app-bg); color:var(--text); }
+        .wrap{ max-width:1200px; margin:0 auto; }
+        .panel{ background:var(--card); border:1px solid var(--border); border-radius:14px; box-shadow:var(--shadow); }
+        .gridMain{ display:grid; grid-template-columns: 1.1fr 0.9fr; gap:16px; align-items:start; }
+        @media (max-width: 980px){ .gridMain{ grid-template-columns: 1fr; } }
+        .toolbar{ display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+        .search{ padding:10px 12px; border-radius:12px; border:1px solid var(--border); width: min(520px, 100%); background:#fff; }
+        .btn{ padding:8px 12px; border-radius:12px; border:1px solid var(--border); background:#fff; cursor:pointer; }
+        .btn:disabled{ opacity:.5; cursor:not-allowed; }
+      `}</style>
+      <div className="wrap">
+
       <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 16 }}>
         <div>
           <h1 style={{ margin: 0 }}>Dashboard – Station {auth.stationId}</h1>
@@ -210,41 +280,47 @@ export default function App() {
           </div>
         </div>
 
-        <details style={{ border: "1px solid #ddd", borderRadius: 6, padding: "0.5rem 0.75rem" }}>
-          <summary style={{ cursor: "pointer" }}>Kontext (Prototyp)</summary>
-          <div style={{ marginTop: 8, display: "grid", gap: 8, minWidth: 320 }}>
-            <label style={{ display: "grid", gap: 4 }}>
-              <span style={{ fontSize: 12, opacity: 0.8 }}>Station-ID</span>
-              <input
+        <details style={{ border: "1px solid #ddd", borderRadius: 10, padding: "0.6rem 0.9rem", background: "#fff" }}>
+          <summary style={{ cursor: "pointer", fontWeight: 600 }}>Kontext (Prototyp)</summary>
+          <div style={{ marginTop: 10, display: "grid", gap: 10, minWidth: 320 }}>
+            <div style={{ display: "grid", gap: 6 }}>
+              <span style={{ fontSize: 12, opacity: 0.75 }}>Station</span>
+              <select
                 value={auth.stationId}
-                onChange={(e) => updateAuth({ stationId: e.target.value.trim() || "ST01" })}
-                style={{ padding: 6, borderRadius: 6, border: "1px solid #ccc" }}
-                placeholder="ST01"
-              />
-            </label>
+                onChange={(e) => updateAuth({ stationId: e.target.value })}
+                style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc", background: "#fff" }}
+              >
+                {stations.map((s) => (
+                  <option key={s} value={s}>{s}</option>
+                ))}
+              </select>
+            </div>
 
-            <label style={{ display: "grid", gap: 4 }}>
-              <span style={{ fontSize: 12, opacity: 0.8 }}>User-ID</span>
-              <input
+            <div style={{ display: "grid", gap: 6 }}>
+              <span style={{ fontSize: 12, opacity: 0.75 }}>User</span>
+              <select
                 value={auth.userId}
-                onChange={(e) => updateAuth({ userId: e.target.value.trim() || "demo" })}
-                style={{ padding: 6, borderRadius: 6, border: "1px solid #ccc" }}
-                placeholder="demo"
-              />
-            </label>
+                onChange={(e) => updateAuth({ userId: e.target.value })}
+                style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc", background: "#fff" }}
+              >
+                {metaUsers.map((u) => (
+                  <option key={u.user_id} value={u.user_id}>{u.user_id}</option>
+                ))}
+              </select>
+            </div>
 
-            <label style={{ display: "grid", gap: 4 }}>
-              <span style={{ fontSize: 12, opacity: 0.8 }}>Rollen (CSV)</span>
-              <input
-                value={auth.rolesCsv}
-                onChange={(e) => updateAuth({ rolesCsv: e.target.value })}
-                style={{ padding: 6, borderRadius: 6, border: "1px solid #ccc" }}
-                placeholder="VIEW_DASHBOARD,ACK_ALERT"
-              />
-            </label>
-
-            <div style={{ fontSize: 12, opacity: 0.8 }}>
-              Ack möglich: <strong>{canAck ? "Ja" : "Nein"}</strong> (Role <code>ACK_ALERT</code>)
+            <div style={{ display: "grid", gap: 6 }}>
+              <span style={{ fontSize: 12, opacity: 0.75 }}>Rollen</span>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {splitRoles(auth.rolesCsv).map((r) => (
+                  <span key={r} style={{ fontSize: 12, padding: "2px 8px", borderRadius: 999, border: "1px solid #ddd", background: "#fafafa" }}>
+                    {r}
+                  </span>
+                ))}
+              </div>
+              <div style={{ fontSize: 12, opacity: 0.65 }}>
+                Rollen werden aus dem User abgeleitet (kein Freitext). {metaError ? `(${metaError})` : ""}
+              </div>
             </div>
           </div>
         </details>
@@ -377,51 +453,13 @@ export default function App() {
                 <p>Keine Alerts.</p>
               ) : (
                 <ul style={{ paddingLeft: 18, marginTop: 0 }}>
-                  {detail.alerts.map((a: Alert) => {
-                    const ruleAckedAt = detail.rule_acks?.[a.rule_id];
-                    return (
-                      <li key={a.rule_id} style={{ marginBottom: 10 }}>
-                        <strong>{a.severity}:</strong> {a.message}
-                        <div style={{ fontSize: "0.9em", opacity: 0.9 }}>{a.explanation}</div>
-
-                        <div style={{ marginTop: 6, display: "flex", gap: 10, alignItems: "center" }}>
-                          <span style={{ fontSize: 12, opacity: 0.8 }}>
-                            {ruleAckedAt ? `✓ Regel quittiert (${ruleAckedAt})` : "Regel nicht quittiert"}
-                          </span>
-
-                          {!ruleAckedAt && (
-                            <button
-                              disabled={!canAck}
-                              onClick={async () => {
-                                if (!canAck) return;
-                                try {
-                                  const res = await ackRule(detail.case_id, a.rule_id, auth);
-                                  setDetail({
-                                    ...detail,
-                                    rule_acks: { ...(detail.rule_acks ?? {}), [a.rule_id]: res.acked_at },
-                                  });
-                                } catch (e: any) {
-                                  setError(e?.message ?? String(e));
-                                }
-                              }}
-                              style={{
-                                padding: "6px 10px",
-                                borderRadius: 6,
-                                border: "1px solid #333",
-                                background: canAck ? "#333" : "#999",
-                                color: "white",
-                                fontWeight: 600,
-                                cursor: canAck ? "pointer" : "not-allowed",
-                              }}
-                              title={canAck ? "Diese Regel quittieren" : "Keine Berechtigung (ACK_ALERT fehlt)"}
-                            >
-                              Regel quittieren
-                            </button>
-                          )}
-                        </div>
-                      </li>
-                    );
-                  })}
+                  {detail.alerts.map((a) => (
+                    <li key={a.rule_id} style={{ marginBottom: 10 }}>
+                      <strong>{a.severity}:</strong> {a.message}
+                      <div style={{ fontSize: "0.9em", opacity: 0.9 }}>{a.explanation}</div>
+                      {/* Rule-level ack could go here later (ack_scope="rule", scope_id=a.rule_id) */}
+                    </li>
+                  ))}
                 </ul>
               )}
             </div>
@@ -452,6 +490,7 @@ export default function App() {
           onClose={() => setToast(null)}
         />
       )}
+          </div>
     </main>
   );
 }

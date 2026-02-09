@@ -1,22 +1,50 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import date
 from pathlib import Path
 from typing import Literal, Optional
 
 import yaml
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from app.db import init_db
-from app.auth import AuthContext, get_auth_context, require_role
 from app.ack_store import AckStore
+from app.auth import AuthContext, get_auth_context, require_role
+from app.db import init_db
+
+# -----------------------------------------------------------------------------
+# Helpers: condition hash
+# -----------------------------------------------------------------------------
+
+def compute_condition_hash(
+    *,
+    rule_id: str,
+    metric: str,
+    operator: str,
+    expected,
+    actual,
+    discharge_date: date | None,
+) -> str:
+    payload = {
+        "rule_id": rule_id,
+        "metric": metric,
+        "operator": operator,
+        "expected": expected,
+        "actual": actual,
+        "discharge_date": discharge_date.isoformat() if discharge_date else None,
+        "ruleset_version": "v1",
+    }
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
 
 # -----------------------------------------------------------------------------
 # App setup
 # -----------------------------------------------------------------------------
 
-app = FastAPI(title="Dashboard Backend (MVP)", version="0.2.0")
+app = FastAPI(title="Dashboard Backend (MVP)", version="0.3.0", debug=True)
 ack_store = AckStore()
 
 
@@ -37,6 +65,7 @@ class Alert(BaseModel):
     severity: Severity
     message: str
     explanation: str
+    condition_hash: str
 
 
 class CaseSummary(BaseModel):
@@ -53,7 +82,7 @@ class CaseSummary(BaseModel):
     severity: Severity
     top_alert: Optional[str] = None
 
-    # case-level ack ("Fall vollständig") – only possible after discharge/transfer
+    # case-level ack ("Fall vollständig") – only possible after discharge
     acked_at: Optional[str] = None
 
 
@@ -68,25 +97,22 @@ class CaseDetail(CaseSummary):
 
     alerts: list[Alert] = Field(default_factory=list)
 
-    # rule_id -> acked_at (only for rules that were acked under the same condition)
+    # rule_id -> acked_at (only if ack is valid for current condition_hash)
     rule_acks: dict[str, str] = Field(default_factory=dict)
 
 
 # -----------------------------------------------------------------------------
-# Dummy data (replace later with DB / KIS / KISIM)
+# Dummy data (your schema)
 # -----------------------------------------------------------------------------
 
-# Station -> Center mapping (per your spec)
 STATION_CENTER = {
     "A1": "ZAPE",
     "B0": "ZDAP",
     "B2": "ZDAP",
 }
-
 CLINIC_DEFAULT = "EPP"
 
 DUMMY_CASES: list[dict] = [
-    # A: active, HONOS entry missing (critical)
     {
         "case_id": "4645342",
         "patient_id": "4534234",
@@ -101,7 +127,6 @@ DUMMY_CASES: list[dict] = [
         "bfs_2": None,
         "bfs_3": None,
     },
-    # B: active, HONOS entry ok, BFS incomplete (warn)
     {
         "case_id": "4645343",
         "patient_id": "4534235",
@@ -116,7 +141,6 @@ DUMMY_CASES: list[dict] = [
         "bfs_2": None,
         "bfs_3": None,
     },
-    # C: discharged, discharge HONOS missing (critical)
     {
         "case_id": "4645344",
         "patient_id": "4534236",
@@ -131,7 +155,6 @@ DUMMY_CASES: list[dict] = [
         "bfs_2": 9,
         "bfs_3": 8,
     },
-    # D: discharged, fully complete (eligible for case-ack and then fall out)
     {
         "case_id": "4645345",
         "patient_id": "4534237",
@@ -150,30 +173,26 @@ DUMMY_CASES: list[dict] = [
 
 
 def enrich_case(c: dict) -> dict:
-    """Add derived fields (center) and derived metrics for rule evaluation."""
     station_id = c["station_id"]
     center = STATION_CENTER.get(station_id, "UNKNOWN")
     clinic = c.get("clinic") or CLINIC_DEFAULT
-
     discharge_date = c.get("discharge_date")
 
-    # Derived booleans for rules (keeps rule engine simple)
     missing_honos_entry = c.get("honos_entry") is None
     missing_honos_discharge = discharge_date is not None and c.get("honos_discharge") is None
     missing_bscl = c.get("bscl") is None
     bfs_incomplete = any(c.get(k) is None for k in ("bfs_1", "bfs_2", "bfs_3"))
 
-    enriched = dict(c)
-    enriched["center"] = center
-    enriched["clinic"] = clinic
-
-    enriched["_derived"] = {
+    out = dict(c)
+    out["center"] = center
+    out["clinic"] = clinic
+    out["_derived"] = {
         "missing_honos_entry": missing_honos_entry,
         "missing_honos_discharge": missing_honos_discharge,
         "missing_bscl": missing_bscl,
         "bfs_incomplete": bfs_incomplete,
     }
-    return enriched
+    return out
 
 
 # -----------------------------------------------------------------------------
@@ -188,7 +207,7 @@ def load_rules() -> dict:
         with RULES_PATH.open("r", encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
 
-    # Fallback rules matching your new dummy schema.
+    # fallback rules
     return {
         "rules": [
             {
@@ -245,28 +264,35 @@ def eval_rule(metric_value, operator: str, value) -> bool:
 
 def evaluate_alerts(case: dict) -> list[Alert]:
     rules = load_rules()
+    derived = case.get("_derived") or {}
+
     alerts: list[Alert] = []
-
-    derived = (case.get("_derived") or {})
-
     for r in rules.get("rules", []):
         metric = r.get("metric")
         operator = r.get("operator")
-        value = r.get("value")
+        expected = r.get("value")
 
-        if metric is None or operator is None:
+        if not metric or not operator:
             continue
 
-        # Resolve metric: prefer derived flags, otherwise real fields.
-        metric_value = derived.get(metric, case.get(metric))
+        actual = derived.get(metric, case.get(metric))
 
-        if eval_rule(metric_value, operator, value):
+        if eval_rule(actual, operator, expected):
+            ch = compute_condition_hash(
+                rule_id=r["id"],
+                metric=metric,
+                operator=operator,
+                expected=expected,
+                actual=actual,
+                discharge_date=case.get("discharge_date"),
+            )
             alerts.append(
                 Alert(
                     rule_id=r["id"],
                     severity=r["severity"],
                     message=r["message"],
                     explanation=r["explanation"],
+                    condition_hash=ch,
                 )
             )
     return alerts
@@ -293,14 +319,10 @@ def health():
 def list_cases(ctx: AuthContext = Depends(get_auth_context)):
     require_role(ctx, "VIEW_DASHBOARD")
 
-    # Station is derived from auth context (later SSO/KISIM).
     station_id = ctx.station_id
-
-    # Enrich + filter by station
     station_cases = [enrich_case(c) for c in DUMMY_CASES if c["station_id"] == station_id]
     case_ids = [c["case_id"] for c in station_cases]
 
-    # Load all acks for this station (case + rules)
     acks = ack_store.get_acks_for_cases(case_ids, station_id)
 
     case_level_acked_at: dict[str, str] = {}
@@ -308,16 +330,16 @@ def list_cases(ctx: AuthContext = Depends(get_auth_context)):
         if a.ack_scope == "case" and a.scope_id == "*":
             case_level_acked_at[a.case_id] = a.acked_at
 
-    results: list[CaseSummary] = []
+    out: list[CaseSummary] = []
     for c in station_cases:
         alerts = evaluate_alerts(c)
         severity, top_alert = summarize_severity(alerts)
 
-        # If case is case-acked, it should fall out of the dashboard list.
+        # fall out if ended AND case-acked
         if c.get("discharge_date") is not None and case_level_acked_at.get(c["case_id"]):
             continue
 
-        results.append(
+        out.append(
             CaseSummary(
                 case_id=c["case_id"],
                 patient_id=c["patient_id"],
@@ -332,35 +354,52 @@ def list_cases(ctx: AuthContext = Depends(get_auth_context)):
             )
         )
 
-    return results
+    return out
 
 
 @app.get("/api/cases/{case_id}", response_model=CaseDetail)
 def get_case(case_id: str, ctx: AuthContext = Depends(get_auth_context)):
     require_role(ctx, "VIEW_DASHBOARD")
 
-    c0 = next((x for x in DUMMY_CASES if x["case_id"] == case_id), None)
-    if c0 is None:
+    raw = next((x for x in DUMMY_CASES if x["case_id"] == case_id), None)
+    if raw is None:
         raise HTTPException(status_code=404, detail="Case not found")
 
-    c = enrich_case(c0)
-
+    c = enrich_case(raw)
     if c["station_id"] != ctx.station_id:
-        # do not leak other stations
         raise HTTPException(status_code=404, detail="Case not found")
 
     alerts = evaluate_alerts(c)
     severity, top_alert = summarize_severity(alerts)
 
+    # map current hash for active rules
+    current_hash: dict[str, str] = {a.rule_id: a.condition_hash for a in alerts}
+
     acks = ack_store.get_acks_for_cases([case_id], ctx.station_id)
-    acked_at = None
+    acked_at: str | None = None
     rule_acks: dict[str, str] = {}
 
     for a in acks:
         if a.ack_scope == "case" and a.scope_id == "*":
             acked_at = a.acked_at
-        elif a.ack_scope == "rule":
-            rule_acks[a.scope_id] = a.acked_at
+            continue
+
+        if a.ack_scope == "rule":
+            ch = current_hash.get(a.scope_id)
+            if not ch:
+                # rule currently not active -> ignore in UI
+                continue
+
+            if a.condition_hash == ch:
+                rule_acks[a.scope_id] = a.acked_at
+            else:
+                # invalidate once and write AUTO_REOPEN event
+                ack_store.invalidate_rule_ack_if_mismatch(
+                    case_id=case_id,
+                    station_id=ctx.station_id,
+                    rule_id=a.scope_id,
+                    current_hash=ch,
+                )
 
     return CaseDetail(
         case_id=c["case_id"],
@@ -398,11 +437,10 @@ def debug_rules():
 @app.get("/api/debug/eval/{case_id}")
 def debug_eval(case_id: str, ctx: AuthContext = Depends(get_auth_context)):
     require_role(ctx, "VIEW_DASHBOARD")
-    c0 = next((x for x in DUMMY_CASES if x["case_id"] == case_id), None)
-    if c0 is None:
+    raw = next((x for x in DUMMY_CASES if x["case_id"] == case_id), None)
+    if raw is None:
         raise HTTPException(status_code=404, detail="Case not found")
-
-    c = enrich_case(c0)
+    c = enrich_case(raw)
     alerts = evaluate_alerts(c)
     return {
         "case_id": case_id,
@@ -412,6 +450,42 @@ def debug_eval(case_id: str, ctx: AuthContext = Depends(get_auth_context)):
     }
 
 
+@app.get("/api/debug/ack-events")
+def debug_ack_events(ctx: AuthContext = Depends(get_auth_context), case_id: str | None = None):
+    require_role(ctx, "VIEW_DASHBOARD")
+    events = ack_store.list_events(station_id=ctx.station_id, case_id=case_id, limit=200)
+    return [
+        {
+            "ts": e.ts,
+            "case_id": e.case_id,
+            "station_id": e.station_id,
+            "ack_scope": e.ack_scope,
+            "scope_id": e.scope_id,
+            "event_type": e.event_type,
+            "user_id": e.user_id,
+            "payload": e.payload,
+        }
+        for e in events
+    ]
+
+@app.get("/api/meta/stations")
+def meta_stations(ctx: AuthContext = Depends(get_auth_context)):
+    # Für Prototyp: aus Dummy-Cases ableiten
+    stations = sorted({c["station_id"] for c in DUMMY_CASES})
+    return {"stations": stations}
+
+@app.get("/api/meta/users")
+def meta_users(ctx: AuthContext = Depends(get_auth_context)):
+    # Prototyp: fixe Demo-User; später: aus SSO/KISIM
+    return {
+        "users": [
+            {"user_id": "demo", "roles": ["VIEW_DASHBOARD", "ACK_ALERT"]},
+            {"user_id": "pflege1", "roles": ["VIEW_DASHBOARD"]},
+            {"user_id": "arzt1", "roles": ["VIEW_DASHBOARD", "ACK_ALERT"]},
+            {"user_id": "manager1", "roles": ["VIEW_DASHBOARD", "ACK_ALERT"]},
+        ]
+    }
+
 # -----------------------------------------------------------------------------
 # Ack API
 # -----------------------------------------------------------------------------
@@ -419,7 +493,7 @@ def debug_eval(case_id: str, ctx: AuthContext = Depends(get_auth_context)):
 class AckRequest(BaseModel):
     case_id: str
     ack_scope: str = "case"   # 'case' | 'rule'
-    scope_id: str = "*"       # '*' oder rule_id
+    scope_id: str = "*"       # '*' or rule_id
     comment: Optional[str] = None
 
 
@@ -430,22 +504,29 @@ def ack(req: AckRequest, ctx: AuthContext = Depends(get_auth_context)):
     if req.ack_scope not in ("case", "rule"):
         raise HTTPException(status_code=400, detail="ack_scope must be 'case' or 'rule'")
 
-    # Enforce station isolation and case existence (MVP dummy data)
-    c0 = next((x for x in DUMMY_CASES if x["case_id"] == req.case_id), None)
-    if c0 is None:
+    raw = next((x for x in DUMMY_CASES if x["case_id"] == req.case_id), None)
+    if raw is None:
         raise HTTPException(status_code=404, detail="Case not found")
 
-    c = enrich_case(c0)
+    c = enrich_case(raw)
     if c["station_id"] != ctx.station_id:
         raise HTTPException(status_code=404, detail="Case not found")
 
-    # Case-ack is only allowed when the case is ended (discharge/transfer).
-    if req.ack_scope == "case":
-        if c.get("discharge_date") is None:
-            raise HTTPException(
-                status_code=409,
-                detail="Case cannot be acked before discharge/transfer is completed (discharge_date is null).",
-            )
+    # Case-ack gate: only after discharge
+    if req.ack_scope == "case" and c.get("discharge_date") is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Case cannot be acked before discharge/transfer is completed (discharge_date is null).",
+        )
+
+    # Rule-ack gate: only if rule is currently active; store current condition_hash
+    condition_hash: str | None = None
+    if req.ack_scope == "rule":
+        alerts = evaluate_alerts(c)
+        alert = next((a for a in alerts if a.rule_id == req.scope_id), None)
+        if not alert:
+            raise HTTPException(status_code=409, detail="Rule not currently active; cannot ack.")
+        condition_hash = alert.condition_hash
 
     ack_row = ack_store.upsert_ack(
         case_id=req.case_id,
@@ -454,6 +535,7 @@ def ack(req: AckRequest, ctx: AuthContext = Depends(get_auth_context)):
         scope_id=req.scope_id,
         user_id=ctx.user_id,
         comment=req.comment,
+        condition_hash=condition_hash,
     )
 
     return {
@@ -464,4 +546,5 @@ def ack(req: AckRequest, ctx: AuthContext = Depends(get_auth_context)):
         "acked": True,
         "acked_at": ack_row.acked_at,
         "acked_by": ack_row.acked_by,
+        "condition_hash": getattr(ack_row, "condition_hash", None),
     }
