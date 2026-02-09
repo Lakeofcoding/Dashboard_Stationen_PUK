@@ -1,16 +1,121 @@
 rules:
-  - id: HONOS_HIGH
-    severity: CRITICAL
-    metric: honos
-    operator: ">="
-    value: 30
-    message: "HONOS-Wert kritisch erhöht"
-    explanation: "HONOS ≥ 30 gilt als kritisch (MVP-Regel)."
-
-  - id: BSCL_MISSING
+  # --- Eintritt: HONOS Pflicht, Eskalation nach 3 Tagen
+  - id: HONOS_ENTRY_MISSING_WARN
     severity: WARN
-    metric: bscl
+    metric: honos_entry_total
     operator: is_null
-    value: null
-    message: "BSCL fehlt"
-    explanation: "BSCL wurde noch nicht erfasst (MVP-Regel)."
+    value: true
+    message: "HONOS Eintritt fehlt"
+    explanation: "HONOS Eintritt ist noch nicht erfasst."
+
+  - id: HONOS_ENTRY_MISSING_CRIT_3D
+    severity: CRITICAL
+    metric: honos_entry_missing_over_3d
+    operator: is_true
+    value: true
+    message: "HONOS Eintritt fehlt > 3 Tage"
+    explanation: "HONOS Eintritt ist nach 3 Tagen immer noch nicht erfasst."
+
+  # --- Eintritt: BSCL Pflicht, Eskalation nach 3 Tagen
+  - id: BSCL_ENTRY_MISSING_WARN
+    severity: WARN
+    metric: bscl_total_entry
+    operator: is_null
+    value: true
+    message: "BSCL Eintritt fehlt"
+    explanation: "BSCL Eintritt ist noch nicht erfasst."
+
+  - id: BSCL_ENTRY_MISSING_CRIT_3D
+    severity: CRITICAL
+    metric: bscl_entry_missing_over_3d
+    operator: is_true
+    value: true
+    message: "BSCL Eintritt fehlt > 3 Tage"
+    explanation: "BSCL Eintritt ist nach 3 Tagen immer noch nicht erfasst."
+
+  # --- Austritt: HONOS Pflicht im +/- 3 Tage Fenster um Austritt
+  - id: HONOS_DISCHARGE_MISSING_WARN
+    severity: WARN
+    metric: honos_discharge_due_missing
+    operator: is_true
+    value: true
+    message: "HONOS Austritt fehlt (im 3-Tage-Fenster)"
+    explanation: "Bei Austritt muss HONOS Austritt im ±3 Tage Fenster dokumentiert werden."
+
+  - id: HONOS_DISCHARGE_MISSING_CRIT_3D
+    severity: CRITICAL
+    metric: honos_discharge_missing_over_3d_after_discharge
+    operator: is_true
+    value: true
+    message: "HONOS Austritt fehlt > 3 Tage nach Austritt"
+    explanation: "Austritts-HONOS ist 3 Tage nach Austritt immer noch nicht dokumentiert."
+
+  # --- Austritt: BSCL Pflicht im +/- 3 Tage Fenster um Austritt
+  - id: BSCL_DISCHARGE_MISSING_WARN
+    severity: WARN
+    metric: bscl_discharge_due_missing
+    operator: is_true
+    value: true
+    message: "BSCL Austritt fehlt (im 3-Tage-Fenster)"
+    explanation: "Bei Austritt muss BSCL Austritt im ±3 Tage Fenster dokumentiert werden."
+
+  - id: BSCL_DISCHARGE_MISSING_CRIT_3D
+    severity: CRITICAL
+    metric: bscl_discharge_missing_over_3d_after_discharge
+    operator: is_true
+    value: true
+    message: "BSCL Austritt fehlt > 3 Tage nach Austritt"
+    explanation: "Austritts-BSCL ist 3 Tage nach Austritt immer noch nicht dokumentiert."
+
+  # --- Differenz > 5 zwischen Eintritt und Austritt => WARN (Risk)
+  - id: HONOS_DELTA_GT_5
+    severity: WARN
+    metric: honos_delta
+    operator: ">"
+    value: 5
+    message: "HONOS Verschlechterung > 5"
+    explanation: "Differenz zwischen Eintritt und Austritt > 5."
+
+  - id: BSCL_DELTA_GT_5
+    severity: WARN
+    metric: bscl_delta
+    operator: ">"
+    value: 5
+    message: "BSCL Verschlechterung > 5"
+    explanation: "Differenz zwischen Eintritt und Austritt > 5."
+
+  # --- Suizidalität Austritt >= 3 => CRITICAL (heikel)
+  - id: SUICIDALITY_HIGH_AT_DISCHARGE
+    severity: CRITICAL
+    metric: suicidality_discharge_high
+    operator: is_true
+    value: true
+    message: "Hohe Suizidalität bei Austritt"
+    explanation: "Suizidalität bei Austritt (HONOS oder BSCL) ist >= 3. Bitte besonders prüfen (heikel)."
+
+  # --- Isolation: offen > 48h => CRITICAL
+  - id: ISOLATION_OPEN_GT_48H
+    severity: CRITICAL
+    metric: isolation_open_over_48h
+    operator: is_true
+    value: true
+    message: "Isolation ohne Ende > 48h"
+    explanation: "Isolation hat keinen Stop und läuft länger als 48 Stunden (möglicherweise Ende vergessen)."
+
+  # --- Isolation mehrfach => WARN
+  - id: ISOLATION_MULTIPLE
+    severity: WARN
+    metric: isolation_multiple
+    operator: is_true
+    value: true
+    message: "Mehrfach-Isolation"
+    explanation: "Mehr als eine Isolationsepisode im Fall."
+
+  # --- BFS Paket: vollständig/ unvollständig (wie gehabt)
+  - id: BFS_INCOMPLETE
+    severity: WARN
+    metric: bfs_incomplete
+    operator: is_true
+    value: true
+    message: "BFS Paket unvollständig"
+    explanation: "BFS Daten 1–3 müssen vollständig sein; mindestens ein Feld fehlt."

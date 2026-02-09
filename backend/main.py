@@ -5,7 +5,7 @@ import json
 from datetime import date
 from pathlib import Path
 from typing import Literal, Optional
-
+from datetime import date
 import yaml
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -112,64 +112,179 @@ STATION_CENTER = {
 }
 CLINIC_DEFAULT = "EPP"
 
-DUMMY_CASES: list[dict] = [
-    {
-        "case_id": "4645342",
-        "patient_id": "4534234",
-        "clinic": "EPP",
-        "station_id": "A1",
-        "admission_date": date(2026, 1, 20),
-        "discharge_date": None,
-        "honos_entry": None,
-        "honos_discharge": None,
-        "bscl": 44,
-        "bfs_1": None,
-        "bfs_2": None,
-        "bfs_3": None,
-    },
-    {
-        "case_id": "4645343",
-        "patient_id": "4534235",
-        "clinic": "EPP",
-        "station_id": "B0",
-        "admission_date": date(2026, 1, 10),
-        "discharge_date": None,
-        "honos_entry": 21,
-        "honos_discharge": None,
-        "bscl": 62,
-        "bfs_1": 12,
-        "bfs_2": None,
-        "bfs_3": None,
-    },
-    {
-        "case_id": "4645344",
-        "patient_id": "4534236",
-        "clinic": "EPP",
-        "station_id": "B2",
-        "admission_date": date(2025, 12, 15),
-        "discharge_date": date(2026, 1, 25),
-        "honos_entry": 28,
-        "honos_discharge": None,
-        "bscl": 55,
-        "bfs_1": 10,
-        "bfs_2": 9,
-        "bfs_3": 8,
-    },
-    {
-        "case_id": "4645345",
-        "patient_id": "4534237",
-        "clinic": "EPP",
-        "station_id": "A1",
-        "admission_date": date(2025, 12, 1),
-        "discharge_date": date(2026, 1, 10),
-        "honos_entry": 18,
-        "honos_discharge": 14,
-        "bscl": 40,
-        "bfs_1": 11,
-        "bfs_2": 12,
-        "bfs_3": 10,
-    },
+
+
+DUMMY_CASES = [
+  # 1) Eintritt: HONOS/BSCL fehlen, >3 Tage seit Eintritt => CRITICAL
+  {
+    "case_id": "4645342",
+    "patient_id": "4534234",
+    "clinic": "EPP",
+    "station_id": "A1",
+    "center": "ZAPE",
+    "admission_date": date(2026, 1, 1),
+    "discharge_date": None,
+
+    "honos_entry_total": None,
+    "honos_entry_date": None,
+    "honos_discharge_total": None,
+    "honos_discharge_date": None,
+    "honos_discharge_suicidality": None,
+
+    "bscl_total_entry": None,
+    "bscl_entry_date": None,
+    "bscl_total_discharge": None,
+    "bscl_discharge_date": None,
+    "bscl_discharge_suicidality": None,
+
+    "bfs_1": 11, "bfs_2": None, "bfs_3": None,
+
+    "isolations": []
+  },
+
+  # 2) Eintritt HONOS/BSCL vorhanden, aber starke Verschlechterung >5 => WARN (Risk)
+  {
+    "case_id": "4645343",
+    "patient_id": "4534235",
+    "clinic": "EPP",
+    "station_id": "B0",
+    "center": "ZDAP",
+    "admission_date": date(2026, 1, 10),
+    "discharge_date": date(2026, 1, 20),
+
+    "honos_entry_total": 12,
+    "honos_entry_date": date(2026, 1, 11),
+    "honos_discharge_total": 20,
+    "honos_discharge_date": date(2026, 1, 20),
+    "honos_discharge_suicidality": 1,
+
+    "bscl_total_entry": 40,
+    "bscl_entry_date": date(2026, 1, 11),
+    "bscl_total_discharge": 50,
+    "bscl_discharge_date": date(2026, 1, 20),
+    "bscl_discharge_suicidality": 2,
+
+    "bfs_1": 10, "bfs_2": 12, "bfs_3": 9,
+
+    "isolations": []
+  },
+
+  # 3) Austritt: HONOS/BSCL fehlen, discharge vor 5 Tagen => CRITICAL (Austrittfenster 3 Tage)
+  {
+    "case_id": "4645344",
+    "patient_id": "4534236",
+    "clinic": "EPP",
+    "station_id": "B2",
+    "center": "ZDAP",
+    "admission_date": date(2025, 12, 15),
+    "discharge_date": date(2026, 1, 5),
+
+    "honos_entry_total": 18,
+    "honos_entry_date": date(2025, 12, 16),
+    "honos_discharge_total": None,
+    "honos_discharge_date": None,
+    "honos_discharge_suicidality": None,
+
+    "bscl_total_entry": 55,
+    "bscl_entry_date": date(2025, 12, 16),
+    "bscl_total_discharge": None,
+    "bscl_discharge_date": None,
+    "bscl_discharge_suicidality": None,
+
+    "bfs_1": None, "bfs_2": None, "bfs_3": None,
+
+    "isolations": []
+  },
+
+  # 4) Suizidalität hoch bei Austritt (HONOS >=3 oder BSCL >=3) => CRITICAL + Extra Info
+  {
+    "case_id": "4645345",
+    "patient_id": "4534237",
+    "clinic": "EPP",
+    "station_id": "A1",
+    "center": "ZAPE",
+    "admission_date": date(2026, 1, 2),
+    "discharge_date": date(2026, 1, 12),
+
+    "honos_entry_total": 16,
+    "honos_entry_date": date(2026, 1, 3),
+    "honos_discharge_total": 15,
+    "honos_discharge_date": date(2026, 1, 12),
+    "honos_discharge_suicidality": 3,
+
+    "bscl_total_entry": 48,
+    "bscl_entry_date": date(2026, 1, 3),
+    "bscl_total_discharge": 47,
+    "bscl_discharge_date": date(2026, 1, 12),
+    "bscl_discharge_suicidality": 2,
+
+    "bfs_1": 7, "bfs_2": 8, "bfs_3": 9,
+
+    "isolations": [
+  { "start": "2026-01-10T08:00:00Z", "stop": null }
 ]
+  },
+
+  # 5) Isolation ohne Stop >48h => CRITICAL
+  {
+    "case_id": "4645346",
+    "patient_id": "4534238",
+    "clinic": "EPP",
+    "station_id": "B0",
+    "center": "ZDAP",
+    "admission_date": date(2026, 1, 8),
+    "discharge_date": None,
+
+    "honos_entry_total": 22,
+    "honos_entry_date": date(2026, 1, 9),
+    "honos_discharge_total": None,
+    "honos_discharge_date": None,
+    "honos_discharge_suicidality": None,
+
+    "bscl_total_entry": 60,
+    "bscl_entry_date": date(2026, 1, 9),
+    "bscl_total_discharge": None,
+    "bscl_discharge_date": None,
+    "bscl_discharge_suicidality": 3,
+
+    "bfs_1": 1, "bfs_2": 2, "bfs_3": 3,
+
+    "isolations": [
+      {"start": "2026-01-10T08:00:00Z", "stop": None}
+    ]
+  },
+
+  # 6) Mehrfach-Isolation (mehr als 1 Episode) => WARN, auch wenn alles sonst ok
+  {
+    "case_id": "4645347",
+    "patient_id": "4534239",
+    "clinic": "EPP",
+    "station_id": "B2",
+    "center": "ZDAP",
+    "admission_date": date(2026, 1, 5),
+    "discharge_date": None,
+
+    "honos_entry_total": 10,
+    "honos_entry_date": date(2026, 1, 6),
+    "honos_discharge_total": None,
+    "honos_discharge_date": None,
+    "honos_discharge_suicidality": None,
+
+    "bscl_total_entry": 35,
+    "bscl_entry_date": date(2026, 1, 6),
+    "bscl_total_discharge": None,
+    "bscl_discharge_date": None,
+    "bscl_discharge_suicidality": None,
+
+    "bfs_1": 4, "bfs_2": 5, "bfs_3": 6,
+
+    "isolations": [
+      {"start": "2026-01-07T10:00:00Z", "stop": "2026-01-07T14:00:00Z"},
+      {"start": "2026-01-09T12:00:00Z", "stop": "2026-01-09T15:00:00Z"}
+    ]
+  },
+]
+
 
 
 def enrich_case(c: dict) -> dict:
