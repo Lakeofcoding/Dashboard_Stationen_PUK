@@ -7,6 +7,7 @@ export interface CaseSummary {
   discharge_date: string | null;
   severity: Severity;
   top_alert: string | null;
+  acked_at: string | null; // <-- wichtig
 }
 
 export interface Alert {

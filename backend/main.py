@@ -29,6 +29,9 @@ class CaseSummary(BaseModel):
     discharge_date: Optional[date] = None
     severity: Severity
     top_alert: Optional[str] = None
+    acked_at: Optional[str] = None
+    
+
 
 
 class CaseDetail(CaseSummary):
@@ -50,6 +53,10 @@ DUMMY_METRICS: dict[str, dict] = {
     "2026-0002": {"honos": 34, "bscl": 62, "bfs_complete": True},
 }
 
+
+from datetime import datetime
+
+ACKED_CASES: dict[str, str] = {}
 
 # --- Rules: YAML (MVP: load once at startup) ---
 
@@ -166,6 +173,8 @@ def list_cases(station_id: str = "ST01"):
                 discharge_date=c["discharge_date"],
                 severity=severity,
                 top_alert=top_alert,
+                acked_at=ACKED_CASES.get(c["case_id"]),
+
             )
         )
 
@@ -188,6 +197,8 @@ def get_case(case_id: str):
             bscl=None,
             bfs_complete=False,
             alerts=[],
+            acked_at=ACKED_CASES.get(c["case_id"]),
+
         )
 
     metrics = DUMMY_METRICS.get(case_id, {})
@@ -242,3 +253,13 @@ def debug_eval(case_id: str):
         "rules_count": len(rules.get("rules", [])) if isinstance(rules, dict) else None,
         "alerts": [a.model_dump() for a in alerts],
     }
+@app.post("/api/ack/{case_id}")
+def ack_case(case_id: str):
+    ACKED_CASES[case_id] = datetime.utcnow().isoformat() + "Z"
+    return {"case_id": case_id, "acked_at": ACKED_CASES[case_id]}
+
+
+@app.post("/api/unack/{case_id}")
+def unack_case(case_id: str):
+    ACKED_CASES.pop(case_id, None)
+    return {"case_id": case_id, "acked_at": None}

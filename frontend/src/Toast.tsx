@@ -6,11 +6,33 @@ export function Toast({
   message,
   kind,
   onClose,
+  actionLabel,
+  onAction,
 }: {
   message: string;
   kind: ToastKind;
   onClose: () => void;
-}) {
+  actionLabel?: string;
+  onAction?: () => void;
+}) 
+ {{onAction && actionLabel && (
+  <button
+    onClick={onAction}
+    style={{
+      background: "rgba(255,255,255,0.2)",
+      color: "white",
+      border: "1px solid rgba(255,255,255,0.35)",
+      borderRadius: 6,
+      padding: "6px 10px",
+      cursor: "pointer",
+      fontSize: 12,
+      whiteSpace: "nowrap",
+    }}
+  >
+    {actionLabel}
+  </button>
+)}
+
   useEffect(() => {
     const t = window.setTimeout(onClose, 6000); // auto-close
     return () => window.clearTimeout(t);

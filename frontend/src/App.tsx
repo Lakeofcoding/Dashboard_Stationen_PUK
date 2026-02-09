@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { fetchCases, fetchCaseDetail } from "./api";
 import type { CaseSummary, CaseDetail, Severity } from "./types";
 import { Toast } from "./Toast";
+import { fetchCases, fetchCaseDetail, ackCase } from "./api";
+
 
 
 function severityColor(severity: Severity): string {
@@ -23,7 +24,7 @@ export default function App() {
   const [detail, setDetail] = useState<CaseDetail | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
-  const [toast, setToast] = useState<{ message: string; kind: "critical" | "warn" | "info" } | null>(null);
+  const [toast, setToast] = useState<{ caseId: string; message: string; kind: "critical" | "warn" | "info" } | null>(null);
   const [shownCritical, setShownCritical] = useState<Record<string, true>>({});
 
 
@@ -34,12 +35,14 @@ export default function App() {
     setError(null);
 
     // Find first CRITICAL case that hasn't shown a toast yet
-    const firstCritical = data.find((c) => c.severity === "CRITICAL" && !shownCritical[c.case_id]);
+    const firstCritical = data.find((c) => c.severity === "CRITICAL" && !c.acked_at && !shownCritical[c.case_id]);
     if (firstCritical) {
       setToast({
-        kind: "critical",
-        message: `${firstCritical.case_id}: ${firstCritical.top_alert ?? "Kritischer Status"}`,
-      });
+  kind: "critical",
+  caseId: firstCritical.case_id,
+  message: `${firstCritical.case_id}: ${firstCritical.top_alert ?? "Kritischer Status"}`,
+});
+
       setShownCritical((prev) => ({ ...prev, [firstCritical.case_id]: true }));
     }
   })
@@ -114,6 +117,45 @@ export default function App() {
                 <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{detail.case_id}</h2>
                 <button onClick={() => setSelectedCaseId(null)}>✕</button>
               </div>
+              <p>
+              <strong>Quittiert:</strong> {detail.acked_at ? `Ja (${detail.acked_at})` : "Nein"}
+            </p>
+
+            {detail.severity === "CRITICAL" && !detail.acked_at && (
+              <button
+  onClick={async () => {
+    try {
+      const res = await ackCase(detail.case_id);
+
+      setDetail({
+        ...detail,
+        acked_at: res.acked_at,
+      });
+
+      const list = await fetchCases();
+      setCases(list);
+    } catch (e: any) {
+      setError(e?.message ?? String(e));
+    }
+  }}
+  style={{
+    marginTop: 8,
+    padding: "8px 12px",
+    borderRadius: 6,
+    border: "1px solid #b71c1c",
+    background: "#d32f2f",
+    color: "white",
+    fontWeight: 600,
+    cursor: "pointer",
+  }}
+>
+  Fall quittieren
+</button>
+
+
+
+            )}
+
 
               <p style={{ marginTop: 8 }}>
                 <strong>Station:</strong> {detail.station_id}
@@ -145,12 +187,25 @@ export default function App() {
         </aside>
       </div>
       {toast && (
-      <Toast
-        kind={toast.kind}
-        message={toast.message}
-        onClose={() => setToast(null)}
-      />
-    )}
+  <Toast
+    kind={toast.kind}
+    message={toast.message}
+    actionLabel="Quittieren"
+    onAction={async () => {
+      try {
+        await ackCase(toast.caseId);
+        setToast(null);
+        // reload cases so acked_at becomes visible and toast won't reappear
+        const data = await fetchCases();
+        setCases(data);
+      } catch (e: any) {
+        setError(e?.message ?? String(e));
+      }
+    }}
+    onClose={() => setToast(null)}
+  />
+)}
+
     </main>
   );
 }
