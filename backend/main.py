@@ -5,12 +5,29 @@ from pathlib import Path
 from typing import Literal, Optional
 
 import yaml
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-app = FastAPI(title="Dashboard Backend (MVP)", version="0.1.0")
+from app.db import init_db
+from app.auth import AuthContext, get_auth_context, require_role
+from app.ack_store import AckStore
 
-# --- Models (API contract) ---
+# -----------------------------------------------------------------------------
+# App setup
+# -----------------------------------------------------------------------------
+
+app = FastAPI(title="Dashboard Backend (MVP)", version="0.1.0")
+ack_store = AckStore()
+
+
+@app.on_event("startup")
+def _startup():
+    init_db()
+
+
+# -----------------------------------------------------------------------------
+# API models
+# -----------------------------------------------------------------------------
 
 Severity = Literal["OK", "WARN", "CRITICAL"]
 
@@ -30,8 +47,6 @@ class CaseSummary(BaseModel):
     severity: Severity
     top_alert: Optional[str] = None
     acked_at: Optional[str] = None
-    
-
 
 
 class CaseDetail(CaseSummary):
@@ -41,11 +56,13 @@ class CaseDetail(CaseSummary):
     alerts: list[Alert] = Field(default_factory=list)
 
 
-# --- Dummy data (replace later with DB) ---
+# -----------------------------------------------------------------------------
+# Dummy data (replace later by DB / KIS / KISIM)
+# -----------------------------------------------------------------------------
 
 DUMMY_CASES: list[dict] = [
-    {"case_id": "2026-0001", "station_id": "ST01", "admission_date": "2026-01-28", "discharge_date": None},
-    {"case_id": "2026-0002", "station_id": "ST01", "admission_date": "2026-01-15", "discharge_date": None},
+    {"case_id": "2026-0001", "station_id": "ST01", "admission_date": date(2026, 1, 28), "discharge_date": None},
+    {"case_id": "2026-0002", "station_id": "ST01", "admission_date": date(2026, 1, 15), "discharge_date": None},
 ]
 
 DUMMY_METRICS: dict[str, dict] = {
@@ -54,49 +71,18 @@ DUMMY_METRICS: dict[str, dict] = {
 }
 
 
-from datetime import datetime
-
-ACKED_CASES: dict[str, str] = {}
-
-# --- Rules: YAML (MVP: load once at startup) ---
+# -----------------------------------------------------------------------------
+# Rules (YAML)
+# -----------------------------------------------------------------------------
 
 RULES_PATH = Path(__file__).resolve().parent.parent / "rules" / "rules.yaml"
-
-def get_rules_runtime() -> dict:
-    # load fresh each time for debugging (and to avoid reload issues)
-    return load_rules()
-
 
 
 def load_rules() -> dict:
     if RULES_PATH.exists():
         with RULES_PATH.open("r", encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
-    # fallback if file not there yet
-    return {
-        "rules": [
-            {
-                "id": "HONOS_HIGH",
-                "severity": "CRITICAL",
-                "metric": "honos",
-                "operator": ">=",
-                "value": 30,
-                "message": "HONOS-Wert kritisch erhöht",
-                "explanation": "HONOS ≥ 30 gilt als kritisch (MVP-Regel).",
-            },
-            {
-                "id": "BSCL_MISSING",
-                "severity": "WARN",
-                "metric": "bscl",
-                "operator": "is_null",
-                "value": None,
-                "message": "BSCL fehlt",
-                "explanation": "BSCL wurde noch nicht erfasst (MVP-Regel).",
-            },
-        ]
-    }
-
-
+    return {"rules": []}
 
 
 def eval_rule(metric_value, operator: str, value) -> bool:
@@ -108,7 +94,7 @@ def eval_rule(metric_value, operator: str, value) -> bool:
 
 
 def evaluate_alerts(metrics: dict) -> list[Alert]:
-    rules = load_rules()  # <-- jedes Mal laden
+    rules = load_rules()
     alerts: list[Alert] = []
 
     for r in rules.get("rules", []):
@@ -130,22 +116,20 @@ def evaluate_alerts(metrics: dict) -> list[Alert]:
                     explanation=r["explanation"],
                 )
             )
-
     return alerts
-
 
 
 def summarize_severity(alerts: list[Alert]) -> tuple[Severity, Optional[str]]:
     if any(a.severity == "CRITICAL" for a in alerts):
-        top = next(a.message for a in alerts if a.severity == "CRITICAL")
-        return "CRITICAL", top
+        return "CRITICAL", next(a.message for a in alerts if a.severity == "CRITICAL")
     if any(a.severity == "WARN" for a in alerts):
-        top = next(a.message for a in alerts if a.severity == "WARN")
-        return "WARN", top
+        return "WARN", next(a.message for a in alerts if a.severity == "WARN")
     return "OK", None
 
 
-# --- API endpoints ---
+# -----------------------------------------------------------------------------
+# Endpoints
+# -----------------------------------------------------------------------------
 
 @app.get("/health")
 def health():
@@ -153,14 +137,22 @@ def health():
 
 
 @app.get("/api/cases", response_model=list[CaseSummary])
-def list_cases(station_id: str = "ST01"):
-    # Placeholder "authorization": station_id parameter + hardcoded default
+def list_cases(ctx: AuthContext = Depends(get_auth_context)):
+    require_role(ctx, "VIEW_DASHBOARD")
+
+    station_cases = [c for c in DUMMY_CASES if c["station_id"] == ctx.station_id]
+    case_ids = [c["case_id"] for c in station_cases]
+
+    acks = ack_store.get_acks_for_cases(case_ids, ctx.station_id)
+    case_level_acks: dict[str, str] = {}
+
+    for a in acks:
+        if a.ack_scope == "case" and a.scope_id == "*":
+            case_level_acks[a.case_id] = a.acked_at
+
     results: list[CaseSummary] = []
 
-    for c in DUMMY_CASES:
-        if c["station_id"] != station_id:
-            continue
-
+    for c in station_cases:
         metrics = DUMMY_METRICS.get(c["case_id"], {})
         alerts = evaluate_alerts(metrics)
         severity, top_alert = summarize_severity(alerts)
@@ -173,37 +165,30 @@ def list_cases(station_id: str = "ST01"):
                 discharge_date=c["discharge_date"],
                 severity=severity,
                 top_alert=top_alert,
-                acked_at=ACKED_CASES.get(c["case_id"]),
-
+                acked_at=case_level_acks.get(c["case_id"]),
             )
         )
-
     return results
 
 
 @app.get("/api/cases/{case_id}", response_model=CaseDetail)
-def get_case(case_id: str):
-    c = next((x for x in DUMMY_CASES if x["case_id"] == case_id), None)
-    if c is None:
-        # keep it simple for MVP; later proper HTTPException
-        return CaseDetail(
-            case_id=case_id,
-            station_id="ST01",
-            admission_date=date.today(),
-            discharge_date=None,
-            severity="OK",
-            top_alert=None,
-            honos=None,
-            bscl=None,
-            bfs_complete=False,
-            alerts=[],
-            acked_at=ACKED_CASES.get(c["case_id"]),
+def get_case(case_id: str, ctx: AuthContext = Depends(get_auth_context)):
+    require_role(ctx, "VIEW_DASHBOARD")
 
-        )
+    c = next((x for x in DUMMY_CASES if x["case_id"] == case_id), None)
+    if c is None or c["station_id"] != ctx.station_id:
+        raise HTTPException(status_code=404, detail="Case not found")
 
     metrics = DUMMY_METRICS.get(case_id, {})
     alerts = evaluate_alerts(metrics)
     severity, top_alert = summarize_severity(alerts)
+
+    acks = ack_store.get_acks_for_cases([case_id], ctx.station_id)
+    acked_at = None
+    for a in acks:
+        if a.ack_scope == "case" and a.scope_id == "*":
+            acked_at = a.acked_at
+            break
 
     return CaseDetail(
         case_id=c["case_id"],
@@ -216,19 +201,13 @@ def get_case(case_id: str):
         bscl=metrics.get("bscl"),
         bfs_complete=bool(metrics.get("bfs_complete", False)),
         alerts=alerts,
+        acked_at=acked_at,
     )
 
 
-@app.get("/api/debug/rules")
-def debug_rules():
-    rules = get_rules_runtime()
-    return {
-        "rules_path": str(RULES_PATH),
-        "rules_loaded_keys": list(rules.keys()),
-        "rules_count": len(rules.get("rules", [])),
-        "rules_sample": rules.get("rules", [])[:2],
-    }
-
+# -----------------------------------------------------------------------------
+# Debug
+# -----------------------------------------------------------------------------
 
 @app.get("/api/debug/rules")
 def debug_rules():
@@ -236,30 +215,55 @@ def debug_rules():
     return {
         "rules_path": str(RULES_PATH),
         "exists": RULES_PATH.exists(),
-        "rules_loaded_keys": list(rules.keys()) if isinstance(rules, dict) else str(type(rules)),
-        "rules_count": len(rules.get("rules", [])) if isinstance(rules, dict) else None,
-        "rules_sample": (rules.get("rules", [])[:5] if isinstance(rules, dict) else None),
+        "rules_count": len(rules.get("rules", [])),
+        "rules_sample": rules.get("rules", [])[:5],
     }
 
 
 @app.get("/api/debug/eval/{case_id}")
 def debug_eval(case_id: str):
     metrics = DUMMY_METRICS.get(case_id, {})
-    rules = load_rules()
     alerts = evaluate_alerts(metrics)
     return {
         "case_id": case_id,
         "metrics": metrics,
-        "rules_count": len(rules.get("rules", [])) if isinstance(rules, dict) else None,
         "alerts": [a.model_dump() for a in alerts],
     }
-@app.post("/api/ack/{case_id}")
-def ack_case(case_id: str):
-    ACKED_CASES[case_id] = datetime.utcnow().isoformat() + "Z"
-    return {"case_id": case_id, "acked_at": ACKED_CASES[case_id]}
 
 
-@app.post("/api/unack/{case_id}")
-def unack_case(case_id: str):
-    ACKED_CASES.pop(case_id, None)
-    return {"case_id": case_id, "acked_at": None}
+# -----------------------------------------------------------------------------
+# Ack
+# -----------------------------------------------------------------------------
+
+class AckRequest(BaseModel):
+    case_id: str
+    ack_scope: str = "case"   # 'case' | 'rule'
+    scope_id: str = "*"       # '*' oder rule_id
+    comment: Optional[str] = None
+
+
+@app.post("/api/ack")
+def ack(req: AckRequest, ctx: AuthContext = Depends(get_auth_context)):
+    require_role(ctx, "ACK_ALERT")
+
+    if req.ack_scope not in ("case", "rule"):
+        raise HTTPException(status_code=400, detail="ack_scope must be 'case' or 'rule'")
+
+    ack_row = ack_store.upsert_ack(
+        case_id=req.case_id,
+        station_id=ctx.station_id,
+        ack_scope=req.ack_scope,
+        scope_id=req.scope_id,
+        user_id=ctx.user_id,
+        comment=req.comment,
+    )
+
+    return {
+        "case_id": ack_row.case_id,
+        "station_id": ack_row.station_id,
+        "ack_scope": ack_row.ack_scope,
+        "scope_id": ack_row.scope_id,
+        "acked": True,
+        "acked_at": ack_row.acked_at,
+        "acked_by": ack_row.acked_by,
+    }

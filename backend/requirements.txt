@@ -2,3 +2,6 @@ fastapi==0.115.6
 uvicorn[standard]==0.34.0
 pydantic==2.10.6
 pyyaml==6.0.2
+SQLAlchemy>=2.0
+python-dotenv
+pydantic>=2.0
