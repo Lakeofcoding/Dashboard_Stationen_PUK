@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { fetchCases, fetchCaseDetail } from "./api";
 import type { CaseSummary, CaseDetail, Severity } from "./types";
+import { Toast } from "./Toast";
+
 
 function severityColor(severity: Severity): string {
   switch (severity) {
@@ -21,12 +23,28 @@ export default function App() {
   const [detail, setDetail] = useState<CaseDetail | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [toast, setToast] = useState<{ message: string; kind: "critical" | "warn" | "info" } | null>(null);
+  const [shownCritical, setShownCritical] = useState<Record<string, true>>({});
+
 
   useEffect(() => {
     fetchCases()
-      .then(setCases)
-      .catch((err) => setError(err?.message ?? String(err)));
-  }, []);
+  .then((data) => {
+    setCases(data);
+    setError(null);
+
+    // Find first CRITICAL case that hasn't shown a toast yet
+    const firstCritical = data.find((c) => c.severity === "CRITICAL" && !shownCritical[c.case_id]);
+    if (firstCritical) {
+      setToast({
+        kind: "critical",
+        message: `${firstCritical.case_id}: ${firstCritical.top_alert ?? "Kritischer Status"}`,
+      });
+      setShownCritical((prev) => ({ ...prev, [firstCritical.case_id]: true }));
+    }
+  })
+  .catch((err) => setError(err?.message ?? String(err)));
+  }, [shownCritical]);
 
   useEffect(() => {
     if (!selectedCaseId) {
@@ -126,6 +144,13 @@ export default function App() {
           )}
         </aside>
       </div>
+      {toast && (
+      <Toast
+        kind={toast.kind}
+        message={toast.message}
+        onClose={() => setToast(null)}
+      />
+    )}
     </main>
   );
 }
