@@ -1,16 +1,5 @@
-import "./index.css"
-import React from "react"
-import ReactDOM from "react-dom/client"
-
-
-ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>
-)
-
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { CaseSummary, CaseDetail, Severity } from "./types";
+import type { CaseDetail, CaseSummary, Severity } from "./types";
 import { Toast } from "./Toast";
 
 type ToastState =
@@ -21,9 +10,7 @@ type AuthState = {
   stationId: string;
   userId: string;
   rolesCsv: string; // "VIEW_DASHBOARD,ACK_ALERT"
-  centerId: string;
 };
-
 
 type MetaUser = { user_id: string; roles: string[] };
 
@@ -31,26 +18,13 @@ const LS_KEYS = {
   stationId: "dashboard.stationId",
   userId: "dashboard.userId",
   rolesCsv: "dashboard.rolesCsv",
-  centerId: "dashboard.centerId",
 };
-
-function severityColor(severity: Severity): string {
-  switch (severity) {
-    case "CRITICAL":
-      return "#ffe5e5";
-    case "WARN":
-      return "#fff6d6";
-    default:
-      return "#e8f5e9";
-  }
-}
 
 function loadAuth(): AuthState {
   return {
-    stationId: localStorage.getItem(LS_KEYS.stationId) ?? "ST01",
+    stationId: localStorage.getItem(LS_KEYS.stationId) ?? "B0",
     userId: localStorage.getItem(LS_KEYS.userId) ?? "demo",
     rolesCsv: localStorage.getItem(LS_KEYS.rolesCsv) ?? "VIEW_DASHBOARD,ACK_ALERT",
-    centerId: localStorage.getItem(LS_KEYS.centerId) ?? "C1",
   };
 }
 
@@ -58,7 +32,6 @@ function saveAuth(a: AuthState) {
   localStorage.setItem(LS_KEYS.stationId, a.stationId);
   localStorage.setItem(LS_KEYS.userId, a.userId);
   localStorage.setItem(LS_KEYS.rolesCsv, a.rolesCsv);
-  localStorage.setItem(LS_KEYS.centerId, a.centerId);
 }
 
 function parseRoles(csv: string): Set<string> {
@@ -81,18 +54,23 @@ function authHeaders(auth: AuthState): HeadersInit {
 
 async function apiJson<T>(path: string, init: RequestInit): Promise<T> {
   const res = await fetch(path, init);
+
+  // harte Diagnosehilfe: wenn HTML zurückkommt, ist Proxy/URL falsch
+  const contentType = res.headers.get("content-type") ?? "";
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(text || `HTTP ${res.status}`);
   }
+  if (!contentType.includes("application/json")) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Backend lieferte kein JSON (Content-Type: ${contentType}). Anfang: ${text.slice(0, 40)}`);
+  }
+
   return (await res.json()) as T;
 }
 
 async function fetchCases(auth: AuthState): Promise<CaseSummary[]> {
-  return apiJson<CaseSummary[]>("/api/cases", {
-    method: "GET",
-    headers: authHeaders(auth),
-  });
+  return apiJson<CaseSummary[]>("/api/cases", { method: "GET", headers: authHeaders(auth) });
 }
 
 async function fetchCaseDetail(caseId: string, auth: AuthState): Promise<CaseDetail> {
@@ -110,11 +88,7 @@ async function ackCase(caseId: string, auth: AuthState): Promise<{ acked_at: str
   });
 }
 
-async function ackRule(
-  caseId: string,
-  ruleId: string,
-  auth: AuthState
-): Promise<{ acked_at: string }> {
+async function ackRule(caseId: string, ruleId: string, auth: AuthState): Promise<{ acked_at: string }> {
   return apiJson<{ acked_at: string }>("/api/ack", {
     method: "POST",
     headers: authHeaders(auth),
@@ -122,7 +96,18 @@ async function ackRule(
   });
 }
 
+function severityPill(sev: Severity) {
+  if (sev === "CRITICAL") return "bg-red-50 text-red-700 ring-1 ring-red-100";
+  if (sev === "WARN") return "bg-amber-50 text-amber-800 ring-1 ring-amber-100";
+  return "bg-emerald-50 text-emerald-800 ring-1 ring-emerald-100";
+}
+
 export default function App() {
+  // Branding-Placeholder (wie von dir gewünscht)
+  const clinicName = "Psychiatrische Universitätsklinik Zürich";
+  const clinicCode = "EPP";
+  const centerCode = "ZAPE";
+
   const [auth, setAuth] = useState<AuthState>(() => loadAuth());
   const [stations, setStations] = useState<string[]>(["A1", "B0", "B2"]);
   const [metaUsers, setMetaUsers] = useState<MetaUser[]>([
@@ -145,11 +130,69 @@ export default function App() {
   const [detailLoading, setDetailLoading] = useState(false);
 
   const [toast, setToast] = useState<ToastState>(null);
-
-  // Dedup for critical toasts across refresh cycles (per session)
   const shownCriticalRef = useRef<Record<string, true>>({});
 
-  // Polling: prototype-friendly. Keep interval moderate.
+  function updateAuth(patch: Partial<AuthState>) {
+    const next = { ...auth, ...patch };
+    setAuth(next);
+    saveAuth(next);
+  }
+
+  function splitRoles(rolesCsv: string): string[] {
+    return rolesCsv
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
+  // Meta endpoints (optional)
+  useEffect(() => {
+    let alive = true;
+
+    (async () => {
+      try {
+        const st = await fetch("/api/meta/stations").then((r) =>
+          r.ok ? r.json() : Promise.reject(new Error("meta/stations"))
+        );
+        if (alive && Array.isArray(st?.stations) && st.stations.length) {
+          setStations(st.stations);
+          if (!st.stations.includes(auth.stationId)) updateAuth({ stationId: st.stations[0] });
+        }
+      } catch {
+        // ignore
+      }
+
+      try {
+        const us = await fetch("/api/meta/users").then((r) =>
+          r.ok ? r.json() : Promise.reject(new Error("meta/users"))
+        );
+        if (alive && Array.isArray(us?.users) && us.users.length) {
+          setMetaUsers(us.users);
+          const u = us.users.find((x: MetaUser) => x.user_id === auth.userId) ?? us.users[0];
+          if (u) updateAuth({ userId: u.user_id, rolesCsv: (u.roles ?? []).join(",") });
+        }
+      } catch {
+        if (alive) setMetaError("Meta-Endpoints nicht erreichbar (Fallback aktiv).");
+      }
+    })();
+
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Rollen aus Meta ableiten (kein Freitext)
+  useEffect(() => {
+    const u = metaUsers.find((x) => x.user_id === auth.userId);
+    if (u) {
+      const next = (u.roles ?? []).join(",");
+      if (next && next !== auth.rolesCsv) updateAuth({ rolesCsv: next });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [auth.userId, metaUsers]);
+
+  // Poll list
   useEffect(() => {
     let alive = true;
 
@@ -160,13 +203,11 @@ export default function App() {
         setCases(data);
         setError(null);
 
-        // Only show CRITICAL toast if:
-        // - there is currently no toast open
-        // - there is at least 1 visible critical alert
-        // - toast for that case wasn't shown already (session)
         if (!toast) {
           const firstCritical = data.find(
-            (c) => (c.critical_count ?? (c.severity === "CRITICAL" ? 1 : 0)) > 0 && !shownCriticalRef.current[c.case_id]
+            (c) =>
+              (c.critical_count ?? (c.severity === "CRITICAL" ? 1 : 0)) > 0 &&
+              !shownCriticalRef.current[c.case_id]
           );
           if (firstCritical) {
             setToast({
@@ -183,7 +224,6 @@ export default function App() {
       }
     };
 
-    // initial + interval
     load();
     const id = window.setInterval(load, 10_000);
 
@@ -191,10 +231,9 @@ export default function App() {
       alive = false;
       window.clearInterval(id);
     };
-    // auth changes should restart polling
   }, [auth, toast]);
 
-  // Load detail when selection changes OR auth changes (station context changes)
+  // Load detail
   useEffect(() => {
     if (!selectedCaseId) {
       setDetail(null);
@@ -208,412 +247,153 @@ export default function App() {
         setDetail(d);
         setDetailError(null);
       })
-      .catch((err) => setDetailError(err?.message ?? String(err)))
+      .catch((err) => {
+        setDetail(null);
+        setDetailError(err?.message ?? String(err));
+      })
       .finally(() => setDetailLoading(false));
   }, [selectedCaseId, auth]);
 
-  // Keep detail acked_at in sync with list after polling refresh
+  // Sync ack status from list
   useEffect(() => {
     if (!detail || !selectedCaseId) return;
     const fromList = cases.find((c) => c.case_id === selectedCaseId);
     if (!fromList) return;
-    if (fromList.acked_at !== detail.acked_at) {
-      setDetail({ ...detail, acked_at: fromList.acked_at });
-    }
+    if (fromList.acked_at !== detail.acked_at) setDetail({ ...detail, acked_at: fromList.acked_at });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cases, selectedCaseId]);
 
-  function updateAuth(patch: Partial<AuthState>) {
-    const next = { ...auth, ...patch };
-    setAuth(next);
-    saveAuth(next);
-  }
-
-  // Load station/user choices from backend (prototyp) so you don't need to know valid IDs.
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        const st = await fetch("/api/meta/stations").then(r => r.ok ? r.json() : Promise.reject(new Error("meta/stations")));
-        if (alive && Array.isArray(st?.stations) && st.stations.length) {
-          setStations(st.stations);
-          if (!st.stations.includes(auth.stationId)) {
-            updateAuth({ stationId: st.stations[0] });
-          }
-        }
-      } catch (e: any) {
-        // keep defaults
-      }
-
-      try {
-        const us = await fetch("/api/meta/users").then(r => r.ok ? r.json() : Promise.reject(new Error("meta/users")));
-        if (alive && Array.isArray(us?.users) && us.users.length) {
-          setMetaUsers(us.users);
-          const u = us.users.find((x: MetaUser) => x.user_id === auth.userId) ?? us.users[0];
-          if (u) {
-            updateAuth({ userId: u.user_id, rolesCsv: (u.roles ?? []).join(",") });
-          }
-        }
-      } catch (e: any) {
-        if (!alive) return;
-        setMetaError("Meta-Endpoints nicht erreichbar (Fallback aktiv).");
-      }
-    })();
-
-    return () => {
-      alive = false;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // When user changes, derive roles automatically from meta list (no free-text roles).
-  useEffect(() => {
-    const u = metaUsers.find((x) => x.user_id === auth.userId);
-    if (u) {
-      const next = (u.roles ?? []).join(",");
-      if (next && next !== auth.rolesCsv) updateAuth({ rolesCsv: next });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [auth.userId, metaUsers]);
-
-  function splitRoles(rolesCsv: string): string[] {
-    return rolesCsv
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-  }
-
-  return (
-    <main style={{ padding: "1rem", fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial" }}>
-      <style>{`
-        :root{ --app-bg:#f6f7fb; --card:#ffffff; --border:#e6e8ef; --text:#0f172a; --muted:#64748b; --shadow:0 6px 20px rgba(15,23,42,.06); }
-        body{ background:var(--app-bg); color:var(--text); }
-        .wrap{ max-width:1200px; margin:0 auto; }
-        .panel{ background:var(--card); border:1px solid var(--border); border-radius:14px; box-shadow:var(--shadow); }
-        .gridMain{ display:grid; grid-template-columns: 1.1fr 0.9fr; gap:16px; align-items:start; }
-        @media (max-width: 980px){ .gridMain{ grid-template-columns: 1fr; } }
-        .toolbar{ display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
-        .search{ padding:10px 12px; border-radius:12px; border:1px solid var(--border); width: min(520px, 100%); background:#fff; }
-        .btn{ padding:8px 12px; border-radius:12px; border:1px solid var(--border); background:#fff; cursor:pointer; }
-        .btn:disabled{ opacity:.5; cursor:not-allowed; }
-      `}</style>
-      <div className="wrap">
-
-      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 16 }}>
-        <div>
-          <h1 style={{ margin: 0 }}>Dashboard – Station {auth.stationId}</h1>
-          <div style={{ fontSize: 12, opacity: 0.75 }}>
-            User: <code>{auth.userId}</code> · Rollen: <code>{auth.rolesCsv || "—"}</code>
-          </div>
-        </div>
-
-        <details style={{ border: "1px solid #ddd", borderRadius: 10, padding: "0.6rem 0.9rem", background: "#fff" }}>
-          <summary style={{ cursor: "pointer", fontWeight: 600 }}>Kontext (Prototyp)</summary>
-          <div style={{ marginTop: 10, display: "grid", gap: 10, minWidth: 320 }}>
-            <div style={{ display: "grid", gap: 6 }}>
-              <span style={{ fontSize: 12, opacity: 0.75 }}>Station</span>
-              <select
-                value={auth.stationId}
-                onChange={(e) => updateAuth({ stationId: e.target.value })}
-                style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc", background: "#fff" }}
-              >
-                {stations.map((s) => (
-                  <option key={s} value={s}>{s}</option>
-                ))}
-              </select>
-            </div>
-
-            <div style={{ display: "grid", gap: 6 }}>
-              <span style={{ fontSize: 12, opacity: 0.75 }}>User</span>
-              <select
-                value={auth.userId}
-                onChange={(e) => updateAuth({ userId: e.target.value })}
-                style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc", background: "#fff" }}
-              >
-                {metaUsers.map((u) => (
-                  <option key={u.user_id} value={u.user_id}>{u.user_id}</option>
-                ))}
-              </select>
-            </div>
-
-            <div style={{ display: "grid", gap: 6 }}>
-              <span style={{ fontSize: 12, opacity: 0.75 }}>Rollen</span>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                {splitRoles(auth.rolesCsv).map((r) => (
-                  <span key={r} style={{ fontSize: 12, padding: "2px 8px", borderRadius: 999, border: "1px solid #ddd", background: "#fafafa" }}>
-                    {r}
-                  </span>
-                ))}
-              </div>
-              <div style={{ fontSize: 12, opacity: 0.65 }}>
-                Rollen werden aus dem User abgeleitet (kein Freitext). {metaError ? `(${metaError})` : ""}
-              </div>
-            </div>
-          </div>
-        </details>
-      </div>
-
-      {error && <p style={{ color: "red" }}>Fehler: {error}</p>}
-
-      <div
-        style={{
-          marginTop: 12,
-          display: "grid",
-          gridTemplateColumns: "1fr 360px",
-          gap: "1rem",
-          alignItems: "start",
-        }}
-      >
-        {/* Left: Cards */}
-        <div style={{ display: "grid", gap: "0.75rem" }}>
-          {cases.map((c) => (
-            <button
-              key={c.case_id}
-              onClick={() => setSelectedCaseId(c.case_id)}
-              style={{
-                textAlign: "left",
-                padding: "0.75rem 1rem",
-                borderRadius: 6,
-                background: severityColor(c.severity),
-                border: selectedCaseId === c.case_id ? "2px solid #333" : "1px solid #ddd",
-                cursor: "pointer",
-                opacity: c.acked_at ? 0.7 : 1,
-              }}
-              title={c.acked_at ? `Quittiert: ${c.acked_at}` : "Nicht quittiert"}
-            >
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-                <div style={{ fontWeight: 700 }}>{c.case_id}</div>
-                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  {!!(c.critical_count && c.critical_count > 0) && (
-                    <span style={{ fontSize: 12, opacity: 0.85 }}>‼ {c.critical_count}</span>
-                  )}
-                  {!!(c.warn_count && c.warn_count > 0) && (
-                    <span style={{ fontSize: 12, opacity: 0.85 }}>⚠ {c.warn_count}</span>
-                  )}
-                  {c.acked_at ? <span style={{ fontSize: 12, opacity: 0.85 }}>✓ quittiert</span> : null}
-                </div>
-              </div>
-
-              <div>Status: {c.severity}</div>
-              {c.top_alert && <div style={{ marginTop: 4 }}>⚠ {c.top_alert}</div>}
-            </button>
-          ))}
-
-          {cases.length === 0 && !error && <p style={{ opacity: 0.8 }}>Keine Fälle für diese Station.</p>}
-        </div>
-
-        {/* Right: Detail Panel */}
-        <aside
-          style={{
-            border: "1px solid #ddd",
-            borderRadius: 6,
-            padding: "0.75rem 1rem",
-            background: "#fff",
-            minHeight: 200,
-          }}
-        >
-          {!selectedCaseId && <p>Fall auswählen, um Details zu sehen.</p>}
-
-          {selectedCaseId && detailLoading && <p>Lade Details…</p>}
-
-          {selectedCaseId && detailError && <p style={{ color: "red" }}>Fehler: {detailError}</p>}
-
-          {detail && !detailLoading && !detailError && (
-            <div>
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-                <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{detail.case_id}</h2>
-                <button onClick={() => setSelectedCaseId(null)} aria-label="Close details">
-                  ✕
-                </button>
-              </div>
-
-              <p style={{ marginTop: 8 }}>
-                <strong>Quittiert:</strong> {detail.acked_at ? `Ja (${detail.acked_at})` : "Nein"}
-              </p>
-
-              {!detail.acked_at && (
-                <button
-                  disabled={!canAck}
-                  onClick={async () => {
-                    if (!canAck) return;
-                    try {
-                      const res = await ackCase(detail.case_id, auth);
-
-                      // optimistic update: update detail and list
-                      setDetail({ ...detail, acked_at: res.acked_at });
-                      setCases((prev) =>
-                        prev.map((c) => (c.case_id === detail.case_id ? { ...c, acked_at: res.acked_at } : c))
-                      );
-
-                      // clear toast if it refers to this case
-                      setToast((t) => (t && t.caseId === detail.case_id ? null : t));
-                    } catch (e: any) {
-                      setError(e?.message ?? String(e));
-                    }
-                  }}
-                  style={{
-                    marginTop: 8,
-                    padding: "8px 12px",
-                    borderRadius: 6,
-                    border: "1px solid #333",
-                    background: canAck ? "#333" : "#999",
-                    color: "white",
-                    fontWeight: 600,
-                    cursor: canAck ? "pointer" : "not-allowed",
-                  }}
-                  title={canAck ? "Fall quittieren" : "Keine Berechtigung (ACK_ALERT fehlt)"}
-                >
-                  Fall quittieren
-                </button>
-              )}
-
-              <p style={{ marginTop: 12 }}>
-                <strong>Station:</strong> {detail.station_id}
-                <br />
-                <strong>Eintritt:</strong> {detail.admission_date}
-                <br />
-                <strong>HONOS:</strong> {detail.honos ?? "—"}
-                <br />
-                <strong>BSCL:</strong> {detail.bscl ?? "—"}
-                <br />
-                <strong>BFS vollständig:</strong> {detail.bfs_complete ? "Ja" : "Nein"}
-              </p>
-
-              <h3 style={{ marginBottom: 6, fontSize: "1rem" }}>Alerts</h3>
-              {detail.alerts.length === 0 ? (
-                <p>Keine Alerts.</p>
-              ) : (
-                <ul style={{ paddingLeft: 18, marginTop: 0 }}>
-                  {detail.alerts.map((a) => (
-                    <li key={a.rule_id} style={{ marginBottom: 10 }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                        <div>
-                          <strong>{a.severity}:</strong> {a.message}
-                        </div>
-                        <button
-                          disabled={!canAck}
-                          onClick={async () => {
-                            if (!canAck) return;
-                            try {
-                              await ackRule(detail.case_id, a.rule_id, auth);
-                              // Refresh both list + detail so the alert disappears immediately
-                              const [newList, newDetail] = await Promise.all([
-                                fetchCases(auth),
-                                fetchCaseDetail(detail.case_id, auth),
-                              ]);
-                              setCases(newList);
-                              setDetail(newDetail);
-                              // clear toast if it refers to this case and no critical remains
-                              setToast((t) => {
-                                if (!t || t.caseId !== detail.case_id) return t;
-                                const updated = newList.find((x) => x.case_id === detail.case_id);
-                                if (!updated || (updated.critical_count ?? 0) === 0) return null;
-                                return t;
-                              });
-                            } catch (e: any) {
-                              setError(e?.message ?? String(e));
-                            }
-                          }}
-                          style={{
-                            padding: "6px 10px",
-                            borderRadius: 10,
-                            border: "1px solid #333",
-                            background: canAck ? "#fff" : "#eee",
-                            cursor: canAck ? "pointer" : "not-allowed",
-                          }}
-                          title={canAck ? "Alert quittieren (bis morgen ausgeblendet)" : "Keine Berechtigung"}
-                        >
-                          Quittieren
-                        </button>
-                      </div>
-                      <div style={{ fontSize: "0.9em", opacity: 0.9 }}>{a.explanation}</div>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          )}
-        </aside>
-      </div>
-
-      {toast && (
-        <Toast
-          kind={toast.kind}
-          message={toast.message}
-          actionLabel={canAck ? "Quittieren" : undefined}
-          onAction={
-            canAck
-              ? async () => {
-                  try {
-                    await ackCase(toast.caseId, auth);
-                    setToast(null);
-                    // refresh list to reflect ack
-                    const data = await fetchCases(auth);
-                    setCases(data);
-                  } catch (e: any) {
-                    setError(e?.message ?? String(e));
-                  }
-                }
-              : undefined
-          }
-          onClose={() => setToast(null)}
-        />
-      )}
-          </div>
-    </main>
-  );
-const clinic = "Psychiatrische Universitätsklinik Zürich";
-  const center = auth.centerId ?? "—";   // falls noch nicht vorhanden, sonst Placeholder
-  const ward   = auth.stationId;
-
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
-      {/* Topbar */}
+      {/* Header */}
       <header className="border-b border-slate-200 bg-white">
         <div className="mx-auto max-w-7xl px-6 py-5">
-          <div className="flex flex-col gap-1">
-            <div className="text-xl font-semibold tracking-tight">{clinic}</div>
-            <div className="text-sm text-slate-600">Dashboard Stationsmonitoring</div>
-          </div>
+          <div className="flex items-start justify-between gap-6">
+            <div className="flex items-start gap-4">
+              <div className="grid h-11 w-11 place-items-center rounded-2xl bg-slate-900 text-sm font-semibold text-white">
+                {clinicCode}
+              </div>
 
-          {/* Kontextzeile */}
-          <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 text-sm text-slate-700">
-            <span className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-3 py-1">
-              Klinik: <span className="ml-1 font-medium">PUK</span>
-            </span>
-            <span className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-3 py-1">
-              Zentrum: <span className="ml-1 font-medium">{center}</span>
-            </span>
-            <span className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-3 py-1">
-              Station: <span className="ml-1 font-medium">{ward}</span>
-            </span>
+              <div className="min-w-0">
+                <div className="text-xl font-semibold tracking-tight">{clinicName}</div>
+                <div className="mt-0.5 text-sm text-slate-600">Dashboard Stationsmonitoring</div>
 
-            <span className="ml-auto text-xs text-slate-500">
-              User: <code className="rounded bg-slate-100 px-1 py-0.5">{auth.userId}</code>
-              {" · "}
-              Rollen: <code className="rounded bg-slate-100 px-1 py-0.5">{auth.rolesCsv || "—"}</code>
-            </span>
+                <div className="mt-3 flex flex-wrap items-center gap-2 text-sm">
+                  <span className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-3 py-1">
+                    Klinik: <span className="ml-1 font-medium">{clinicCode}</span>
+                  </span>
+                  <span className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-3 py-1">
+                    Zentrum: <span className="ml-1 font-medium">{centerCode}</span>
+                  </span>
+                  <span className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-3 py-1">
+                    Station: <span className="ml-1 font-medium">{auth.stationId}</span>
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="hidden text-right text-xs text-slate-500 md:block">
+              <div>
+                User: <code className="rounded bg-slate-100 px-1 py-0.5">{auth.userId}</code>
+              </div>
+              <div className="mt-1">
+                Rollen:{" "}
+                <code className="rounded bg-slate-100 px-1 py-0.5">{auth.rolesCsv || "—"}</code>
+              </div>
+            </div>
           </div>
         </div>
       </header>
 
       {/* Main */}
       <main className="mx-auto max-w-7xl px-6 py-6">
+        {error && (
+          <div className="mb-4 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+            Fehler: {error}
+          </div>
+        )}
+
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_420px]">
-          {/* Left: Fälle */}
+          {/* LEFT */}
           <section className="space-y-3">
-            {/* optional toolbar */}
-            <div className="flex flex-wrap items-center gap-2">
-              <input
-                className="w-full max-w-lg rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-slate-300"
-                placeholder="Suche Fall-ID…"
-                // value/onChange falls ihr sucht
-              />
-              <button className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm hover:bg-slate-50">
-                Aktualisieren
-              </button>
+            {/* Kontext */}
+            <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+              <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+                <div className="grid gap-3 md:grid-cols-2">
+                  <label className="grid gap-1 text-sm">
+                    <span className="text-xs text-slate-500">Station</span>
+                    <select
+                      value={auth.stationId}
+                      onChange={(e) => updateAuth({ stationId: e.target.value })}
+                      className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-sm outline-none focus:ring-2 focus:ring-slate-300"
+                    >
+                      {stations.map((s) => (
+                        <option key={s} value={s}>
+                          {s}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label className="grid gap-1 text-sm">
+                    <span className="text-xs text-slate-500">User</span>
+                    <select
+                      value={auth.userId}
+                      onChange={(e) => updateAuth({ userId: e.target.value })}
+                      className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-sm outline-none focus:ring-2 focus:ring-slate-300"
+                    >
+                      {metaUsers.map((u) => (
+                        <option key={u.user_id} value={u.user_id}>
+                          {u.user_id}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+
+                <div className="min-w-0">
+                  <div className="text-xs text-slate-500">Rollen</div>
+                  <div className="mt-1 flex flex-wrap gap-2">
+                    {splitRoles(auth.rolesCsv).map((r) => (
+                      <span
+                        key={r}
+                        className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs text-slate-700"
+                      >
+                        {r}
+                      </span>
+                    ))}
+                  </div>
+                  <div className="mt-1 text-xs text-slate-500">
+                    Rollen werden aus dem User abgeleitet (kein Freitext). {metaError ? `(${metaError})` : ""}
+                  </div>
+                </div>
+              </div>
             </div>
 
+
+            <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-3">
+  <div className="rounded-2xl border border-slate-200 bg-white p-4">
+    <div className="text-xs text-slate-500">Fälle gesamt</div>
+    <div className="mt-1 text-2xl font-semibold">{cases.length}</div>
+  </div>
+
+  <div className="rounded-2xl border border-red-200 bg-red-50 p-4">
+    <div className="text-xs text-red-700">Critical</div>
+    <div className="mt-1 text-2xl font-semibold text-red-800">
+      {cases.filter(c => (c.critical_count ?? 0) > 0).length}
+    </div>
+  </div>
+
+  <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+    <div className="text-xs text-amber-800">Warn</div>
+    <div className="mt-1 text-2xl font-semibold text-amber-900">
+      {cases.filter(c => (c.warn_count ?? 0) > 0).length}
+    </div>
+  </div>
+</div>
+
+
+            {/* Fälle */}
             <div className="space-y-2">
               {cases.map((c) => (
                 <button
@@ -625,16 +405,17 @@ const clinic = "Psychiatrische Universitätsklinik Zürich";
                     selectedCaseId === c.case_id ? "ring-2 ring-slate-300" : "",
                     c.acked_at ? "opacity-70" : "",
                   ].join(" ")}
+                  title={c.acked_at ? `Quittiert: ${c.acked_at}` : "Nicht quittiert"}
                 >
                   <div className="flex items-start justify-between gap-3">
-                    <div>
+                    <div className="min-w-0">
                       <div className="text-sm font-semibold">{c.case_id}</div>
                       <div className="mt-1 text-xs text-slate-600">
                         Status: <span className="font-medium">{c.severity}</span>
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-2 text-xs text-slate-700">
+                    <div className="flex items-center gap-2 text-xs">
                       {(c.critical_count ?? 0) > 0 && (
                         <span className="rounded-full bg-red-50 px-2 py-1 text-red-700 ring-1 ring-red-100">
                           ‼ {c.critical_count}
@@ -662,22 +443,181 @@ const clinic = "Psychiatrische Universitätsklinik Zürich";
               ))}
 
               {cases.length === 0 && !error && (
-                <div className="rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-600">
+                <div className="rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-600 shadow-sm">
                   Keine Fälle für diese Station.
                 </div>
               )}
             </div>
           </section>
 
-          {/* Right: Detail */}
+          {/* RIGHT */}
           <aside className="lg:sticky lg:top-6">
             <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-              {/* …dein Detail-Rendering, nur Klassen statt Inline-Style */}
+              {!selectedCaseId && <div className="text-sm text-slate-700">Fall auswählen, um Details zu sehen.</div>}
+
+              {selectedCaseId && detailLoading && <div className="text-sm text-slate-700">Lade Details…</div>}
+
+              {selectedCaseId && detailError && (
+                <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+                  Fehler: {detailError}
+                </div>
+              )}
+
+              {detail && !detailLoading && !detailError && (
+                <div className="space-y-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold">{detail.case_id}</div>
+                      <div className="mt-1 text-xs text-slate-600">
+                        Station: <span className="font-medium">{detail.station_id}</span>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setSelectedCaseId(null)}
+                      className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm hover:bg-slate-50"
+                      aria-label="Close details"
+                    >
+                      ✕
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3 text-sm">
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                      <div className="text-xs text-slate-500">Eintritt</div>
+                      <div className="mt-1 font-medium">{detail.admission_date}</div>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                      <div className="text-xs text-slate-500">BFS vollständig</div>
+                      <div className="mt-1 font-medium">{detail.bfs_complete ? "Ja" : "Nein"}</div>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                      <div className="text-xs text-slate-500">HONOS</div>
+                      <div className="mt-1 font-medium">{detail.honos ?? "—"}</div>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                      <div className="text-xs text-slate-500">BSCL</div>
+                      <div className="mt-1 font-medium">{detail.bscl ?? "—"}</div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-sm">
+                      <span className="text-slate-600">Quittiert:</span>{" "}
+                      <span className="font-medium">{detail.acked_at ? `Ja (${detail.acked_at})` : "Nein"}</span>
+                    </div>
+
+                    {!detail.acked_at && (
+                      <button
+                        disabled={!canAck}
+                        onClick={async () => {
+                          if (!canAck) return;
+                          const res = await ackCase(detail.case_id, auth);
+                          setDetail({ ...detail, acked_at: res.acked_at });
+                          setCases((prev) =>
+                            prev.map((c) =>
+                              c.case_id === detail.case_id ? { ...c, acked_at: res.acked_at } : c
+                            )
+                          );
+                          setToast((t) => (t && t.caseId === detail.case_id ? null : t));
+                        }}
+                        className={[
+                          "rounded-xl px-3 py-2 text-sm font-medium",
+                          canAck
+                            ? "border border-slate-200 bg-slate-900 text-white hover:bg-slate-800"
+                            : "cursor-not-allowed border border-slate-200 bg-slate-200 text-slate-500",
+                        ].join(" ")}
+                        title={canAck ? "Fall quittieren" : "Keine Berechtigung (ACK_ALERT fehlt)"}
+                      >
+                        Fall quittieren
+                      </button>
+                    )}
+                  </div>
+
+                  <div>
+                    <div className="mb-2 text-sm font-semibold">Alerts</div>
+
+                    {detail.alerts.length === 0 ? (
+                      <div className="text-sm text-slate-600">Keine Alerts.</div>
+                    ) : (
+                      <ul className="space-y-2">
+                        {detail.alerts.map((a) => (
+                          <li key={a.rule_id} className="rounded-xl border border-slate-200 p-3">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-2 text-sm">
+                                  <span className={`rounded-full px-2 py-1 text-xs ${severityPill(a.severity as Severity)}`}>
+                                    {a.severity}
+                                  </span>
+                                  <span className="text-slate-700">{a.message}</span>
+                                </div>
+                                {a.explanation && (
+                                  <div className="mt-2 text-xs text-slate-500">{a.explanation}</div>
+                                )}
+                              </div>
+
+                              <button
+                                disabled={!canAck}
+                                onClick={async () => {
+                                  if (!canAck) return;
+                                  await ackRule(detail.case_id, a.rule_id, auth);
+
+                                  const [newList, newDetail] = await Promise.all([
+                                    fetchCases(auth),
+                                    fetchCaseDetail(detail.case_id, auth),
+                                  ]);
+                                  setCases(newList);
+                                  setDetail(newDetail);
+
+                                  setToast((t) => {
+                                    if (!t || t.caseId !== detail.case_id) return t;
+                                    const updated = newList.find((x) => x.case_id === detail.case_id);
+                                    if (!updated || (updated.critical_count ?? 0) === 0) return null;
+                                    return t;
+                                  });
+                                }}
+                                className={[
+                                  "rounded-lg px-2.5 py-1.5 text-xs",
+                                  canAck
+                                    ? "border border-slate-200 bg-white hover:bg-slate-50"
+                                    : "cursor-not-allowed border border-slate-200 bg-slate-100 text-slate-400",
+                                ].join(" ")}
+                                title={canAck ? "Alert quittieren (bis morgen ausgeblendet)" : "Keine Berechtigung"}
+                              >
+                                Quittieren
+                              </button>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           </aside>
         </div>
+
+        
+
+        {toast && (
+          <Toast
+            kind={toast.kind}
+            message={toast.message}
+            actionLabel={canAck ? "Quittieren" : undefined}
+            onAction={
+              canAck
+                ? async () => {
+                    await ackCase(toast.caseId, auth);
+                    setToast(null);
+                    const data = await fetchCases(auth);
+                    setCases(data);
+                  }
+                : undefined
+            }
+            onClose={() => setToast(null)}
+          />
+        )}
       </main>
     </div>
   );
-}  
-
+}
