@@ -2,6 +2,14 @@ import { useEffect } from "react";
 
 export type ToastKind = "info" | "warn" | "critical";
 
+/**
+ * Ein sehr einfacher Toast.
+ *
+ * - Auto-close nach 6 Sekunden
+ * - Optionaler Action-Button
+ *
+ * Hinweis: Styling ist bewusst simpel (kein externes UI-Framework).
+ */
 export function Toast({
   message,
   kind,
@@ -14,32 +22,13 @@ export function Toast({
   onClose: () => void;
   actionLabel?: string;
   onAction?: () => void;
-}) 
- {{onAction && actionLabel && (
-  <button
-    onClick={onAction}
-    style={{
-      background: "rgba(255,255,255,0.2)",
-      color: "white",
-      border: "1px solid rgba(255,255,255,0.35)",
-      borderRadius: 6,
-      padding: "6px 10px",
-      cursor: "pointer",
-      fontSize: 12,
-      whiteSpace: "nowrap",
-    }}
-  >
-    {actionLabel}
-  </button>
-)}
-
+}) {
   useEffect(() => {
-    const t = window.setTimeout(onClose, 6000); // auto-close
+    const t = window.setTimeout(onClose, 6000);
     return () => window.clearTimeout(t);
   }, [onClose]);
 
-  const bg =
-    kind === "critical" ? "#d32f2f" : kind === "warn" ? "#f9a825" : "#1976d2";
+  const bg = kind === "critical" ? "#d32f2f" : kind === "warn" ? "#f9a825" : "#1976d2";
 
   return (
     <div
@@ -47,7 +36,7 @@ export function Toast({
         position: "fixed",
         right: 16,
         bottom: 16,
-        maxWidth: 420,
+        maxWidth: 520,
         padding: "12px 14px",
         borderRadius: 8,
         color: "white",
@@ -60,10 +49,30 @@ export function Toast({
       aria-live="polite"
     >
       <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
-        <div style={{ fontWeight: 700 }}>
+        <div style={{ fontWeight: 700, whiteSpace: "nowrap" }}>
           {kind === "critical" ? "KRITISCH" : kind === "warn" ? "WARNUNG" : "INFO"}
         </div>
+
         <div style={{ flex: 1 }}>{message}</div>
+
+        {onAction && actionLabel ? (
+          <button
+            onClick={onAction}
+            style={{
+              background: "rgba(255,255,255,0.2)",
+              color: "white",
+              border: "1px solid rgba(255,255,255,0.35)",
+              borderRadius: 6,
+              padding: "6px 10px",
+              cursor: "pointer",
+              fontSize: 12,
+              whiteSpace: "nowrap",
+            }}
+          >
+            {actionLabel}
+          </button>
+        ) : null}
+
         <button
           onClick={onClose}
           style={{

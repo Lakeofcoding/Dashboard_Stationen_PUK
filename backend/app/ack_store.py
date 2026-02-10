@@ -8,7 +8,7 @@ from typing import Any, Optional
 from sqlalchemy import select
 
 from app.db import SessionLocal
-from app.models import Ack, AckEvent
+from app.models import Ack, AckEvent, Defer
 
 
 def _now_iso() -> str:
@@ -201,3 +201,81 @@ class AckStore:
                 stmt = stmt.where(AckEvent.case_id == case_id)
             stmt = stmt.order_by(AckEvent.ts.desc()).limit(limit)
             return list(db.execute(stmt).scalars().all())
+
+    # ---------------------------------------------------------------------
+    # Defer ("Schieben")
+    # ---------------------------------------------------------------------
+
+    def upsert_defer(
+        self,
+        *,
+        case_id: str,
+        station_id: str,
+        user_id: str,
+        reason: str,
+    ) -> Defer:
+        """Speichert/aktualisiert den "geschoben"-Status.
+
+        Zusätzlich schreiben wir einen Audit-Eintrag in ack_event.
+        """
+        now = _now_iso()
+
+        with SessionLocal() as db:
+            existing = db.get(Defer, (case_id, station_id))
+
+            if existing:
+                old = {"deferred_at": existing.deferred_at, "deferred_by": existing.deferred_by, "reason": existing.reason}
+
+                existing.deferred_at = now
+                existing.deferred_by = user_id
+                existing.reason = reason
+
+                db.add(
+                    self._insert_event(
+                        case_id=case_id,
+                        station_id=station_id,
+                        ack_scope="case",
+                        scope_id="*",
+                        event_type="DEFER_UPDATE",
+                        user_id=user_id,
+                        payload={"old": old, "new": {"deferred_at": now, "deferred_by": user_id, "reason": reason}},
+                    )
+                )
+
+                db.commit()
+                db.refresh(existing)
+                return existing
+
+            row = Defer(
+                case_id=case_id,
+                station_id=station_id,
+                deferred_at=now,
+                deferred_by=user_id,
+                reason=reason,
+            )
+
+            db.add(row)
+            db.add(
+                self._insert_event(
+                    case_id=case_id,
+                    station_id=station_id,
+                    ack_scope="case",
+                    scope_id="*",
+                    event_type="DEFER",
+                    user_id=user_id,
+                    payload={"deferred_at": now, "deferred_by": user_id, "reason": reason},
+                )
+            )
+            db.commit()
+            db.refresh(row)
+            return row
+
+    def get_defers_for_cases(self, case_ids: list[str], station_id: str) -> dict[str, Defer]:
+        """Liefert den aktuellen "geschoben"-Status (falls vorhanden) pro case_id."""
+        if not case_ids:
+            return {}
+
+        with SessionLocal() as db:
+            stmt = select(Defer).where(Defer.station_id == station_id, Defer.case_id.in_(case_ids))
+            rows = list(db.execute(stmt).scalars().all())
+            return {r.case_id: r for r in rows}

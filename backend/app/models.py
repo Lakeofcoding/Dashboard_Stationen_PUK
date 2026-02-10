@@ -38,3 +38,25 @@ class AckEvent(Base):
 
     user_id = Column(String, nullable=True)       # null for automatic/system events
     payload = Column(String, nullable=True)       # JSON text; use JSONB in Postgres later
+
+
+class Defer(Base):
+    """Aktueller "Schieben"-Status pro Fall/Station.
+
+    Warum extra Tabelle?
+    - Wir wollen schnell den letzten Schiebegrund anzeigen (Dashboard)
+    - Zusätzlich schreiben wir immer in AckEvent (Audit-Trail)
+
+    Hinweis:
+    - In einer echten KISIM-Integration wäre das eher ein Statusfeld im KIS-DB-Modell.
+    - Für das MVP ist eine lokale Tabelle ok.
+    """
+
+    __tablename__ = "defer"
+
+    case_id = Column(String, primary_key=True)
+    station_id = Column(String, primary_key=True)
+
+    deferred_at = Column(String, nullable=False)
+    deferred_by = Column(String, nullable=False)
+    reason = Column(String, nullable=False)

@@ -6,7 +6,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Optional
 import yaml
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from zoneinfo import ZoneInfo
 
@@ -44,8 +44,50 @@ def compute_condition_hash(
 # App setup
 # -----------------------------------------------------------------------------
 
-app = FastAPI(title="Dashboard Backend (MVP)", version="0.3.0", debug=True)
+"""FastAPI Backend.
+
+Hinweis für den Betrieb im Intranet:
+- In Produktivumgebungen sollte ein Reverse Proxy davor stehen (TLS, SSO, CSP).
+- Dieses Backend sollte keinen Internet-Egress haben (Firewall / Segmentierung).
+"""
+
+import os
+
+DEBUG = os.getenv("DASHBOARD_DEBUG", "0") == "1"
+SET_CSP = os.getenv("DASHBOARD_SET_CSP", "0") == "1"
+
+app = FastAPI(title="Dashboard Backend (MVP)", version="0.3.0", debug=DEBUG)
 ack_store = AckStore()
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    """Setzt defensive Standard-Header.
+
+    Wichtiger Hinweis:
+    - Eine vollständige CSP (Content-Security-Policy) setzt man typischerweise im Reverse Proxy.
+    - Für Patientendaten ist außerdem "no-store" sinnvoll, damit Browser/Proxies nicht cachen.
+    """
+    response: Response = await call_next(request)
+
+    # Keine Cache-Speicherung sensibler API-Antworten
+    if request.url.path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "no-store")
+
+    # Basis-Header gegen typische Browser-Angriffe
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+
+    # CSP: am besten im Reverse Proxy setzen (siehe INTRANET_PROXY_BEISPIEL.md).
+    # Optional kann man sie auch hier setzen. Achtung: Vite-Dev-Server braucht oft lockerer...
+    if SET_CSP and not DEBUG:
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'",
+        )
+
+    return response
 
 
 @app.on_event("startup")
@@ -111,6 +153,10 @@ class CaseSummary(BaseModel):
 
     # case-level ack ("Fall vollständig") – only possible after discharge
     acked_at: Optional[str] = None
+
+    # "Schieben" (Defer): letzter Schiebezeitpunkt + Grund
+    deferred_at: Optional[str] = None
+    deferred_reason: Optional[str] = None
 
 
 class CaseDetail(CaseSummary):
@@ -576,6 +622,7 @@ def list_cases(ctx: AuthContext = Depends(get_auth_context)):
     case_ids = [c["case_id"] for c in station_cases]
 
     acks = ack_store.get_acks_for_cases(case_ids, station_id)
+    defers = ack_store.get_defers_for_cases(case_ids, station_id)
 
     case_level_acked_at: dict[str, str] = {}
     # rule_acks_today[case_id][rule_id] = ack_row
@@ -630,6 +677,8 @@ def list_cases(ctx: AuthContext = Depends(get_auth_context)):
                 critical_count=critical_count,
                 warn_count=warn_count,
                 acked_at=case_level_acked_at.get(c["case_id"]),
+                deferred_at=getattr(defers.get(c["case_id"]), "deferred_at", None),
+                deferred_reason=getattr(defers.get(c["case_id"]), "reason", None),
             )
         )
 
@@ -653,6 +702,7 @@ def get_case(case_id: str, ctx: AuthContext = Depends(get_auth_context)):
     current_hash: dict[str, str] = {a.rule_id: a.condition_hash for a in raw_alerts}
 
     acks = ack_store.get_acks_for_cases([case_id], ctx.station_id)
+    defer_row = ack_store.get_defers_for_cases([case_id], ctx.station_id).get(case_id)
     acked_at: str | None = None
     rule_acks: dict[str, str] = {}
 
@@ -696,6 +746,8 @@ def get_case(case_id: str, ctx: AuthContext = Depends(get_auth_context)):
         critical_count=critical_count,
         warn_count=warn_count,
         acked_at=acked_at,
+        deferred_at=getattr(defer_row, "deferred_at", None),
+        deferred_reason=getattr(defer_row, "reason", None),
         honos=c.get("honos_entry_total"),
         bscl=c.get("bscl_total_entry"),
         bfs_complete=not (c.get("_derived") or {}).get("bfs_incomplete", False),
@@ -778,6 +830,50 @@ class AckRequest(BaseModel):
     comment: Optional[str] = None
 
 
+class DeferRequest(BaseModel):
+    """Request-Modell für "Schieben".
+
+    reason: Text/Grund. Im MVP wird das im Frontend aus einer Liste gewählt.
+    """
+
+    case_id: str
+    reason: str = Field(min_length=1, max_length=200)
+
+
+@app.post("/api/defer")
+def defer_case(req: DeferRequest, ctx: AuthContext = Depends(get_auth_context)):
+    """Protokolliert, dass ein Fall "geschoben" wurde.
+
+    Semantik (MVP):
+    - Es wird pro Fall/Station nur der letzte Schiebegrund gespeichert.
+    - Zusätzlich existiert ein Audit-Trail (ack_event).
+    """
+    require_role(ctx, "ACK_ALERT")
+
+    raw = next((x for x in DUMMY_CASES if x["case_id"] == req.case_id), None)
+    if raw is None:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    c = enrich_case(raw)
+    if c["station_id"] != ctx.station_id:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    row = ack_store.upsert_defer(
+        case_id=req.case_id,
+        station_id=ctx.station_id,
+        user_id=ctx.user_id,
+        reason=req.reason,
+    )
+
+    return {
+        "case_id": row.case_id,
+        "station_id": row.station_id,
+        "deferred_at": row.deferred_at,
+        "deferred_by": row.deferred_by,
+        "reason": row.reason,
+    }
+
+
 @app.post("/api/ack")
 def ack(req: AckRequest, ctx: AuthContext = Depends(get_auth_context)):
     require_role(ctx, "ACK_ALERT")
@@ -829,3 +925,21 @@ def ack(req: AckRequest, ctx: AuthContext = Depends(get_auth_context)):
         "acked_by": ack_row.acked_by,
         "condition_hash": getattr(ack_row, "condition_hash", None),
     }
+
+
+# -----------------------------------------------------------------------------
+# Lokaler Start (Entwicklung)
+# -----------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    """Erlaubt: `python main.py` für lokale Entwicklung.
+
+    In Produktion startet man üblicherweise über einen Prozessmanager
+    (z.B. systemd) oder ein Container-Setup, z.B.:
+
+      uvicorn main:app --host 0.0.0.0 --port 8000
+    """
+
+    import uvicorn
+
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=DEBUG)

@@ -10,6 +10,10 @@ export interface Alert {
 
 export interface CaseSummary {
   case_id: string;
+  // Optional: Das Backend liefert patient_id (im Demo-Datensatz). Für echte PHI gilt Datenminimierung.
+  patient_id?: string;
+  clinic?: string;
+  center?: string;
   station_id: string;
   admission_date: string;
   discharge_date: string | null;
@@ -18,6 +22,10 @@ export interface CaseSummary {
   critical_count?: number;
   warn_count?: number;
   acked_at?: string | null;
+
+  // "Schieben"-Info (MVP): letzter Schiebegrund + Zeitpunkt
+  deferred_at?: string | null;
+  deferred_reason?: string | null;
 }
 
 export interface CaseDetail extends CaseSummary {
