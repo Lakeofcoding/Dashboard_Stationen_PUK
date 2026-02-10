@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+
+# SQLite
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+
+# Node
+node_modules/
+dist/
