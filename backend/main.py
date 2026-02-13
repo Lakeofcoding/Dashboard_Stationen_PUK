@@ -1,3 +1,14 @@
+"""
+Datei: backend/main.py
+
+Zweck:
+- Backend-/Serverlogik dieser Anwendung.
+- Kommentare wurden ergänzt, um Einstieg und Wartung zu erleichtern.
+
+Hinweis:
+- Sicherheitsrelevante Checks (RBAC/Permissions) werden serverseitig erzwungen.
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -27,6 +38,7 @@ from app.models import DayState, RuleDefinition
 # Helpers: condition hash
 # -----------------------------------------------------------------------------
 
+# Funktion: compute_condition_hash – kapselt eine wiederverwendbare Backend-Operation.
 def compute_condition_hash(
     *,
     rule_id: str,
@@ -58,6 +70,7 @@ ack_store = AckStore()
 
 
 @app.on_event("startup")
+# Funktion: _startup – kapselt eine wiederverwendbare Backend-Operation.
 def _startup():
     init_db()
     with SessionLocal() as db:
@@ -105,11 +118,13 @@ def _startup():
 Severity = Literal["OK", "WARN", "CRITICAL"]
 
 
+# Funktion: today_local – kapselt eine wiederverwendbare Backend-Operation.
 def today_local() -> date:
     """Business date for acknowledgement expiry (Europe/Zurich)."""
     return datetime.now(ZoneInfo("Europe/Zurich")).date()
 
 
+# Funktion: get_day_version – kapselt eine wiederverwendbare Backend-Operation.
 def get_day_version(*, station_id: str) -> int:
     """Liefert die aktuelle Tagesversion ("Vers") für eine Station.
 
@@ -132,6 +147,7 @@ def get_day_version(*, station_id: str) -> int:
         return int(row.version)
 
 
+# Funktion: _parse_iso_dt – kapselt eine wiederverwendbare Backend-Operation.
 def _parse_iso_dt(s: str) -> datetime:
     # Handle trailing Z
     if s.endswith("Z"):
@@ -139,6 +155,7 @@ def _parse_iso_dt(s: str) -> datetime:
     return datetime.fromisoformat(s)
 
 
+# Funktion: _ack_is_valid_today – kapselt eine wiederverwendbare Backend-Operation.
 def _ack_is_valid_today(*, acked_at_iso: str, business_date: str | None, version: int | None, current_version: int) -> bool:
     """Prüft, ob eine Quittierung/Shift *heute* gültig ist.
 
@@ -173,6 +190,7 @@ def _ack_is_valid_today(*, acked_at_iso: str, business_date: str | None, version
     return dt.astimezone(ZoneInfo("Europe/Zurich")).date().isoformat() == today
 
 
+# Klasse: Alert – strukturiert Daten/Logik (z.B. Modelle, Services).
 class Alert(BaseModel):
     rule_id: str
     severity: Severity
@@ -183,6 +201,7 @@ class Alert(BaseModel):
     condition_hash: str
 
 
+# Klasse: CaseSummary – strukturiert Daten/Logik (z.B. Modelle, Services).
 class CaseSummary(BaseModel):
     case_id: str
     patient_id: str
@@ -205,6 +224,7 @@ class CaseSummary(BaseModel):
     acked_at: Optional[str] = None
 
 
+# Klasse: CaseDetail – strukturiert Daten/Logik (z.B. Modelle, Services).
 class CaseDetail(CaseSummary):
     # For UI convenience
     honos: Optional[int] = None
@@ -406,6 +426,7 @@ DUMMY_CASES = [
 
 
 
+# Funktion: enrich_case – kapselt eine wiederverwendbare Backend-Operation.
 def enrich_case(c: dict) -> dict:
     station_id = c["station_id"]
     center = STATION_CENTER.get(station_id, "UNKNOWN")
@@ -432,6 +453,7 @@ def enrich_case(c: dict) -> dict:
     if discharge_date is not None:
         days_from_discharge = (today - discharge_date).days
 
+# Funktion: _due_missing – kapselt eine wiederverwendbare Backend-Operation.
     def _due_missing(total_val) -> bool:
         if discharge_date is None:
             return False
@@ -535,6 +557,7 @@ def enrich_case(c: dict) -> dict:
 RULES_PATH = Path(__file__).resolve().parent.parent / "rules" / "rules.yaml"
 
 
+# Funktion: load_rules – kapselt eine wiederverwendbare Backend-Operation.
 def load_rules() -> dict:
     if RULES_PATH.exists():
         with RULES_PATH.open("r", encoding="utf-8") as f:
@@ -587,6 +610,7 @@ def load_rules() -> dict:
     }
 
 
+# Funktion: seed_rule_definitions – kapselt eine wiederverwendbare Backend-Operation.
 def seed_rule_definitions(db) -> None:
     """Seed Rules aus rules.yaml in die DB.
 
@@ -637,6 +661,7 @@ def seed_rule_definitions(db) -> None:
     db.commit()
 
 
+# Funktion: load_rule_definitions – kapselt eine wiederverwendbare Backend-Operation.
 def load_rule_definitions() -> list[RuleDefinition]:
     """Aktuelle Regeln aus DB. Falls leer (fresh DB), fall back auf YAML."""
     with SessionLocal() as db:
@@ -648,6 +673,7 @@ def load_rule_definitions() -> list[RuleDefinition]:
         return db.query(RuleDefinition).order_by(RuleDefinition.rule_id.asc()).all()
 
 
+# Funktion: eval_rule – kapselt eine wiederverwendbare Backend-Operation.
 def eval_rule(metric_value, operator: str, value) -> bool:
     if operator == ">":
         return metric_value is not None and metric_value > value
@@ -662,6 +688,7 @@ def eval_rule(metric_value, operator: str, value) -> bool:
     return False
 
 
+# Funktion: evaluate_alerts – kapselt eine wiederverwendbare Backend-Operation.
 def evaluate_alerts(case: dict) -> list[Alert]:
     rules = load_rule_definitions()
     derived = case.get("_derived") or {}
@@ -710,6 +737,7 @@ def evaluate_alerts(case: dict) -> list[Alert]:
     return alerts
 
 
+# Funktion: summarize_severity – kapselt eine wiederverwendbare Backend-Operation.
 def summarize_severity(alerts: list[Alert]) -> tuple[Severity, Optional[str], int, int]:
     """Returns (severity, top_alert_text, critical_count, warn_count)."""
     critical = [a for a in alerts if a.severity == "CRITICAL"]
@@ -734,12 +762,16 @@ def summarize_severity(alerts: list[Alert]) -> tuple[Severity, Optional[str], in
 # Endpoints
 # -----------------------------------------------------------------------------
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.get("/health")
+# Funktion: health – kapselt eine wiederverwendbare Backend-Operation.
 def health():
     return {"status": "ok"}
 
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.get("/api/cases", response_model=list[CaseSummary])
+# Funktion: list_cases – kapselt eine wiederverwendbare Backend-Operation.
 def list_cases(
     view: Literal["all", "completeness", "medical"] = "all",
     ctx: AuthContext = Depends(get_auth_context),
@@ -831,7 +863,9 @@ def list_cases(
     return out
 
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.get("/api/cases/{case_id}", response_model=CaseDetail)
+# Funktion: get_case – kapselt eine wiederverwendbare Backend-Operation.
 def get_case(
     case_id: str,
     view: Literal["all", "completeness", "medical"] = "all",
@@ -926,7 +960,9 @@ def get_case(
     )
 
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.get("/api/debug/rules")
+# Funktion: debug_rules – kapselt eine wiederverwendbare Backend-Operation.
 def debug_rules(
     ctx: AuthContext = Depends(get_auth_context),
     _ctx: str = Depends(require_ctx),
@@ -941,7 +977,9 @@ def debug_rules(
     }
 
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.get("/api/debug/eval/{case_id}")
+# Funktion: debug_eval – kapselt eine wiederverwendbare Backend-Operation.
 def debug_eval(
     case_id: str,
     ctx: AuthContext = Depends(get_auth_context),
@@ -961,7 +999,9 @@ def debug_eval(
     }
 
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.get("/api/debug/ack-events")
+# Funktion: debug_ack_events – kapselt eine wiederverwendbare Backend-Operation.
 def debug_ack_events(
     ctx: AuthContext = Depends(get_auth_context),
     _ctx: str = Depends(require_ctx),
@@ -983,7 +1023,9 @@ def debug_ack_events(
         for e in events
     ]
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.get("/api/meta/stations")
+# Funktion: meta_stations – kapselt eine wiederverwendbare Backend-Operation.
 def meta_stations(
     ctx: AuthContext = Depends(get_auth_context),
     _perm: None = Depends(require_permission("meta:read")),
@@ -993,7 +1035,9 @@ def meta_stations(
     return {"stations": stations}
 
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.get("/api/meta/users")
+# Funktion: meta_users – kapselt eine wiederverwendbare Backend-Operation.
 def meta_users(
     ctx: AuthContext = Depends(get_auth_context),
     _perm: None = Depends(require_permission("meta:read")),
@@ -1016,7 +1060,9 @@ def meta_users(
         }
 
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.get("/api/meta/me")
+# Funktion: meta_me – kapselt eine wiederverwendbare Backend-Operation.
 def meta_me(
     ctx: AuthContext = Depends(get_auth_context),
 ):
@@ -1039,6 +1085,7 @@ def meta_me(
 # Ack API
 # -----------------------------------------------------------------------------
 
+# Klasse: AckRequest – strukturiert Daten/Logik (z.B. Modelle, Services).
 class AckRequest(BaseModel):
     case_id: str
     ack_scope: str = "case"   # 'case' | 'rule'
@@ -1051,7 +1098,9 @@ class AckRequest(BaseModel):
     shift_code: Optional[Literal["a", "b", "c"]] = None
 
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.post("/api/ack")
+# Funktion: ack – kapselt eine wiederverwendbare Backend-Operation.
 def ack(
     req: AckRequest,
     ctx: AuthContext = Depends(get_auth_context),
@@ -1155,7 +1204,9 @@ def ack(
 # Reset/Version API
 # -----------------------------------------------------------------------------
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.get("/api/day_state")
+# Funktion: get_day_state – kapselt eine wiederverwendbare Backend-Operation.
 def get_day_state(
     ctx: AuthContext = Depends(get_auth_context),
     _ctx: str = Depends(require_ctx),
@@ -1169,7 +1220,9 @@ def get_day_state(
     }
 
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.post("/api/reset_today")
+# Funktion: reset_today – kapselt eine wiederverwendbare Backend-Operation.
 def reset_today(
     ctx: AuthContext = Depends(get_auth_context),
     _ctx: str = Depends(require_ctx),
@@ -1224,43 +1277,52 @@ def reset_today(
 # Admin API (RBAC / Audit / Break-glass)
 # -----------------------------------------------------------------------------
 
+# Klasse: AdminUserCreate – strukturiert Daten/Logik (z.B. Modelle, Services).
 class AdminUserCreate(BaseModel):
     user_id: str = Field(..., min_length=1)
     display_name: Optional[str] = None
     is_active: bool = True
     roles: list[AdminAssignRole] = Field(default_factory=list)
 
+# Klasse: AdminUserUpdate – strukturiert Daten/Logik (z.B. Modelle, Services).
 class AdminUserUpdate(BaseModel):
     display_name: Optional[str] = None
     is_active: Optional[bool] = None
 
+# Klasse: AdminAssignRole – strukturiert Daten/Logik (z.B. Modelle, Services).
 class AdminAssignRole(BaseModel):
     role_id: str
     station_id: str = "*"   # specific station or '*'
 
 
+# Klasse: AdminPermissionCreate – strukturiert Daten/Logik (z.B. Modelle, Services).
 class AdminPermissionCreate(BaseModel):
     perm_id: str = Field(..., min_length=1)
     description: Optional[str] = None
 
 
+# Klasse: AdminPermissionUpdate – strukturiert Daten/Logik (z.B. Modelle, Services).
 class AdminPermissionUpdate(BaseModel):
     description: Optional[str] = None
 
 
+# Klasse: AdminRoleCreate – strukturiert Daten/Logik (z.B. Modelle, Services).
 class AdminRoleCreate(BaseModel):
     role_id: str = Field(..., min_length=1)
     description: Optional[str] = None
 
 
+# Klasse: AdminRoleUpdate – strukturiert Daten/Logik (z.B. Modelle, Services).
 class AdminRoleUpdate(BaseModel):
     description: Optional[str] = None
 
 
+# Klasse: AdminRolePermissions – strukturiert Daten/Logik (z.B. Modelle, Services).
 class AdminRolePermissions(BaseModel):
     permissions: list[str] = Field(default_factory=list)
 
 
+# Klasse: AdminRuleUpsert – strukturiert Daten/Logik (z.B. Modelle, Services).
 class AdminRuleUpsert(BaseModel):
     rule_id: str = Field(..., min_length=1)
     display_name: Optional[str] = None
@@ -1273,7 +1335,9 @@ class AdminRuleUpsert(BaseModel):
     value: Any = None
     enabled: bool = True
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.get("/api/admin/users")
+# Funktion: admin_list_users – kapselt eine wiederverwendbare Backend-Operation.
 def admin_list_users(
     ctx: AuthContext = Depends(get_auth_context),
     _perm: None = Depends(require_permission("admin:read")),
@@ -1298,7 +1362,9 @@ def admin_list_users(
             ]
         }
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.post("/api/admin/users")
+# Funktion: admin_create_user – kapselt eine wiederverwendbare Backend-Operation.
 def admin_create_user(
     body: AdminUserCreate,
     request: Request,
@@ -1337,7 +1403,9 @@ def admin_create_user(
         )
         return {"user_id": u.user_id}
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.put("/api/admin/users/{user_id}")
+# Funktion: admin_update_user – kapselt eine wiederverwendbare Backend-Operation.
 def admin_update_user(
     user_id: str,
     body: AdminUserUpdate,
@@ -1369,7 +1437,9 @@ def admin_update_user(
         )
         return {"ok": True}
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.post("/api/admin/users/{user_id}/roles")
+# Funktion: admin_assign_role – kapselt eine wiederverwendbare Backend-Operation.
 def admin_assign_role(
     user_id: str,
     body: AdminAssignRole,
@@ -1400,7 +1470,9 @@ def admin_assign_role(
         )
         return {"ok": True}
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.delete("/api/admin/users/{user_id}/roles/{role_id}/{station_id}")
+# Funktion: admin_remove_role – kapselt eine wiederverwendbare Backend-Operation.
 def admin_remove_role(
     user_id: str,
     role_id: str,
@@ -1428,7 +1500,9 @@ def admin_remove_role(
         )
         return {"ok": True}
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.get("/api/admin/roles")
+# Funktion: admin_list_roles – kapselt eine wiederverwendbare Backend-Operation.
 def admin_list_roles(
     ctx: AuthContext = Depends(get_auth_context),
     _perm: None = Depends(require_permission("admin:read")),
@@ -1453,7 +1527,9 @@ def admin_list_roles(
         }
 
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.get("/api/admin/permissions")
+# Funktion: admin_list_permissions – kapselt eine wiederverwendbare Backend-Operation.
 def admin_list_permissions(
     ctx: AuthContext = Depends(get_auth_context),
     _perm: None = Depends(require_permission("admin:read")),
@@ -1469,7 +1545,9 @@ def admin_list_permissions(
         }
 
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.post("/api/admin/permissions")
+# Funktion: admin_create_permission – kapselt eine wiederverwendbare Backend-Operation.
 def admin_create_permission(
     body: AdminPermissionCreate,
     request: Request,
@@ -1497,7 +1575,9 @@ def admin_create_permission(
         return {"perm_id": pid}
 
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.put("/api/admin/permissions/{perm_id}")
+# Funktion: admin_update_permission – kapselt eine wiederverwendbare Backend-Operation.
 def admin_update_permission(
     perm_id: str,
     body: AdminPermissionUpdate,
@@ -1528,7 +1608,9 @@ def admin_update_permission(
         return {"ok": True}
 
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.delete("/api/admin/permissions/{perm_id}")
+# Funktion: admin_delete_permission – kapselt eine wiederverwendbare Backend-Operation.
 def admin_delete_permission(
     perm_id: str,
     request: Request,
@@ -1559,7 +1641,9 @@ def admin_delete_permission(
         return {"ok": True}
 
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.post("/api/admin/roles")
+# Funktion: admin_create_role – kapselt eine wiederverwendbare Backend-Operation.
 def admin_create_role(
     body: AdminRoleCreate,
     request: Request,
@@ -1587,7 +1671,9 @@ def admin_create_role(
         return {"role_id": rid}
 
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.put("/api/admin/roles/{role_id}")
+# Funktion: admin_update_role – kapselt eine wiederverwendbare Backend-Operation.
 def admin_update_role(
     role_id: str,
     body: AdminRoleUpdate,
@@ -1618,7 +1704,9 @@ def admin_update_role(
         return {"ok": True}
 
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.delete("/api/admin/roles/{role_id}")
+# Funktion: admin_delete_role – kapselt eine wiederverwendbare Backend-Operation.
 def admin_delete_role(
     role_id: str,
     request: Request,
@@ -1649,7 +1737,9 @@ def admin_delete_role(
         return {"ok": True}
 
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.put("/api/admin/roles/{role_id}/permissions")
+# Funktion: admin_set_role_permissions – kapselt eine wiederverwendbare Backend-Operation.
 def admin_set_role_permissions(
     role_id: str,
     body: AdminRolePermissions,
@@ -1690,7 +1780,9 @@ def admin_set_role_permissions(
         return {"ok": True, "permissions": desired}
 
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.delete("/api/admin/users/{user_id}")
+# Funktion: admin_delete_user – kapselt eine wiederverwendbare Backend-Operation.
 def admin_delete_user(
     user_id: str,
     request: Request,
@@ -1722,7 +1814,9 @@ def admin_delete_user(
         return {"ok": True}
 
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.get("/api/meta/rules")
+# Funktion: meta_rules – kapselt eine wiederverwendbare Backend-Operation.
 def meta_rules(
     ctx: AuthContext = Depends(get_auth_context),
     _perm: None = Depends(require_permission("meta:read")),
@@ -1752,7 +1846,9 @@ def meta_rules(
         }
 
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.get("/api/admin/rules")
+# Funktion: admin_list_rules – kapselt eine wiederverwendbare Backend-Operation.
 def admin_list_rules(
     ctx: AuthContext = Depends(get_auth_context),
     _perm: None = Depends(require_permission("admin:read")),
@@ -1781,7 +1877,9 @@ def admin_list_rules(
         }
 
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.put("/api/admin/rules/{rule_id}")
+# Funktion: admin_upsert_rule – kapselt eine wiederverwendbare Backend-Operation.
 def admin_upsert_rule(
     rule_id: str,
     body: AdminRuleUpsert,
@@ -1840,7 +1938,9 @@ def admin_upsert_rule(
         return {"ok": True, "rule_id": rule_id}
 
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.delete("/api/admin/rules/{rule_id}")
+# Funktion: admin_delete_rule – kapselt eine wiederverwendbare Backend-Operation.
 def admin_delete_rule(
     rule_id: str,
     request: Request,
@@ -1867,7 +1967,9 @@ def admin_delete_rule(
         )
         return {"ok": True}
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.get("/api/admin/audit")
+# Funktion: admin_audit – kapselt eine wiederverwendbare Backend-Operation.
 def admin_audit(
     limit: int = 200,
     ctx: AuthContext = Depends(get_auth_context),
@@ -1901,12 +2003,15 @@ def admin_audit(
             ]
         }
 
+# Klasse: BreakGlassActivateReq – strukturiert Daten/Logik (z.B. Modelle, Services).
 class BreakGlassActivateReq(BaseModel):
     reason: str = Field(..., min_length=5)
     duration_minutes: int = Field(default=60, ge=5, le=720)
     station_scope: str = Field(default="*")
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.post("/api/break_glass/activate")
+# Funktion: break_glass_activate – kapselt eine wiederverwendbare Backend-Operation.
 def break_glass_activate(
     body: BreakGlassActivateReq,
     request: Request,
@@ -1926,10 +2031,13 @@ def break_glass_activate(
         )
         return {"session_id": s.session_id, "expires_at": s.expires_at, "station_scope": s.station_id}
 
+# Klasse: BreakGlassRevokeReq – strukturiert Daten/Logik (z.B. Modelle, Services).
 class BreakGlassRevokeReq(BaseModel):
     review_note: Optional[str] = None
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.post("/api/admin/break_glass/{session_id}/revoke")
+# Funktion: break_glass_revoke – kapselt eine wiederverwendbare Backend-Operation.
 def break_glass_revoke(
     session_id: str,
     body: BreakGlassRevokeReq,
@@ -1948,7 +2056,9 @@ def break_glass_revoke(
         )
     return {"ok": True}
 
+# Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
 @app.get("/api/admin/break_glass")
+# Funktion: break_glass_list – kapselt eine wiederverwendbare Backend-Operation.
 def break_glass_list(
     ctx: AuthContext = Depends(get_auth_context),
     _perm: None = Depends(require_permission("breakglass:review")),

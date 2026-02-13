@@ -1,3 +1,14 @@
+"""
+Datei: backend/app/auth.py
+
+Zweck:
+- Backend-/Serverlogik dieser Anwendung.
+- Kommentare wurden ergänzt, um Einstieg und Wartung zu erleichtern.
+
+Hinweis:
+- Sicherheitsrelevante Checks (RBAC/Permissions) werden serverseitig erzwungen.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -10,6 +21,7 @@ from app.rbac import ensure_user_exists, resolve_permissions
 
 
 @dataclass(frozen=True)
+# Klasse: AuthContext – strukturiert Daten/Logik (z.B. Modelle, Services).
 class AuthContext:
     user_id: str
     station_id: str  # "*" means global scope
@@ -18,6 +30,7 @@ class AuthContext:
     is_break_glass: bool
 
 
+# Funktion: get_ctx – kapselt eine wiederverwendbare Backend-Operation.
 def get_ctx(
     ctx: str | None = Query(default=None, description="Station context (e.g. ST01) or 'global'"),
     x_scope_ctx: str | None = Header(default=None, alias="X-Scope-Ctx"),
@@ -37,6 +50,7 @@ def get_ctx(
     return val or None
 
 
+# Funktion: require_ctx – kapselt eine wiederverwendbare Backend-Operation.
 def require_ctx(ctx: Optional[str] = Depends(get_ctx)) -> str:
     """Station endpoints must be called with an explicit context."""
     if ctx is None:
@@ -44,6 +58,7 @@ def require_ctx(ctx: Optional[str] = Depends(get_ctx)) -> str:
     return ctx
 
 
+# Funktion: _normalize_station_id – kapselt eine wiederverwendbare Backend-Operation.
 def _normalize_station_id(ctx: Optional[str]) -> str:
     if ctx is None:
         return "*"
@@ -55,6 +70,7 @@ def _normalize_station_id(ctx: Optional[str]) -> str:
     return c
 
 
+# Funktion: get_auth_context – kapselt eine wiederverwendbare Backend-Operation.
 def get_auth_context(
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
     ctx: Optional[str] = Depends(get_ctx),
@@ -76,6 +92,7 @@ def get_auth_context(
     return AuthContext(user_id=user_id, station_id=station_id, roles=roles, permissions=perms, is_break_glass=is_bg)
 
 
+# Funktion: require_role – kapselt eine wiederverwendbare Backend-Operation.
 def require_role(ctx: AuthContext, role: str) -> None:
     """Legacy helper (kept for compatibility)."""
     if role not in ctx.roles:

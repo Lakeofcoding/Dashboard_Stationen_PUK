@@ -1,3 +1,14 @@
+/**
+ * Datei: frontend/src/Toast.tsx
+ *
+ * Zweck:
+ * - Enthält UI-/Client-Logik dieser Anwendung.
+ * - Kommentare wurden ergänzt, um Einstieg und Wartung zu erleichtern.
+ *
+ * Hinweis:
+ * - Kommentare erklären Struktur/Intention; die fachliche Wahrheit kommt aus Backend/API-Verträgen.
+ */
+
 import { useEffect } from "react";
 
 export type ToastKind = "info" | "warn" | "critical";
@@ -33,6 +44,7 @@ export function Toast({
   </button>
 )}
 
+// React Effect: synchronisiert State mit externen Abhängigkeiten (z.B. API, Auth, Selektion).
   useEffect(() => {
     const t = window.setTimeout(onClose, 6000); // auto-close
     return () => window.clearTimeout(t);

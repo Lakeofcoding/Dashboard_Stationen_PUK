@@ -1,3 +1,14 @@
+/**
+ * Datei: frontend/eslint.config.js
+ *
+ * Zweck:
+ * - Enthält UI-/Client-Logik dieser Anwendung.
+ * - Kommentare wurden ergänzt, um Einstieg und Wartung zu erleichtern.
+ *
+ * Hinweis:
+ * - Kommentare erklären Struktur/Intention; die fachliche Wahrheit kommt aus Backend/API-Verträgen.
+ */
+
 import js from '@eslint/js'
 import globals from 'globals'
 import reactHooks from 'eslint-plugin-react-hooks'

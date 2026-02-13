@@ -1,3 +1,14 @@
+"""
+Datei: backend/app/ack_store.py
+
+Zweck:
+- Backend-/Serverlogik dieser Anwendung.
+- Kommentare wurden ergänzt, um Einstieg und Wartung zu erleichtern.
+
+Hinweis:
+- Sicherheitsrelevante Checks (RBAC/Permissions) werden serverseitig erzwungen.
+"""
+
 from __future__ import annotations
 
 """Persistenz für Quittierungen (ACK) und "Schieben" (SHIFT).
@@ -25,10 +36,12 @@ from app.db import SessionLocal
 from app.models import Ack, AckEvent
 
 
+# Funktion: _now_iso – kapselt eine wiederverwendbare Backend-Operation.
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# Klasse: AckStore – strukturiert Daten/Logik (z.B. Modelle, Services).
 class AckStore:
     """
     Writes:
@@ -39,6 +52,7 @@ class AckStore:
       - audit events for debugging/admin
     """
 
+# Funktion: _insert_event – kapselt eine wiederverwendbare Backend-Operation.
     def _insert_event(
         self,
         *,
@@ -62,6 +76,7 @@ class AckStore:
             payload=json.dumps(payload, ensure_ascii=False) if payload is not None else None,
         )
 
+# Funktion: upsert_ack – kapselt eine wiederverwendbare Backend-Operation.
     def upsert_ack(
         self,
         *,
@@ -172,6 +187,7 @@ class AckStore:
             db.refresh(row)
             return row
 
+# Funktion: invalidate_rule_ack_if_mismatch – kapselt eine wiederverwendbare Backend-Operation.
     def invalidate_rule_ack_if_mismatch(
         self,
         *,
@@ -213,6 +229,7 @@ class AckStore:
             db.commit()
             return True
 
+# Funktion: get_acks_for_cases – kapselt eine wiederverwendbare Backend-Operation.
     def get_acks_for_cases(self, case_ids: list[str], station_id: str) -> list[Ack]:
         if not case_ids:
             return []
@@ -224,6 +241,7 @@ class AckStore:
             )
             return list(db.execute(stmt).scalars().all())
 
+# Funktion: list_events – kapselt eine wiederverwendbare Backend-Operation.
     def list_events(
         self,
         *,

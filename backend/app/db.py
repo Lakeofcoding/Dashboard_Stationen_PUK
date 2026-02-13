@@ -27,9 +27,11 @@ engine = create_engine(
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
+# Klasse: Base – strukturiert Daten/Logik (z.B. Modelle, Services).
 class Base(DeclarativeBase):
     pass
 
+# Funktion: init_db – kapselt eine wiederverwendbare Backend-Operation.
 def init_db() -> None:
     with engine.connect() as conn:
         conn.execute(text("PRAGMA journal_mode=WAL;"))
@@ -45,6 +47,7 @@ def init_db() -> None:
     _ensure_schema()
 
 
+# Funktion: _ensure_schema – kapselt eine wiederverwendbare Backend-Operation.
 def _ensure_schema() -> None:
     """Ergänzt fehlende Spalten für bestehende DB-Dateien.
 
@@ -56,6 +59,7 @@ def _ensure_schema() -> None:
 
     insp = inspect(engine)
 
+# Funktion: cols – kapselt eine wiederverwendbare Backend-Operation.
     def cols(table: str) -> set[str]:
         if table not in insp.get_table_names():
             return set()

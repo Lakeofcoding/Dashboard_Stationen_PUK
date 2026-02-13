@@ -1,3 +1,14 @@
+"""
+Datei: backend/app/models.py
+
+Zweck:
+- Backend-/Serverlogik dieser Anwendung.
+- Kommentare wurden ergänzt, um Einstieg und Wartung zu erleichtern.
+
+Hinweis:
+- Sicherheitsrelevante Checks (RBAC/Permissions) werden serverseitig erzwungen.
+"""
+
 # backend/app/models.py
 from __future__ import annotations
 
@@ -26,6 +37,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.db import Base
 
 
+# Klasse: Ack – strukturiert Daten/Logik (z.B. Modelle, Services).
 class Ack(Base):
     """
     Aktueller Quittierungs-/Schiebe-Zustand.
@@ -64,6 +76,7 @@ class Ack(Base):
     shift_code: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # "a"|"b"|"c"
 
 
+# Klasse: AckEvent – strukturiert Daten/Logik (z.B. Modelle, Services).
 class AckEvent(Base):
     """
     Audit-Log (append-only).
@@ -93,6 +106,7 @@ class AckEvent(Base):
     payload: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
+# Klasse: DayState – strukturiert Daten/Logik (z.B. Modelle, Services).
 class DayState(Base):
     """
     Pro Station und Geschäftstag: aktuelle Tagesversion ("Vers").
@@ -117,6 +131,7 @@ class DayState(Base):
 # RBAC / Admin / Security Models (MVE-RBAC)
 # -----------------------------------------------------------------------------
 
+# Klasse: User – strukturiert Daten/Logik (z.B. Modelle, Services).
 class User(Base):
     """Interner Benutzer (Identität).
 
@@ -134,6 +149,7 @@ class User(Base):
     created_at: Mapped[str] = mapped_column(String)  # ISO timestamp (UTC)
 
 
+# Klasse: Role – strukturiert Daten/Logik (z.B. Modelle, Services).
 class Role(Base):
     """Rolle (stabiler Name, z.B. 'viewer', 'clinician', 'admin')."""
 
@@ -144,6 +160,7 @@ class Role(Base):
     is_system: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+# Klasse: Permission – strukturiert Daten/Logik (z.B. Modelle, Services).
 class Permission(Base):
     """Einzelrecht (String)."""
 
@@ -154,6 +171,7 @@ class Permission(Base):
     is_system: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+# Klasse: RolePermission – strukturiert Daten/Logik (z.B. Modelle, Services).
 class RolePermission(Base):
     """Many-to-many: Rollen -> Permissions."""
 
@@ -163,6 +181,7 @@ class RolePermission(Base):
     perm_id: Mapped[str] = mapped_column(String, ForeignKey("permission.perm_id"), primary_key=True)
 
 
+# Klasse: UserRole – strukturiert Daten/Logik (z.B. Modelle, Services).
 class UserRole(Base):
     """Rollen-Zuweisung (stationsgebunden).
 
@@ -181,6 +200,7 @@ class UserRole(Base):
     created_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
 
+# Klasse: BreakGlassSession – strukturiert Daten/Logik (z.B. Modelle, Services).
 class BreakGlassSession(Base):
     """Notfallzugang (zeitlich begrenzte Elevation, append-only + revoke)."""
 
@@ -199,6 +219,7 @@ class BreakGlassSession(Base):
     review_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
+# Klasse: SecurityEvent – strukturiert Daten/Logik (z.B. Modelle, Services).
 class SecurityEvent(Base):
     """Sicherheits-/Admin-Audit (append-only)."""
 
@@ -228,6 +249,7 @@ class SecurityEvent(Base):
 # -----------------------------------------------------------------------------
 
 
+# Klasse: RuleDefinition – strukturiert Daten/Logik (z.B. Modelle, Services).
 class RuleDefinition(Base):
     """Regel-Definitionen und Anzeige-Texte.
 

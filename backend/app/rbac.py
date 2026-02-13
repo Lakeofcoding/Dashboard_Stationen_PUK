@@ -1,3 +1,14 @@
+"""
+Datei: backend/app/rbac.py
+
+Zweck:
+- Backend-/Serverlogik dieser Anwendung.
+- Kommentare wurden ergänzt, um Einstieg und Wartung zu erleichtern.
+
+Hinweis:
+- Sicherheitsrelevante Checks (RBAC/Permissions) werden serverseitig erzwungen.
+"""
+
 
 from __future__ import annotations
 
@@ -88,6 +99,7 @@ DEFAULT_USERS: dict[str, dict[str, object]] = {
 # Seeding
 # -----------------------------------------------------------------------------
 
+# Funktion: seed_rbac – kapselt eine wiederverwendbare Backend-Operation.
 def seed_rbac(db: Session) -> None:
     # permissions
     for pid, desc in PERMISSIONS.items():
@@ -127,6 +139,7 @@ def seed_rbac(db: Session) -> None:
 # Resolution
 # -----------------------------------------------------------------------------
 
+# Funktion: ensure_user_exists – kapselt eine wiederverwendbare Backend-Operation.
 def ensure_user_exists(db: Session, user_id: str) -> User:
     u = db.get(User, user_id)
     if u is None:
@@ -140,6 +153,7 @@ def ensure_user_exists(db: Session, user_id: str) -> User:
             db.commit()
     return u
 
+# Funktion: _roles_for_station – kapselt eine wiederverwendbare Backend-Operation.
 def _roles_for_station(db: Session, user_id: str, station_id: str) -> Set[str]:
     rows = db.execute(
         select(UserRole.role_id, UserRole.station_id).where(UserRole.user_id == user_id)
@@ -150,6 +164,7 @@ def _roles_for_station(db: Session, user_id: str, station_id: str) -> Set[str]:
             out.add(rid)
     return out
 
+# Funktion: _break_glass_roles – kapselt eine wiederverwendbare Backend-Operation.
 def _break_glass_roles(db: Session, user_id: str, station_id: str, now_iso: str) -> Set[str]:
     # active sessions only
     sessions = db.execute(
@@ -171,6 +186,7 @@ def _break_glass_roles(db: Session, user_id: str, station_id: str, now_iso: str)
             roles.add("break_glass_admin")
     return roles
 
+# Funktion: resolve_permissions – kapselt eine wiederverwendbare Backend-Operation.
 def resolve_permissions(db: Session, *, user_id: str, station_id: str) -> tuple[Set[str], Set[str], bool]:
     now_iso = utc_now_iso()
     roles = _roles_for_station(db, user_id, station_id)
@@ -196,11 +212,13 @@ def resolve_permissions(db: Session, *, user_id: str, station_id: str) -> tuple[
 
 # In app/rbac.py
 
+# Funktion: require_permission – kapselt eine wiederverwendbare Backend-Operation.
 def require_permission(permission: str):
     # Diese Importe müssen HIER stehen, damit sie für _dep verfügbar sind
     from fastapi import Depends
     from app.auth import get_auth_context, AuthContext
 
+# Funktion: _dep – kapselt eine wiederverwendbare Backend-Operation.
     def _dep(ctx: AuthContext = Depends(get_auth_context)):
         if permission not in ctx.permissions:
             from fastapi import HTTPException # Sicherstellen, dass HTTPException da ist
@@ -216,6 +234,7 @@ def require_permission(permission: str):
 # Break-glass helpers
 # -----------------------------------------------------------------------------
 
+# Funktion: activate_break_glass – kapselt eine wiederverwendbare Backend-Operation.
 def activate_break_glass(
     db: Session,
     *,
@@ -257,6 +276,7 @@ def activate_break_glass(
     )
     return session
 
+# Funktion: revoke_break_glass – kapselt eine wiederverwendbare Backend-Operation.
 def revoke_break_glass(
     db: Session,
     *,

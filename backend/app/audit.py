@@ -1,3 +1,14 @@
+"""
+Datei: backend/app/audit.py
+
+Zweck:
+- Backend-/Serverlogik dieser Anwendung.
+- Kommentare wurden ergänzt, um Einstieg und Wartung zu erleichtern.
+
+Hinweis:
+- Sicherheitsrelevante Checks (RBAC/Permissions) werden serverseitig erzwungen.
+"""
+
 
 from __future__ import annotations
 
@@ -12,10 +23,12 @@ from sqlalchemy.orm import Session
 from app.models import SecurityEvent
 
 
+# Funktion: utc_now_iso – kapselt eine wiederverwendbare Backend-Operation.
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# Funktion: log_security_event – kapselt eine wiederverwendbare Backend-Operation.
 def log_security_event(
     db: Session,
     *,

@@ -1,3 +1,14 @@
+/**
+ * Datei: frontend/src/AdminPanel.tsx
+ *
+ * Zweck:
+ * - Enthält UI-/Client-Logik dieser Anwendung.
+ * - Kommentare wurden ergänzt, um Einstieg und Wartung zu erleichtern.
+ *
+ * Hinweis:
+ * - Kommentare erklären Struktur/Intention; die fachliche Wahrheit kommt aus Backend/API-Verträgen.
+ */
+
 import { useEffect, useMemo, useState } from "react";
 
 type AuthState = { stationId: string; userId: string };
@@ -68,6 +79,7 @@ async function apiJson<T>(path: string, init: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
+// Helper: FieldLabel – kapselt eine wiederverwendbare Teilfunktion.
 function FieldLabel({ label, hint }: { label: string; hint?: string }) {
   return (
     <div style={{ display: "grid", gap: 4 }}>
@@ -78,6 +90,7 @@ function FieldLabel({ label, hint }: { label: string; hint?: string }) {
 }
 
 export function AdminPanel({ auth, authHeaders, me }: Props) {
+// React Memo: berechnet abgeleitete Werte effizient (nur neu bei Dependency-Änderung).
   const canRead = useMemo(() => new Set(me?.permissions ?? []).has("admin:read"), [me]);
   const canWrite = useMemo(() => new Set(me?.permissions ?? []).has("admin:write"), [me]);
 
@@ -129,6 +142,7 @@ export function AdminPanel({ auth, authHeaders, me }: Props) {
     }
   }
 
+// React Effect: synchronisiert State mit externen Abhängigkeiten (z.B. API, Auth, Selektion).
   useEffect(() => {
     refreshAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -216,10 +230,12 @@ export function AdminPanel({ auth, authHeaders, me }: Props) {
   const [createRoleId, setCreateRoleId] = useState("");
   const [createRoleDesc, setCreateRoleDesc] = useState("");
   const [selectedRoleId, setSelectedRoleId] = useState<string | null>(null);
+// React Memo: berechnet abgeleitete Werte effizient (nur neu bei Dependency-Änderung).
   const selectedRole = useMemo(() => roles.find((r) => r.role_id === selectedRoleId) ?? null, [roles, selectedRoleId]);
   const [roleDescEdit, setRoleDescEdit] = useState("");
   const [rolePermsEdit, setRolePermsEdit] = useState<Set<string>>(new Set());
 
+// React Effect: synchronisiert State mit externen Abhängigkeiten (z.B. API, Auth, Selektion).
   useEffect(() => {
     if (!selectedRole) return;
     setRoleDescEdit(selectedRole.description ?? "");
@@ -317,6 +333,7 @@ export function AdminPanel({ auth, authHeaders, me }: Props) {
   // -------------------------
 
   const [ruleQuery, setRuleQuery] = useState("");
+// React Memo: berechnet abgeleitete Werte effizient (nur neu bei Dependency-Änderung).
   const filteredRules = useMemo(() => {
     const q = ruleQuery.trim().toLowerCase();
     if (!q) return rules;
@@ -324,10 +341,12 @@ export function AdminPanel({ auth, authHeaders, me }: Props) {
   }, [rules, ruleQuery]);
 
   const [selectedRuleId, setSelectedRuleId] = useState<string | null>(null);
+// React Memo: berechnet abgeleitete Werte effizient (nur neu bei Dependency-Änderung).
   const selectedRule = useMemo(() => rules.find((r) => r.rule_id === selectedRuleId) ?? null, [rules, selectedRuleId]);
 
   const [ruleEdit, setRuleEdit] = useState<RuleDef | null>(null);
   const [ruleValueEdit, setRuleValueEdit] = useState<string>("");
+// React Effect: synchronisiert State mit externen Abhängigkeiten (z.B. API, Auth, Selektion).
   useEffect(() => {
     if (!selectedRule) {
       setRuleEdit(null);
@@ -338,6 +357,7 @@ export function AdminPanel({ auth, authHeaders, me }: Props) {
     setRuleValueEdit(selectedRule.value_json ?? "null");
   }, [selectedRule]);
 
+// Helper: newRuleDraft – kapselt eine wiederverwendbare Teilfunktion.
   function newRuleDraft() {
     const draft: RuleDef = {
       rule_id: "NEW_RULE_ID",

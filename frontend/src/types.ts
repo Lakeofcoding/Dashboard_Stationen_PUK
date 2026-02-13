@@ -1,3 +1,14 @@
+/**
+ * Datei: frontend/src/types.ts
+ *
+ * Zweck:
+ * - Enthält UI-/Client-Logik dieser Anwendung.
+ * - Kommentare wurden ergänzt, um Einstieg und Wartung zu erleichtern.
+ *
+ * Hinweis:
+ * - Kommentare erklären Struktur/Intention; die fachliche Wahrheit kommt aus Backend/API-Verträgen.
+ */
+
 export type Severity = "OK" | "WARN" | "CRITICAL";
 
 export interface Alert {

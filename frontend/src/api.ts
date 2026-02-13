@@ -1,3 +1,14 @@
+/**
+ * Datei: frontend/src/api.ts
+ *
+ * Zweck:
+ * - Enthält UI-/Client-Logik dieser Anwendung.
+ * - Kommentare wurden ergänzt, um Einstieg und Wartung zu erleichtern.
+ *
+ * Hinweis:
+ * - Kommentare erklären Struktur/Intention; die fachliche Wahrheit kommt aus Backend/API-Verträgen.
+ */
+
 import type { CaseSummary, CaseDetail } from "./types";
 
 export async function fetchCases(): Promise<CaseSummary[]> {

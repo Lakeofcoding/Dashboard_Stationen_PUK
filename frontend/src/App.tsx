@@ -1,3 +1,14 @@
+/**
+ * Datei: frontend/src/App.tsx
+ *
+ * Zweck:
+ * - Enthält UI-/Client-Logik dieser Anwendung.
+ * - Kommentare wurden ergänzt, um Einstieg und Wartung zu erleichtern.
+ *
+ * Hinweis:
+ * - Kommentare erklären Struktur/Intention; die fachliche Wahrheit kommt aus Backend/API-Verträgen.
+ */
+
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CaseSummary, CaseDetail, Severity, DayState } from "./types";
 import { Toast } from "./Toast";
@@ -27,6 +38,7 @@ const LS_KEYS = {
   userId: "dashboard.userId",
 };
 
+// Helper: severityColor – kapselt eine wiederverwendbare Teilfunktion.
 function severityColor(severity: Severity): string {
   switch (severity) {
     case "CRITICAL":
@@ -38,6 +50,7 @@ function severityColor(severity: Severity): string {
   }
 }
 
+// Helper: loadAuth – kapselt eine wiederverwendbare Teilfunktion.
 function loadAuth(): AuthState {
   return {
     stationId: localStorage.getItem(LS_KEYS.stationId) ?? "ST01",
@@ -45,11 +58,13 @@ function loadAuth(): AuthState {
   };
 }
 
+// Helper: saveAuth – kapselt eine wiederverwendbare Teilfunktion.
 function saveAuth(a: AuthState) {
   localStorage.setItem(LS_KEYS.stationId, a.stationId);
   localStorage.setItem(LS_KEYS.userId, a.userId);
 }
 
+// Helper: authHeaders – kapselt eine wiederverwendbare Teilfunktion.
 function authHeaders(auth: AuthState): HeadersInit {
   return {
     "Content-Type": "application/json",
@@ -58,10 +73,12 @@ function authHeaders(auth: AuthState): HeadersInit {
   };
 }
 
+// Helper: isAdminPath – kapselt eine wiederverwendbare Teilfunktion.
 function isAdminPath(pathname: string): boolean {
   return pathname.startsWith("/api/admin/");
 }
 
+// Helper: headerLookup – kapselt eine wiederverwendbare Teilfunktion.
 function headerLookup(h: HeadersInit | undefined, key: string): string | undefined {
   if (!h) return undefined;
   if (h instanceof Headers) return h.get(key) ?? undefined;
@@ -79,6 +96,7 @@ function headerLookup(h: HeadersInit | undefined, key: string): string | undefin
   return undefined;
 }
 
+// Helper: withCtx – kapselt eine wiederverwendbare Teilfunktion.
 function withCtx(path: string, init: RequestInit): string {
   if (!path.startsWith("/api/")) return path;
 
@@ -177,6 +195,7 @@ async function resetToday(auth: AuthState): Promise<DayState> {
 
 //dies hhier ist ein dummy Logo, bevor dann das PUK Logo eingesetzt wird:
 
+// Helper: ClinicLogo – kapselt eine wiederverwendbare Teilfunktion.
 function ClinicLogo({ title = "Klinik" }: { title?: string }) {
   return (
     <svg
@@ -227,6 +246,7 @@ function ClinicLogo({ title = "Klinik" }: { title?: string }) {
 //bis hierher; wenn PUK Logo, alles dazwischen löschen
 
 
+// Hauptkomponente: App – orchestriert Datenladen, Selektion und Rendering.
 export default function App() {
   const [auth, setAuth] = useState<AuthState>(() => loadAuth());
   const [me, setMe] = useState<MetaMe | null>(null);
@@ -240,6 +260,7 @@ export default function App() {
   ]);
   const [metaError, setMetaError] = useState<string | null>(null);
 
+// React Memo: berechnet abgeleitete Werte effizient (nur neu bei Dependency-Änderung).
   const permissions = useMemo(() => new Set(me?.permissions ?? []), [me]);
   const canAck = permissions.has("ack:write");
   const canReset = permissions.has("reset:today");
@@ -271,6 +292,7 @@ export default function App() {
 
   const shownCriticalRef = useRef<Record<string, true>>({});
 
+// Helper: updateAuth – kapselt eine wiederverwendbare Teilfunktion.
   function updateAuth(patch: Partial<AuthState>) {
     const next = { ...auth, ...patch };
     setAuth(next);
@@ -278,6 +300,7 @@ export default function App() {
   }
 
   // Kontextwechsel: Detail/Fehler/Schieben/Toast-Session zurücksetzen (alles andere bleibt)
+// React Effect: synchronisiert State mit externen Abhängigkeiten (z.B. API, Auth, Selektion).
   useEffect(() => {
     setSelectedCaseId(null);
     setDetail(null);
@@ -288,6 +311,7 @@ export default function App() {
     shownCriticalRef.current = {};
   }, [auth.stationId, auth.userId]);
 
+// React Effect: synchronisiert State mit externen Abhängigkeiten (z.B. API, Auth, Selektion).
   useEffect(() => {
     (async () => {
       try {
@@ -303,6 +327,7 @@ export default function App() {
     })();
   }, [auth.stationId, auth.userId]);
 
+// React Effect: synchronisiert State mit externen Abhängigkeiten (z.B. API, Auth, Selektion).
   useEffect(() => {
     let alive = true;
 
@@ -344,6 +369,7 @@ export default function App() {
     };
   }, [auth, toast, viewMode]);
 
+// React Effect: synchronisiert State mit externen Abhängigkeiten (z.B. API, Auth, Selektion).
   useEffect(() => {
     if (!selectedCaseId) {
       setDetail(null);
@@ -370,6 +396,7 @@ export default function App() {
       .finally(() => setDetailLoading(false));
   }, [selectedCaseId, auth, viewMode]);
 
+// React Effect: synchronisiert State mit externen Abhängigkeiten (z.B. API, Auth, Selektion).
   useEffect(() => {
     if (!detail || !selectedCaseId) return;
     const fromList = cases.find((c) => c.case_id === selectedCaseId);
@@ -381,6 +408,7 @@ export default function App() {
   }, [cases, selectedCaseId]);
 
   // Meta stations/users vom Backend (fallback bleibt)
+// React Effect: synchronisiert State mit externen Abhängigkeiten (z.B. API, Auth, Selektion).
   useEffect(() => {
     let alive = true;
     (async () => {
