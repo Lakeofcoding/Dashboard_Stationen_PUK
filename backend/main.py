@@ -99,24 +99,34 @@ def _ack_is_valid_today(*, acked_at_iso: str, business_date: str | None, version
     """Prüft, ob eine Quittierung/Shift *heute* gültig ist.
 
     Gültigkeitsregeln:
-      - Datum: `business_date` muss dem heutigen Geschäftstag entsprechen.
-      - Version: `version` muss der aktuellen Tagesversion entsprechen.
-      - Zusätzlich ist `acked_at` als Fallback-Check nützlich, falls
-        Altdaten ohne business_date existieren.
+      - Primär (neue Semantik): Wenn `business_date` UND `version` vorhanden sind,
+        muss beides für *heute* stimmen:
+          * business_date == heutiger Geschäftstag (Europe/Zurich)
+          * version == aktuelle Tagesversion (Vers)
+      - Legacy-Fallback: Falls `business_date` oder `version` fehlen (Altdaten),
+        verwenden wir `acked_at` als Datum-Check.
+
+    Hintergrund:
+      - Reset inkrementiert die Tagesversion. Damit müssen alte Acks für den
+        gleichen Geschäftstag ungültig werden. Ein globaler Fallback auf
+        `acked_at` würde diese Invalidation aushebeln.
     """
 
-    # Primär: Geschäftstag + Version
-    if business_date == today_local().isoformat() and (version or 0) == current_version:
-        return True
+    today = today_local().isoformat()
 
-    # Fallback für historische Acks ohne business_date/version
+    # Strikte Logik bei vollständigen Datensätzen
+    if business_date is not None and version is not None:
+        return business_date == today and version == current_version
+
+    # Fallback nur für Legacy-Daten ohne business_date/version
     try:
         dt = datetime.fromisoformat(acked_at_iso)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
     except Exception:
         return False
-    return dt.astimezone(ZoneInfo("Europe/Zurich")).date() == today_local()
+
+    return dt.astimezone(ZoneInfo("Europe/Zurich")).date().isoformat() == today
 
 
 class Alert(BaseModel):

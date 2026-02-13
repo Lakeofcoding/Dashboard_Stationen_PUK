@@ -237,7 +237,18 @@ export default function App() {
         setDetail(d);
         setDetailError(null);
       })
-      .catch((err) => setDetailError(err?.message ?? String(err)))
+      .catch((err) => {
+    const msg = err?.message ?? String(err);
+    // Robust gegen Kontextwechsel: Wenn der Fall im neuen Kontext nicht existiert,
+    // räumen wir die Selektion auf statt die UI in einem Fehlerzustand zu belassen.
+    if (String(msg).includes("404") || String(msg).toLowerCase().includes("not found")) {
+      setSelectedCaseId(null);
+      setDetail(null);
+      setDetailError(null);
+      return;
+    }
+    setDetailError(msg);
+  })
       .finally(() => setDetailLoading(false));
   }, [selectedCaseId, auth, viewMode]);
 
@@ -257,6 +268,16 @@ export default function App() {
     setAuth(next);
     saveAuth(next);
   }
+
+// Kontextwechsel (Station/User): Detail/Fehler/Schieben zurücksetzen.
+// Ziel: Von jeder Ansicht aus soll alles funktionieren, ohne "hängende" Selektionen.
+useEffect(() => {
+  setSelectedCaseId(null);
+  setDetail(null);
+  setDetailError(null);
+  setDetailLoading(false);
+  setShiftByAlert({});
+}, [auth.stationId, auth.userId]);
 
   // Load station/user choices from backend (prototyp) so you don't need to know valid IDs.
   useEffect(() => {
@@ -319,7 +340,12 @@ export default function App() {
         body{ background:var(--app-bg); color:var(--text); }
         .wrap{ max-width:1200px; margin:0 auto; }
         .panel{ background:var(--card); border:1px solid var(--border); border-radius:14px; box-shadow:var(--shadow); }
-        .gridMain{ display:grid; grid-template-columns: 1.1fr 0.9fr; gap:16px; align-items:start; }
+        .gridMain{ display:grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr); gap:16px; align-items:start; }
+        .gridMain > *{ min-width:0; }
+        .panel{ min-width:0; }
+        .wrap{ max-width:1200px; margin:0 auto; padding: 0 12px; }
+        .truncate{ overflow-wrap:anywhere; word-break:break-word; }
+        .scrollX{ overflow-x:auto; }
         @media (max-width: 980px){ .gridMain{ grid-template-columns: 1fr; } }
         .toolbar{ display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
         .search{ padding:10px 12px; border-radius:12px; border:1px solid var(--border); width: min(520px, 100%); background:#fff; }
@@ -363,21 +389,32 @@ export default function App() {
               disabled={!canAck}
               onClick={async () => {
                 if (!canAck) return;
+
+                const ok = window.confirm(
+                  `Achtung:\n\n` +
+                    `Dadurch werden alle heutigen Quittierungen und Schiebe-Entscheidungen für Station ${auth.stationId} zurückgesetzt.\n\n` +
+                    `Alle Fälle/Meldungen erscheinen wieder als offen (Stand Tagesbeginn).\n\n` +
+                    `Fortfahren?`
+                );
+                if (!ok) return;
+
                 try {
                   const ds = await resetToday(auth);
                   setDayState(ds);
-                  // Nach Reset: Liste + Detail neu laden
+
+                  // Nach Reset: Liste neu laden und Detail/Selektion zurücksetzen.
                   const data = await fetchCases(auth, viewMode);
                   setCases(data);
-                  if (selectedCaseId) {
-                    const d = await fetchCaseDetail(selectedCaseId, auth, viewMode);
-                    setDetail(d);
-                  }
+
+                  setSelectedCaseId(null);
+                  setDetail(null);
+                  setDetailError(null);
+                  setShiftByAlert({});
                 } catch (e: any) {
                   setError(e?.message ?? String(e));
                 }
               }}
-              title={canAck ? "Reset: alle heutigen Quittierungen/Schieben verwerfen" : "Keine Berechtigung"}
+title={canAck ? "Reset: alle heutigen Quittierungen/Schieben verwerfen" : "Keine Berechtigung"}
             >
               Reset (heute)
             </button>
@@ -553,17 +590,26 @@ export default function App() {
                 </button>
               )}
 
-              <p style={{ marginTop: 12 }}>
-                <strong>Station:</strong> {detail.station_id}
-                <br />
-                <strong>Eintritt:</strong> {detail.admission_date}
-                <br />
-                <strong>HONOS:</strong> {detail.honos ?? "—"}
-                <br />
-                <strong>BSCL:</strong> {detail.bscl ?? "—"}
-                <br />
-                <strong>BFS vollständig:</strong> {detail.bfs_complete ? "Ja" : "Nein"}
-              </p>
+              <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 10 }}>
+  <div className="panel" style={{ padding: 10, borderRadius: 12 }}>
+    <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 6 }}>Fall</div>
+    <div className="truncate"><strong>Station:</strong> {detail.station_id}</div>
+    <div className="truncate"><strong>Eintritt:</strong> {detail.admission_date}</div>
+  </div>
+
+  <div className="panel" style={{ padding: 10, borderRadius: 12 }}>
+    <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 6 }}>Scores</div>
+    <div className="truncate"><strong>HONOS:</strong> {detail.honos ?? "—"}</div>
+    <div className="truncate"><strong>BSCL:</strong> {detail.bscl ?? "—"}</div>
+  </div>
+
+  <div className="panel" style={{ padding: 10, borderRadius: 12 }}>
+    <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 6 }}>Vollständigkeit</div>
+    <div className="truncate"><strong>BFS vollständig:</strong> {detail.bfs_complete ? "Ja" : "Nein"}</div>
+    <div className="truncate"><strong>Quittiert:</strong> {detail.acked_at ? `Ja (${detail.acked_at})` : "Nein"}</div>
+  </div>
+</div>
+
 
               <h3 style={{ marginBottom: 6, fontSize: "1rem" }}>Alerts</h3>
               {detail.alerts.length === 0 ? (
