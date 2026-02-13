@@ -76,3 +76,10 @@ def _ensure_schema() -> None:
             conn.execute(text("ALTER TABLE ack ADD COLUMN shift_code TEXT"))
 
         # day_state wird von SQLAlchemy automatisch angelegt, wenn sie fehlt.
+
+        # --- Tabelle security_event: neue Spalten für User-Agent / Details
+        sec_cols = cols("security_event")
+        if "user_agent" not in sec_cols:
+            conn.execute(text("ALTER TABLE security_event ADD COLUMN user_agent TEXT"))
+        if "details" not in sec_cols:
+            conn.execute(text("ALTER TABLE security_event ADD COLUMN details TEXT"))

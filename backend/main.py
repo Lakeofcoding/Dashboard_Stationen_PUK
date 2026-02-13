@@ -21,7 +21,7 @@ from app.rbac import (
 )
 
 from app.db import SessionLocal, init_db
-from app.models import DayState
+from app.models import DayState, RuleDefinition
 
 # -----------------------------------------------------------------------------
 # Helpers: condition hash
@@ -63,6 +63,9 @@ def _startup():
     with SessionLocal() as db:
         # 1. Rollen und Permissions anlegen
         seed_rbac(db)
+
+        # 1b. Regeln (rules.yaml) als Default in die DB seeden (nur wenn neu)
+        seed_rule_definitions(db)
         
         from app.models import User, UserRole
         from datetime import datetime
@@ -584,6 +587,67 @@ def load_rules() -> dict:
     }
 
 
+def seed_rule_definitions(db) -> None:
+    """Seed Rules aus rules.yaml in die DB.
+
+    WICHTIG:
+      - Nur INSERT wenn rule_id noch nicht existiert.
+      - Keine Überschreibung, damit Admin-Änderungen persistent bleiben.
+    """
+    try:
+        rules = load_rules().get("rules", [])
+    except Exception:
+        rules = []
+
+    if not isinstance(rules, list):
+        return
+
+    for r in rules:
+        rid = r.get("id")
+        if not rid:
+            continue
+        if db.get(RuleDefinition, rid) is not None:
+            continue
+
+        category = r.get("category") or "medical"
+        severity = r.get("severity") or "WARN"
+        metric = r.get("metric") or ""
+        operator = r.get("operator") or ""
+        expected = r.get("value")
+        message = r.get("message") or rid
+        explanation = r.get("explanation") or ""
+
+        db.add(
+            RuleDefinition(
+                rule_id=rid,
+                display_name=None,
+                message=str(message),
+                explanation=str(explanation),
+                category=str(category),
+                severity=str(severity),
+                metric=str(metric),
+                operator=str(operator),
+                value_json=json.dumps(expected, ensure_ascii=False),
+                enabled=True,
+                is_system=True,
+                updated_at=None,
+                updated_by=None,
+            )
+        )
+    db.commit()
+
+
+def load_rule_definitions() -> list[RuleDefinition]:
+    """Aktuelle Regeln aus DB. Falls leer (fresh DB), fall back auf YAML."""
+    with SessionLocal() as db:
+        rows = db.query(RuleDefinition).order_by(RuleDefinition.rule_id.asc()).all()
+        if rows:
+            return rows
+        # Seed on-the-fly (sicher für fresh DBs)
+        seed_rule_definitions(db)
+        return db.query(RuleDefinition).order_by(RuleDefinition.rule_id.asc()).all()
+
+
 def eval_rule(metric_value, operator: str, value) -> bool:
     if operator == ">":
         return metric_value is not None and metric_value > value
@@ -599,17 +663,21 @@ def eval_rule(metric_value, operator: str, value) -> bool:
 
 
 def evaluate_alerts(case: dict) -> list[Alert]:
-    rules = load_rules()
+    rules = load_rule_definitions()
     derived = case.get("_derived") or {}
 
     alerts: list[Alert] = []
-    for r in rules.get("rules", []):
-        # Standard-Kategorie, wenn die YAML-Regel keine Angabe enthält.
-        # Dadurch bleiben ältere Regeln kompatibel.
-        category = r.get("category") or "medical"
-        metric = r.get("metric")
-        operator = r.get("operator")
-        expected = r.get("value")
+    for r in rules:
+        if not r.enabled:
+            continue
+
+        category = r.category or "medical"
+        metric = r.metric
+        operator = r.operator
+        try:
+            expected = json.loads(r.value_json) if r.value_json is not None else None
+        except Exception:
+            expected = None
 
         if not metric or not operator:
             continue
@@ -618,20 +686,24 @@ def evaluate_alerts(case: dict) -> list[Alert]:
 
         if eval_rule(actual, operator, expected):
             ch = compute_condition_hash(
-                rule_id=r["id"],
+                rule_id=r.rule_id,
                 metric=metric,
                 operator=operator,
                 expected=expected,
                 actual=actual,
                 discharge_date=case.get("discharge_date"),
             )
+
+            message = (r.display_name or r.message or r.rule_id)
+            explanation = r.explanation or ""
+
             alerts.append(
                 Alert(
-                    rule_id=r["id"],
-                    severity=r["severity"],
+                    rule_id=r.rule_id,
+                    severity=r.severity,
                     category=category,
-                    message=r["message"],
-                    explanation=r["explanation"],
+                    message=message,
+                    explanation=explanation,
                     condition_hash=ch,
                 )
             )
@@ -1156,6 +1228,7 @@ class AdminUserCreate(BaseModel):
     user_id: str = Field(..., min_length=1)
     display_name: Optional[str] = None
     is_active: bool = True
+    roles: list[AdminAssignRole] = Field(default_factory=list)
 
 class AdminUserUpdate(BaseModel):
     display_name: Optional[str] = None
@@ -1164,6 +1237,41 @@ class AdminUserUpdate(BaseModel):
 class AdminAssignRole(BaseModel):
     role_id: str
     station_id: str = "*"   # specific station or '*'
+
+
+class AdminPermissionCreate(BaseModel):
+    perm_id: str = Field(..., min_length=1)
+    description: Optional[str] = None
+
+
+class AdminPermissionUpdate(BaseModel):
+    description: Optional[str] = None
+
+
+class AdminRoleCreate(BaseModel):
+    role_id: str = Field(..., min_length=1)
+    description: Optional[str] = None
+
+
+class AdminRoleUpdate(BaseModel):
+    description: Optional[str] = None
+
+
+class AdminRolePermissions(BaseModel):
+    permissions: list[str] = Field(default_factory=list)
+
+
+class AdminRuleUpsert(BaseModel):
+    rule_id: str = Field(..., min_length=1)
+    display_name: Optional[str] = None
+    message: str
+    explanation: str
+    category: str = "medical"
+    severity: Severity
+    metric: str
+    operator: str
+    value: Any = None
+    enabled: bool = True
 
 @app.get("/api/admin/users")
 def admin_list_users(
@@ -1197,12 +1305,24 @@ def admin_create_user(
     ctx: AuthContext = Depends(get_auth_context),
     _perm: None = Depends(require_permission("admin:write")),
 ):
-    from app.models import User
+    from app.models import User, UserRole, Role
     with SessionLocal() as db:
         if db.get(User, body.user_id) is not None:
             raise HTTPException(status_code=409, detail="user already exists")
         u = User(user_id=body.user_id.strip(), display_name=body.display_name, is_active=body.is_active, created_at=datetime.now(timezone.utc).isoformat())
         db.add(u)
+
+        # optional: initial role assignments
+        for ra in body.roles or []:
+            rid = (ra.role_id or "").strip()
+            st = (ra.station_id or "*").strip() or "*"
+            if not rid:
+                continue
+            if db.get(Role, rid) is None:
+                continue
+            if db.get(UserRole, (u.user_id, rid, st)) is None:
+                db.add(UserRole(user_id=u.user_id, role_id=rid, station_id=st, created_at=datetime.now(timezone.utc).isoformat(), created_by=ctx.user_id))
+
         db.commit()
         log_security_event(
             db,
@@ -1331,6 +1451,421 @@ def admin_list_roles(
                 for r in roles
             ]
         }
+
+
+@app.get("/api/admin/permissions")
+def admin_list_permissions(
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:read")),
+):
+    from app.models import Permission
+    with SessionLocal() as db:
+        rows = db.query(Permission).order_by(Permission.perm_id.asc()).all()
+        return {
+            "permissions": [
+                {"perm_id": p.perm_id, "description": p.description, "is_system": bool(p.is_system)}
+                for p in rows
+            ]
+        }
+
+
+@app.post("/api/admin/permissions")
+def admin_create_permission(
+    body: AdminPermissionCreate,
+    request: Request,
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:write")),
+):
+    from app.models import Permission
+    with SessionLocal() as db:
+        pid = body.perm_id.strip()
+        if db.get(Permission, pid) is not None:
+            raise HTTPException(status_code=409, detail="permission already exists")
+        db.add(Permission(perm_id=pid, description=body.description, is_system=False))
+        db.commit()
+        log_security_event(
+            db,
+            request=request,
+            actor_user_id=ctx.user_id,
+            actor_station_id=ctx.station_id,
+            action="ADMIN_PERMISSION_CREATE",
+            target_type="permission",
+            target_id=pid,
+            success=True,
+            details={"description": body.description},
+        )
+        return {"perm_id": pid}
+
+
+@app.put("/api/admin/permissions/{perm_id}")
+def admin_update_permission(
+    perm_id: str,
+    body: AdminPermissionUpdate,
+    request: Request,
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:write")),
+):
+    from app.models import Permission
+    with SessionLocal() as db:
+        p = db.get(Permission, perm_id)
+        if p is None:
+            raise HTTPException(status_code=404, detail="permission not found")
+        if body.description is not None:
+            p.description = body.description
+        db.add(p)
+        db.commit()
+        log_security_event(
+            db,
+            request=request,
+            actor_user_id=ctx.user_id,
+            actor_station_id=ctx.station_id,
+            action="ADMIN_PERMISSION_UPDATE",
+            target_type="permission",
+            target_id=perm_id,
+            success=True,
+            details={"description": body.description},
+        )
+        return {"ok": True}
+
+
+@app.delete("/api/admin/permissions/{perm_id}")
+def admin_delete_permission(
+    perm_id: str,
+    request: Request,
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:write")),
+):
+    from app.models import Permission, RolePermission
+    with SessionLocal() as db:
+        p = db.get(Permission, perm_id)
+        if p is None:
+            raise HTTPException(status_code=404, detail="permission not found")
+        if bool(p.is_system):
+            raise HTTPException(status_code=400, detail="cannot delete system permission")
+        # remove mappings first
+        db.query(RolePermission).filter(RolePermission.perm_id == perm_id).delete()
+        db.delete(p)
+        db.commit()
+        log_security_event(
+            db,
+            request=request,
+            actor_user_id=ctx.user_id,
+            actor_station_id=ctx.station_id,
+            action="ADMIN_PERMISSION_DELETE",
+            target_type="permission",
+            target_id=perm_id,
+            success=True,
+        )
+        return {"ok": True}
+
+
+@app.post("/api/admin/roles")
+def admin_create_role(
+    body: AdminRoleCreate,
+    request: Request,
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:write")),
+):
+    from app.models import Role
+    with SessionLocal() as db:
+        rid = body.role_id.strip()
+        if db.get(Role, rid) is not None:
+            raise HTTPException(status_code=409, detail="role already exists")
+        db.add(Role(role_id=rid, description=body.description, is_system=False))
+        db.commit()
+        log_security_event(
+            db,
+            request=request,
+            actor_user_id=ctx.user_id,
+            actor_station_id=ctx.station_id,
+            action="ADMIN_ROLE_CREATE",
+            target_type="role",
+            target_id=rid,
+            success=True,
+            details={"description": body.description},
+        )
+        return {"role_id": rid}
+
+
+@app.put("/api/admin/roles/{role_id}")
+def admin_update_role(
+    role_id: str,
+    body: AdminRoleUpdate,
+    request: Request,
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:write")),
+):
+    from app.models import Role
+    with SessionLocal() as db:
+        r = db.get(Role, role_id)
+        if r is None:
+            raise HTTPException(status_code=404, detail="role not found")
+        if body.description is not None:
+            r.description = body.description
+        db.add(r)
+        db.commit()
+        log_security_event(
+            db,
+            request=request,
+            actor_user_id=ctx.user_id,
+            actor_station_id=ctx.station_id,
+            action="ADMIN_ROLE_UPDATE",
+            target_type="role",
+            target_id=role_id,
+            success=True,
+            details={"description": body.description},
+        )
+        return {"ok": True}
+
+
+@app.delete("/api/admin/roles/{role_id}")
+def admin_delete_role(
+    role_id: str,
+    request: Request,
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:write")),
+):
+    from app.models import Role, RolePermission, UserRole
+    with SessionLocal() as db:
+        r = db.get(Role, role_id)
+        if r is None:
+            raise HTTPException(status_code=404, detail="role not found")
+        if bool(r.is_system):
+            raise HTTPException(status_code=400, detail="cannot delete system role")
+        db.query(RolePermission).filter(RolePermission.role_id == role_id).delete()
+        db.query(UserRole).filter(UserRole.role_id == role_id).delete()
+        db.delete(r)
+        db.commit()
+        log_security_event(
+            db,
+            request=request,
+            actor_user_id=ctx.user_id,
+            actor_station_id=ctx.station_id,
+            action="ADMIN_ROLE_DELETE",
+            target_type="role",
+            target_id=role_id,
+            success=True,
+        )
+        return {"ok": True}
+
+
+@app.put("/api/admin/roles/{role_id}/permissions")
+def admin_set_role_permissions(
+    role_id: str,
+    body: AdminRolePermissions,
+    request: Request,
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:write")),
+):
+    from app.models import Role, Permission, RolePermission
+    with SessionLocal() as db:
+        role = db.get(Role, role_id)
+        if role is None:
+            raise HTTPException(status_code=404, detail="role not found")
+        if bool(role.is_system):
+            raise HTTPException(status_code=400, detail="cannot edit system role permissions")
+
+        desired = sorted({p.strip() for p in (body.permissions or []) if p and p.strip()})
+        # validate permissions exist
+        for pid in desired:
+            if db.get(Permission, pid) is None:
+                raise HTTPException(status_code=400, detail=f"unknown permission: {pid}")
+
+        db.query(RolePermission).filter(RolePermission.role_id == role_id).delete()
+        for pid in desired:
+            db.add(RolePermission(role_id=role_id, perm_id=pid))
+        db.commit()
+
+        log_security_event(
+            db,
+            request=request,
+            actor_user_id=ctx.user_id,
+            actor_station_id=ctx.station_id,
+            action="ADMIN_ROLE_PERMISSIONS_SET",
+            target_type="role",
+            target_id=role_id,
+            success=True,
+            details={"permissions": desired},
+        )
+        return {"ok": True, "permissions": desired}
+
+
+@app.delete("/api/admin/users/{user_id}")
+def admin_delete_user(
+    user_id: str,
+    request: Request,
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:write")),
+):
+    from app.models import User, UserRole
+    with SessionLocal() as db:
+        u = db.get(User, user_id)
+        if u is None:
+            raise HTTPException(status_code=404, detail="user not found")
+        # prevent locking yourself out accidentally
+        if u.user_id == ctx.user_id:
+            raise HTTPException(status_code=400, detail="cannot delete own user")
+
+        db.query(UserRole).filter(UserRole.user_id == user_id).delete()
+        db.delete(u)
+        db.commit()
+        log_security_event(
+            db,
+            request=request,
+            actor_user_id=ctx.user_id,
+            actor_station_id=ctx.station_id,
+            action="ADMIN_USER_DELETE",
+            target_type="user",
+            target_id=user_id,
+            success=True,
+        )
+        return {"ok": True}
+
+
+@app.get("/api/meta/rules")
+def meta_rules(
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("meta:read")),
+):
+    # read-only for all permitted clients
+    with SessionLocal() as db:
+        rows = db.query(RuleDefinition).order_by(RuleDefinition.rule_id.asc()).all()
+        return {
+            "rules": [
+                {
+                    "rule_id": r.rule_id,
+                    "display_name": r.display_name,
+                    "message": r.message,
+                    "explanation": r.explanation,
+                    "category": r.category,
+                    "severity": r.severity,
+                    "metric": r.metric,
+                    "operator": r.operator,
+                    "value_json": r.value_json,
+                    "enabled": bool(r.enabled),
+                    "is_system": bool(r.is_system),
+                    "updated_at": r.updated_at,
+                    "updated_by": r.updated_by,
+                }
+                for r in rows
+            ]
+        }
+
+
+@app.get("/api/admin/rules")
+def admin_list_rules(
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:read")),
+):
+    with SessionLocal() as db:
+        rows = db.query(RuleDefinition).order_by(RuleDefinition.rule_id.asc()).all()
+        return {
+            "rules": [
+                {
+                    "rule_id": r.rule_id,
+                    "display_name": r.display_name,
+                    "message": r.message,
+                    "explanation": r.explanation,
+                    "category": r.category,
+                    "severity": r.severity,
+                    "metric": r.metric,
+                    "operator": r.operator,
+                    "value_json": r.value_json,
+                    "enabled": bool(r.enabled),
+                    "is_system": bool(r.is_system),
+                    "updated_at": r.updated_at,
+                    "updated_by": r.updated_by,
+                }
+                for r in rows
+            ]
+        }
+
+
+@app.put("/api/admin/rules/{rule_id}")
+def admin_upsert_rule(
+    rule_id: str,
+    body: AdminRuleUpsert,
+    request: Request,
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:write")),
+):
+    if body.rule_id.strip() != rule_id.strip():
+        raise HTTPException(status_code=400, detail="rule_id mismatch")
+
+    # Hard guard: prevent unknown operator injection
+    allowed_ops = {">", ">=", "is_null", "is_true", "is_false"}
+    if body.operator not in allowed_ops:
+        raise HTTPException(status_code=400, detail=f"unsupported operator: {body.operator}")
+
+    with SessionLocal() as db:
+        r = db.get(RuleDefinition, rule_id)
+        if r is None:
+            r = RuleDefinition(rule_id=rule_id, is_system=False)
+            db.add(r)
+
+        r.display_name = body.display_name
+        r.message = body.message
+        r.explanation = body.explanation
+        r.category = body.category
+        r.severity = body.severity
+        r.metric = body.metric
+        r.operator = body.operator
+        r.value_json = json.dumps(body.value, ensure_ascii=False)
+        r.enabled = bool(body.enabled)
+        r.updated_at = datetime.now(timezone.utc).isoformat()
+        r.updated_by = ctx.user_id
+        db.add(r)
+        db.commit()
+
+        log_security_event(
+            db,
+            request=request,
+            actor_user_id=ctx.user_id,
+            actor_station_id=ctx.station_id,
+            action="ADMIN_RULE_UPSERT",
+            target_type="rule_definition",
+            target_id=rule_id,
+            success=True,
+            details={
+                "display_name": body.display_name,
+                "message": body.message,
+                "category": body.category,
+                "severity": body.severity,
+                "metric": body.metric,
+                "operator": body.operator,
+                "value": body.value,
+                "enabled": body.enabled,
+            },
+        )
+        return {"ok": True, "rule_id": rule_id}
+
+
+@app.delete("/api/admin/rules/{rule_id}")
+def admin_delete_rule(
+    rule_id: str,
+    request: Request,
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:write")),
+):
+    with SessionLocal() as db:
+        r = db.get(RuleDefinition, rule_id)
+        if r is None:
+            raise HTTPException(status_code=404, detail="rule not found")
+        if bool(r.is_system):
+            raise HTTPException(status_code=400, detail="cannot delete system rule")
+        db.delete(r)
+        db.commit()
+        log_security_event(
+            db,
+            request=request,
+            actor_user_id=ctx.user_id,
+            actor_station_id=ctx.station_id,
+            action="ADMIN_RULE_DELETE",
+            target_type="rule_definition",
+            target_id=rule_id,
+            success=True,
+        )
+        return {"ok": True}
 
 @app.get("/api/admin/audit")
 def admin_audit(

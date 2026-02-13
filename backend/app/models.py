@@ -218,9 +218,52 @@ class SecurityEvent(Base):
     message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     ip: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    user_agent: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
+    user_agent: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     details: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON
+
+
+# -----------------------------------------------------------------------------
+# Rules Catalog (editable via Admin UI)
+# -----------------------------------------------------------------------------
+
+
+class RuleDefinition(Base):
+    """Regel-Definitionen und Anzeige-Texte.
+
+    Diese Tabelle dient als persistente, versionierbare Quelle für Regeln.
+    - Seed: beim Startup werden YAML-Regeln (rules/rules.yaml) als Default
+      eingefügt, sofern sie noch nicht existieren.
+    - Pflege: Admins können Regeln (Logik + Texte) über /api/admin/rules
+      anpassen.
+
+    Wichtiger Sicherheits-Punkt:
+      - Die Evaluations-Engine erlaubt nur eine begrenzte Menge Operatoren.
+        Dadurch kann man über UI keine "beliebige" Code-Execution erzeugen.
+    """
+
+    __tablename__ = "rule_definition"
+
+    rule_id: Mapped[str] = mapped_column(String, primary_key=True)
+
+    # UI / Anzeige
+    display_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    message: Mapped[str] = mapped_column(Text)  # Kurztext
+    explanation: Mapped[str] = mapped_column(Text)  # Langtext
+
+    # Logik
+    category: Mapped[str] = mapped_column(String, default="medical")
+    severity: Mapped[str] = mapped_column(String)  # "OK"|"WARN"|"CRITICAL"
+    metric: Mapped[str] = mapped_column(String)
+    operator: Mapped[str] = mapped_column(String)
+    value_json: Mapped[str] = mapped_column(Text)  # JSON-encoded expected value
+
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_system: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    updated_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    updated_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
 
 
 __all__ = [
@@ -234,4 +277,5 @@ __all__ = [
     "UserRole",
     "BreakGlassSession",
     "SecurityEvent",
+    "RuleDefinition",
 ]
