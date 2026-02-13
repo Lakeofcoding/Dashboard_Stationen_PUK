@@ -175,6 +175,58 @@ async function resetToday(auth: AuthState): Promise<DayState> {
   });
 }
 
+//dies hhier ist ein dummy Logo, bevor dann das PUK Logo eingesetzt wird:
+
+function ClinicLogo({ title = "Klinik" }: { title?: string }) {
+  return (
+    <svg
+      width="180"
+      height="28"
+      viewBox="0 0 180 28"
+      role="img"
+      aria-label={title}
+      style={{ display: "block" }}
+    >
+      <title>{title}</title>
+
+      {/* Rahmen */}
+      <rect x="0.5" y="0.5" width="179" height="27" rx="8" fill="#ffffff" stroke="#cbd5e1" />
+
+      {/* Gebäude */}
+      <rect x="10" y="9" width="18" height="12" rx="2" fill="#e2e8f0" stroke="#94a3b8" />
+      <rect x="30" y="6" width="22" height="15" rx="2" fill="#e2e8f0" stroke="#94a3b8" />
+      <rect x="54" y="9" width="18" height="12" rx="2" fill="#e2e8f0" stroke="#94a3b8" />
+
+      {/* Fenster */}
+      <rect x="14" y="12" width="4" height="4" fill="#ffffff" stroke="#94a3b8" />
+      <rect x="20" y="12" width="4" height="4" fill="#ffffff" stroke="#94a3b8" />
+      <rect x="34" y="10" width="4" height="4" fill="#ffffff" stroke="#94a3b8" />
+      <rect x="40" y="10" width="4" height="4" fill="#ffffff" stroke="#94a3b8" />
+      <rect x="46" y="10" width="4" height="4" fill="#ffffff" stroke="#94a3b8" />
+      <rect x="34" y="16" width="4" height="4" fill="#ffffff" stroke="#94a3b8" />
+      <rect x="40" y="16" width="4" height="4" fill="#ffffff" stroke="#94a3b8" />
+      <rect x="46" y="16" width="4" height="4" fill="#ffffff" stroke="#94a3b8" />
+      <rect x="58" y="12" width="4" height="4" fill="#ffffff" stroke="#94a3b8" />
+      <rect x="64" y="12" width="4" height="4" fill="#ffffff" stroke="#94a3b8" />
+
+      {/* Tür */}
+      <rect x="41" y="18" width="4" height="3" fill="#ffffff" stroke="#94a3b8" />
+
+      {/* Kreuz */}
+      <rect x="82" y="9" width="10" height="10" rx="2" fill="#fff1f2" stroke="#fb7185" />
+      <rect x="86.2" y="10.7" width="1.6" height="6.6" fill="#e11d48" />
+      <rect x="83.7" y="13.2" width="6.6" height="1.6" fill="#e11d48" />
+
+      {/* Text */}
+      <text x="100" y="18" fontSize="12" fontFamily="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial" fill="#0f172a">
+        Klinik
+      </text>
+    </svg>
+  );
+}
+//bis hierher; wenn PUK Logo, alles dazwischen löschen
+
+
 export default function App() {
   const [auth, setAuth] = useState<AuthState>(() => loadAuth());
   const [me, setMe] = useState<MetaMe | null>(null);
@@ -410,27 +462,10 @@ export default function App() {
         Stations-Dashboard
       </h1>
 
-      {/* Logo placeholder (optional) */}
-      <div
-        style={{
-          marginLeft: 8,
-          minWidth: 180,
-          height: 28,
-          borderRadius: 8,
-          border: "1px dashed #cbd5e1",
-          color: "#64748b",
-          fontSize: 12,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          padding: "0 10px",
-          whiteSpace: "nowrap",
-          flexShrink: 0,
-        }}
-        title="Platzhalter für Logo"
-      >
-        Logo
-      </div>
+      <div style={{ marginLeft: 8, flexShrink: 0 }}>
+  <ClinicLogo title="Klinik-Logo (Dummy)" />
+</div>
+
     </div>
 
     {/* Row 2: context controls (as before) */}
