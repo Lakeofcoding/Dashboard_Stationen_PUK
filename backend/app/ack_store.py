@@ -1,9 +1,23 @@
 from __future__ import annotations
 
+"""Persistenz für Quittierungen (ACK) und "Schieben" (SHIFT).
+
+Dieses Modul kapselt alle Datenbank-Schreibzugriffe.
+
+Design-Idee:
+  - `Ack` ist der *aktuelle Zustand* (Upsert auf einem festen Key).
+  - `AckEvent` ist ein *Audit-Log* (append-only), um nachvollziehen zu können,
+    wer wann was gemacht hat.
+
+Zusätzlich speichern wir pro Ack den Geschäftstag und eine Tagesversion
+("Vers"). Bei einem Reset wird die Version erhöht; alte Acks werden dadurch
+automatisch ungültig.
+"""
+
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy import select
 
@@ -58,6 +72,10 @@ class AckStore:
         user_id: str,
         comment: str | None = None,
         condition_hash: str | None = None,
+        business_date: str | None = None,
+        version: int | None = None,
+        action: str | None = None,
+        shift_code: str | None = None,
     ) -> Ack:
         now = _now_iso()
 
@@ -70,13 +88,20 @@ class AckStore:
                     "acked_by": existing.acked_by,
                     "comment": existing.comment,
                     "condition_hash": getattr(existing, "condition_hash", None),
+                    "business_date": getattr(existing, "business_date", None),
+                    "version": getattr(existing, "version", None),
+                    "action": getattr(existing, "action", None),
+                    "shift_code": getattr(existing, "shift_code", None),
                 }
 
                 existing.acked_at = now
                 existing.acked_by = user_id
                 existing.comment = comment
-                # NEW
                 existing.condition_hash = condition_hash
+                existing.business_date = business_date
+                existing.version = version
+                existing.action = action
+                existing.shift_code = shift_code
 
                 db.add(
                     self._insert_event(
@@ -84,7 +109,7 @@ class AckStore:
                         station_id=station_id,
                         ack_scope=ack_scope,
                         scope_id=scope_id,
-                        event_type="ACK_UPDATE",
+                        event_type="ACK_UPDATE" if (action or "ACK") == "ACK" else "SHIFT_UPDATE",
                         user_id=user_id,
                         payload={
                             "old": old,
@@ -93,6 +118,10 @@ class AckStore:
                                 "acked_by": user_id,
                                 "comment": comment,
                                 "condition_hash": condition_hash,
+                                "business_date": business_date,
+                                "version": version,
+                                "action": action,
+                                "shift_code": shift_code,
                             },
                         },
                     )
@@ -110,8 +139,11 @@ class AckStore:
                 acked_at=now,
                 acked_by=user_id,
                 comment=comment,
-                # NEW
                 condition_hash=condition_hash,
+                business_date=business_date,
+                version=version,
+                action=action,
+                shift_code=shift_code,
             )
             db.add(row)
 
@@ -121,13 +153,17 @@ class AckStore:
                     station_id=station_id,
                     ack_scope=ack_scope,
                     scope_id=scope_id,
-                    event_type="ACK",
+                    event_type="ACK" if (action or "ACK") == "ACK" else "SHIFT",
                     user_id=user_id,
                     payload={
                         "acked_at": now,
                         "acked_by": user_id,
                         "comment": comment,
                         "condition_hash": condition_hash,
+                        "business_date": business_date,
+                        "version": version,
+                        "action": action,
+                        "shift_code": shift_code,
                     },
                 )
             )

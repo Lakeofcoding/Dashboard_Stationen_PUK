@@ -12,7 +12,8 @@ from zoneinfo import ZoneInfo
 
 from app.ack_store import AckStore
 from app.auth import AuthContext, get_auth_context, require_role
-from app.db import init_db
+from app.db import SessionLocal, init_db
+from app.models import DayState
 
 # -----------------------------------------------------------------------------
 # Helpers: condition hash
@@ -65,6 +66,28 @@ def today_local() -> date:
     return datetime.now(ZoneInfo("Europe/Zurich")).date()
 
 
+def get_day_version(*, station_id: str) -> int:
+    """Liefert die aktuelle Tagesversion ("Vers") für eine Station.
+
+    - Für jede Station und jeden Geschäftstag existiert genau ein `day_state`.
+    - Beim ersten Zugriff an einem Tag wird der Datensatz angelegt (Version 1).
+    - Bei "Reset" wird diese Version erhöht.
+
+    Die Version wird verwendet, um Acks am selben Tag invalidieren zu können,
+    ohne alte Datensätze löschen zu müssen.
+    """
+
+    bdate = today_local().isoformat()
+    with SessionLocal() as db:
+        row = db.get(DayState, (station_id, bdate))
+        if row is None:
+            row = DayState(station_id=station_id, business_date=bdate, version=1)
+            db.add(row)
+            db.commit()
+            db.refresh(row)
+        return int(row.version)
+
+
 def _parse_iso_dt(s: str) -> datetime:
     # Handle trailing Z
     if s.endswith("Z"):
@@ -72,8 +95,21 @@ def _parse_iso_dt(s: str) -> datetime:
     return datetime.fromisoformat(s)
 
 
-def _acked_today(acked_at_iso: str) -> bool:
-    """Acks are only valid until the next business day."""
+def _ack_is_valid_today(*, acked_at_iso: str, business_date: str | None, version: int | None, current_version: int) -> bool:
+    """Prüft, ob eine Quittierung/Shift *heute* gültig ist.
+
+    Gültigkeitsregeln:
+      - Datum: `business_date` muss dem heutigen Geschäftstag entsprechen.
+      - Version: `version` muss der aktuellen Tagesversion entsprechen.
+      - Zusätzlich ist `acked_at` als Fallback-Check nützlich, falls
+        Altdaten ohne business_date existieren.
+    """
+
+    # Primär: Geschäftstag + Version
+    if business_date == today_local().isoformat() and (version or 0) == current_version:
+        return True
+
+    # Fallback für historische Acks ohne business_date/version
     try:
         dt = datetime.fromisoformat(acked_at_iso)
         if dt.tzinfo is None:
@@ -86,6 +122,8 @@ def _acked_today(acked_at_iso: str) -> bool:
 class Alert(BaseModel):
     rule_id: str
     severity: Severity
+    # Für die Filter-Sicht: "completeness" (Vollständigkeit) oder "medical" (Werte)
+    category: Literal["completeness", "medical"] = "medical"
     message: str
     explanation: str
     condition_hash: str
@@ -121,8 +159,11 @@ class CaseDetail(CaseSummary):
 
     alerts: list[Alert] = Field(default_factory=list)
 
-    # rule_id -> acked_at (only if ack is valid today + matches condition_hash)
-    rule_acks: dict[str, str] = Field(default_factory=dict)
+    # rule_id -> Status der Einzelmeldung für *heute*.
+    # Beispiel:
+    #   {"HONOS_ENTRY_MISSING_WARN": {"state": "ACK", "ts": "..."}}
+    #   {"BFS_INCOMPLETE": {"state": "SHIFT", "shift_code": "b", "ts": "..."}}
+    rule_states: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
 # -----------------------------------------------------------------------------
@@ -450,6 +491,7 @@ def load_rules() -> dict:
         "rules": [
             {
                 "id": "HONOS_ENTRY_MISSING",
+                "category": "completeness",
                 "severity": "CRITICAL",
                 "metric": "missing_honos_entry",
                 "operator": "is_true",
@@ -459,6 +501,7 @@ def load_rules() -> dict:
             },
             {
                 "id": "HONOS_DISCHARGE_MISSING",
+                "category": "completeness",
                 "severity": "CRITICAL",
                 "metric": "missing_honos_discharge",
                 "operator": "is_true",
@@ -468,6 +511,7 @@ def load_rules() -> dict:
             },
             {
                 "id": "BSCL_MISSING",
+                "category": "completeness",
                 "severity": "WARN",
                 "metric": "missing_bscl",
                 "operator": "is_true",
@@ -477,6 +521,7 @@ def load_rules() -> dict:
             },
             {
                 "id": "BFS_INCOMPLETE",
+                "category": "completeness",
                 "severity": "WARN",
                 "metric": "bfs_incomplete",
                 "operator": "is_true",
@@ -508,6 +553,9 @@ def evaluate_alerts(case: dict) -> list[Alert]:
 
     alerts: list[Alert] = []
     for r in rules.get("rules", []):
+        # Standard-Kategorie, wenn die YAML-Regel keine Angabe enthält.
+        # Dadurch bleiben ältere Regeln kompatibel.
+        category = r.get("category") or "medical"
         metric = r.get("metric")
         operator = r.get("operator")
         expected = r.get("value")
@@ -530,6 +578,7 @@ def evaluate_alerts(case: dict) -> list[Alert]:
                 Alert(
                     rule_id=r["id"],
                     severity=r["severity"],
+                    category=category,
                     message=r["message"],
                     explanation=r["explanation"],
                     condition_hash=ch,
@@ -568,33 +617,54 @@ def health():
 
 
 @app.get("/api/cases", response_model=list[CaseSummary])
-def list_cases(ctx: AuthContext = Depends(get_auth_context)):
+def list_cases(
+    view: Literal["all", "completeness", "medical"] = "all",
+    ctx: AuthContext = Depends(get_auth_context),
+):
     require_role(ctx, "VIEW_DASHBOARD")
 
     station_id = ctx.station_id
     station_cases = [enrich_case(c) for c in DUMMY_CASES if c["station_id"] == station_id]
     case_ids = [c["case_id"] for c in station_cases]
 
+    # Tagesversion ("Vers") der Station. Acks sind nur gültig, wenn sie zur
+    # aktuellen Version gehören.
+    current_version = get_day_version(station_id=station_id)
+
     acks = ack_store.get_acks_for_cases(case_ids, station_id)
 
     case_level_acked_at: dict[str, str] = {}
-    # rule_acks_today[case_id][rule_id] = ack_row
-    rule_acks_today: dict[str, dict[str, Any]] = {}
+    # rule_states_today[case_id][rule_id] = ack_row (ACK oder SHIFT)
+    rule_states_today: dict[str, dict[str, Any]] = {}
     for a in acks:
         if a.ack_scope == "case" and a.scope_id == "*":
-            case_level_acked_at[a.case_id] = a.acked_at
+            if _ack_is_valid_today(
+                acked_at_iso=a.acked_at,
+                business_date=getattr(a, "business_date", None),
+                version=getattr(a, "version", None),
+                current_version=current_version,
+            ):
+                case_level_acked_at[a.case_id] = a.acked_at
             continue
-        if a.ack_scope == "rule" and _acked_today(a.acked_at):
-            rule_acks_today.setdefault(a.case_id, {})[a.scope_id] = a
+        if a.ack_scope == "rule" and _ack_is_valid_today(
+            acked_at_iso=a.acked_at,
+            business_date=getattr(a, "business_date", None),
+            version=getattr(a, "version", None),
+            current_version=current_version,
+        ):
+            rule_states_today.setdefault(a.case_id, {})[a.scope_id] = a
 
     out: list[CaseSummary] = []
     for c in station_cases:
         raw_alerts = evaluate_alerts(c)
+        # Sicht-Filter auf Rule-Ebene
+        if view != "all":
+            raw_alerts = [a for a in raw_alerts if a.category == view]
 
         # Suppress rule-acked alerts for the rest of the day (until next business day)
         visible_alerts: list[Alert] = []
         for al in raw_alerts:
-            arow = rule_acks_today.get(c["case_id"], {}).get(al.rule_id)
+            arow = rule_states_today.get(c["case_id"], {}).get(al.rule_id)
             if not arow:
                 visible_alerts.append(al)
                 continue
@@ -612,8 +682,9 @@ def list_cases(ctx: AuthContext = Depends(get_auth_context)):
 
         severity, top_alert, critical_count, warn_count = summarize_severity(visible_alerts)
 
-        # fall out if ended AND case-acked
-        if c.get("discharge_date") is not None and case_level_acked_at.get(c["case_id"]):
+        # Fall verschwindet aus der Liste, sobald er heute "Fall quittiert" wurde.
+        # (Reset oder nächster Geschäftstag lassen ihn wieder erscheinen.)
+        if case_level_acked_at.get(c["case_id"]):
             continue
 
         out.append(
@@ -637,7 +708,11 @@ def list_cases(ctx: AuthContext = Depends(get_auth_context)):
 
 
 @app.get("/api/cases/{case_id}", response_model=CaseDetail)
-def get_case(case_id: str, ctx: AuthContext = Depends(get_auth_context)):
+def get_case(
+    case_id: str,
+    view: Literal["all", "completeness", "medical"] = "all",
+    ctx: AuthContext = Depends(get_auth_context),
+):
     require_role(ctx, "VIEW_DASHBOARD")
 
     raw = next((x for x in DUMMY_CASES if x["case_id"] == case_id), None)
@@ -649,16 +724,28 @@ def get_case(case_id: str, ctx: AuthContext = Depends(get_auth_context)):
         raise HTTPException(status_code=404, detail="Case not found")
 
     raw_alerts = evaluate_alerts(c)
+    if view != "all":
+        raw_alerts = [a for a in raw_alerts if a.category == view]
     # map current hash for active rules
     current_hash: dict[str, str] = {a.rule_id: a.condition_hash for a in raw_alerts}
 
+    # Tagesversion der Station (wichtig für Reset)
+    current_version = get_day_version(station_id=ctx.station_id)
+
     acks = ack_store.get_acks_for_cases([case_id], ctx.station_id)
     acked_at: str | None = None
-    rule_acks: dict[str, str] = {}
+    # rule_id -> {state: 'ACK'|'SHIFT', ts: '...', shift_code?: 'a'|'b'|'c'}
+    rule_states: dict[str, dict[str, Any]] = {}
 
     for a in acks:
         if a.ack_scope == "case" and a.scope_id == "*":
-            acked_at = a.acked_at
+            if _ack_is_valid_today(
+                acked_at_iso=a.acked_at,
+                business_date=getattr(a, "business_date", None),
+                version=getattr(a, "version", None),
+                current_version=current_version,
+            ):
+                acked_at = a.acked_at
             continue
 
         if a.ack_scope == "rule":
@@ -667,9 +754,19 @@ def get_case(case_id: str, ctx: AuthContext = Depends(get_auth_context)):
                 # rule currently not active -> ignore
                 continue
 
-            if _acked_today(a.acked_at) and a.condition_hash == ch:
-                # valid only for today; hides the alert
-                rule_acks[a.scope_id] = a.acked_at
+            if _ack_is_valid_today(
+                acked_at_iso=a.acked_at,
+                business_date=getattr(a, "business_date", None),
+                version=getattr(a, "version", None),
+                current_version=current_version,
+            ) and a.condition_hash == ch:
+                # gültig für heute: Alert ausblenden
+                state = getattr(a, "action", None) or "ACK"
+                rule_states[a.scope_id] = {
+                    "state": state,
+                    "ts": a.acked_at,
+                    "shift_code": getattr(a, "shift_code", None),
+                }
             elif a.condition_hash != ch:
                 # condition changed -> invalidate once and show again
                 ack_store.invalidate_rule_ack_if_mismatch(
@@ -679,8 +776,8 @@ def get_case(case_id: str, ctx: AuthContext = Depends(get_auth_context)):
                     current_hash=ch,
                 )
 
-    # Suppress alerts that were acknowledged today (rule-level)
-    visible_alerts = [a for a in raw_alerts if a.rule_id not in rule_acks]
+    # Suppress alerts that were acknowledged/shifted today (rule-level)
+    visible_alerts = [a for a in raw_alerts if a.rule_id not in rule_states]
     severity, top_alert, critical_count, warn_count = summarize_severity(visible_alerts)
 
     return CaseDetail(
@@ -700,7 +797,7 @@ def get_case(case_id: str, ctx: AuthContext = Depends(get_auth_context)):
         bscl=c.get("bscl_total_entry"),
         bfs_complete=not (c.get("_derived") or {}).get("bfs_incomplete", False),
         alerts=visible_alerts,
-        rule_acks=rule_acks,
+        rule_states=rule_states,
     )
 
 
@@ -777,6 +874,11 @@ class AckRequest(BaseModel):
     scope_id: str = "*"       # '*' or rule_id
     comment: Optional[str] = None
 
+    # NEW: Aktionstyp. Standard ist ACK.
+    # Für "Schieben" nutzt das Frontend action='SHIFT' und shift_code='a'|'b'|'c'.
+    action: Optional[Literal["ACK", "SHIFT"]] = "ACK"
+    shift_code: Optional[Literal["a", "b", "c"]] = None
+
 
 @app.post("/api/ack")
 def ack(req: AckRequest, ctx: AuthContext = Depends(get_auth_context)):
@@ -793,14 +895,18 @@ def ack(req: AckRequest, ctx: AuthContext = Depends(get_auth_context)):
     if c["station_id"] != ctx.station_id:
         raise HTTPException(status_code=404, detail="Case not found")
 
-    # Case-ack gate: only after discharge
-    if req.ack_scope == "case" and c.get("discharge_date") is None:
-        raise HTTPException(
-            status_code=409,
-            detail="Case cannot be acked before discharge/transfer is completed (discharge_date is null).",
-        )
+    # --- Eingabevalidierung für SHIFT
+    if (req.action or "ACK") == "SHIFT" and (req.shift_code not in ("a", "b", "c")):
+        raise HTTPException(status_code=400, detail="SHIFT requires shift_code to be one of: a, b, c")
 
-    # Rule-ack gate: only if rule is currently active; store current condition_hash
+    # Tageskontext für diesen Request (Geschäftstag + aktuelle Tagesversion)
+    business_date = today_local().isoformat()
+    current_version = get_day_version(station_id=ctx.station_id)
+
+    # Rule-ack/shift gate: nur möglich, wenn die Regel aktuell aktiv ist.
+    # Wir speichern den current condition_hash, damit ein späterer Datenupdate
+    # die Meldung automatisch wieder öffnen kann (AUTO_REOPEN), falls sich die
+    # Bedingung geändert hat.
     condition_hash: str | None = None
     if req.ack_scope == "rule":
         alerts = evaluate_alerts(c)
@@ -808,6 +914,41 @@ def ack(req: AckRequest, ctx: AuthContext = Depends(get_auth_context)):
         if not alert:
             raise HTTPException(status_code=409, detail="Rule not currently active; cannot ack.")
         condition_hash = alert.condition_hash
+
+    # Case-ack gate: der Fall darf nur quittiert werden, wenn alle Einzelmeldungen
+    # für die aktuelle Sicht bereits erledigt sind (ACK oder SHIFT heute).
+    if req.ack_scope == "case":
+        # Wir betrachten den gesamten Fall (unabhängig von View-Filter), weil
+        # "Fall quittieren" semantisch den kompletten To-Do-Stack abschließt.
+        active_alerts = evaluate_alerts(c)
+        if active_alerts:
+            # Sammle gültige rule-states für heute.
+            acks = ack_store.get_acks_for_cases([req.case_id], ctx.station_id)
+            current_hash = {a.rule_id: a.condition_hash for a in active_alerts}
+            handled: set[str] = set()
+            for a in acks:
+                if a.ack_scope != "rule":
+                    continue
+                if not _ack_is_valid_today(
+                    acked_at_iso=a.acked_at,
+                    business_date=getattr(a, "business_date", None),
+                    version=getattr(a, "version", None),
+                    current_version=current_version,
+                ):
+                    continue
+                rid = a.scope_id
+                if current_hash.get(rid) and getattr(a, "condition_hash", None) == current_hash[rid]:
+                    handled.add(rid)
+
+            missing = [a.rule_id for a in active_alerts if a.rule_id not in handled]
+            if missing:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": "Fall kann erst quittiert werden, wenn alle Einzelmeldungen quittiert oder geschoben sind.",
+                        "open_rules": missing,
+                    },
+                )
 
     ack_row = ack_store.upsert_ack(
         case_id=req.case_id,
@@ -817,6 +958,10 @@ def ack(req: AckRequest, ctx: AuthContext = Depends(get_auth_context)):
         user_id=ctx.user_id,
         comment=req.comment,
         condition_hash=condition_hash,
+        business_date=business_date,
+        version=current_version,
+        action=(req.action or "ACK"),
+        shift_code=req.shift_code,
     )
 
     return {
@@ -828,4 +973,67 @@ def ack(req: AckRequest, ctx: AuthContext = Depends(get_auth_context)):
         "acked_at": ack_row.acked_at,
         "acked_by": ack_row.acked_by,
         "condition_hash": getattr(ack_row, "condition_hash", None),
+    }
+
+
+# -----------------------------------------------------------------------------
+# Reset/Version API
+# -----------------------------------------------------------------------------
+
+@app.get("/api/day_state")
+def get_day_state(ctx: AuthContext = Depends(get_auth_context)):
+    """Liefert die aktuelle Tagesversion ("Vers") für die Station des Users."""
+    require_role(ctx, "VIEW_DASHBOARD")
+    return {
+        "station_id": ctx.station_id,
+        "business_date": today_local().isoformat(),
+        "version": get_day_version(station_id=ctx.station_id),
+    }
+
+
+@app.post("/api/reset_today")
+def reset_today(ctx: AuthContext = Depends(get_auth_context)):
+    """Inkrementiert die Tagesversion.
+
+    Effekt:
+      - Alle Acks (Fall/Regel/Shift) mit der alten Version werden ignoriert.
+      - Dadurch erscheinen alle Fälle/Meldungen des Tages wieder.
+
+    Zusätzlich schreiben wir ein Audit-Event in `ack_event`.
+    """
+    require_role(ctx, "ACK_ALERT")
+
+    bdate = today_local().isoformat()
+    with SessionLocal() as db:
+        row = db.get(DayState, (ctx.station_id, bdate))
+        if row is None:
+            row = DayState(station_id=ctx.station_id, business_date=bdate, version=1)
+            db.add(row)
+            db.commit()
+            db.refresh(row)
+
+        old_v = int(row.version)
+        row.version = old_v + 1
+        db.add(row)
+
+        # Audit: Reset ist ein stationsweiter Vorgang, kein einzelner Fall.
+        # Wir speichern case_id='*' und ack_scope='station'.
+        db.add(
+            ack_store._insert_event(
+                case_id="*",
+                station_id=ctx.station_id,
+                ack_scope="station",
+                scope_id=bdate,
+                event_type="RESET_DAY",
+                user_id=ctx.user_id,
+                payload={"business_date": bdate, "old_version": old_v, "new_version": int(row.version)},
+            )
+        )
+
+        db.commit()
+
+    return {
+        "station_id": ctx.station_id,
+        "business_date": bdate,
+        "version": get_day_version(station_id=ctx.station_id),
     }

@@ -3,6 +3,7 @@ export type Severity = "OK" | "WARN" | "CRITICAL";
 export interface Alert {
   rule_id: string;
   severity: Severity;
+  category: "completeness" | "medical";
   message: string;
   explanation: string;
   condition_hash?: string;
@@ -10,6 +11,9 @@ export interface Alert {
 
 export interface CaseSummary {
   case_id: string;
+  patient_id?: string;
+  clinic?: string;
+  center?: string;
   station_id: string;
   admission_date: string;
   discharge_date: string | null;
@@ -25,5 +29,12 @@ export interface CaseDetail extends CaseSummary {
   bscl?: number | null;
   bfs_complete: boolean;
   alerts: Alert[];
-  rule_acks: Record<string, string>; // rule_id -> acked_at
+  // rule_id -> Status der Einzelmeldung für *heute*
+  rule_states: Record<string, { state: "ACK" | "SHIFT"; ts: string; shift_code?: "a" | "b" | "c" | null }>;
+}
+
+export interface DayState {
+  station_id: string;
+  business_date: string; // YYYY-MM-DD
+  version: number; // "Vers" pro Tag
 }

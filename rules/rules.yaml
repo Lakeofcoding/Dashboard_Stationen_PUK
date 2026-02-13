@@ -1,6 +1,7 @@
 rules:
   # --- Eintritt: HONOS Pflicht, Eskalation nach 3 Tagen
   - id: HONOS_ENTRY_MISSING_WARN
+    category: completeness
     severity: WARN
     metric: honos_entry_total
     operator: is_null
@@ -9,6 +10,7 @@ rules:
     explanation: "HONOS Eintritt ist noch nicht erfasst."
 
   - id: HONOS_ENTRY_MISSING_CRIT_3D
+    category: completeness
     severity: CRITICAL
     metric: honos_entry_missing_over_3d
     operator: is_true
@@ -18,6 +20,7 @@ rules:
 
   # --- Eintritt: BSCL Pflicht, Eskalation nach 3 Tagen
   - id: BSCL_ENTRY_MISSING_WARN
+    category: completeness
     severity: WARN
     metric: bscl_total_entry
     operator: is_null
@@ -26,6 +29,7 @@ rules:
     explanation: "BSCL Eintritt ist noch nicht erfasst."
 
   - id: BSCL_ENTRY_MISSING_CRIT_3D
+    category: completeness
     severity: CRITICAL
     metric: bscl_entry_missing_over_3d
     operator: is_true
@@ -35,6 +39,7 @@ rules:
 
   # --- Austritt: HONOS Pflicht im +/- 3 Tage Fenster um Austritt
   - id: HONOS_DISCHARGE_MISSING_WARN
+    category: completeness
     severity: WARN
     metric: honos_discharge_due_missing
     operator: is_true
@@ -43,6 +48,7 @@ rules:
     explanation: "Bei Austritt muss HONOS Austritt im ±3 Tage Fenster dokumentiert werden."
 
   - id: HONOS_DISCHARGE_MISSING_CRIT_3D
+    category: completeness
     severity: CRITICAL
     metric: honos_discharge_missing_over_3d_after_discharge
     operator: is_true
@@ -52,6 +58,7 @@ rules:
 
   # --- Austritt: BSCL Pflicht im +/- 3 Tage Fenster um Austritt
   - id: BSCL_DISCHARGE_MISSING_WARN
+    category: completeness
     severity: WARN
     metric: bscl_discharge_due_missing
     operator: is_true
@@ -113,6 +120,7 @@ rules:
 
   # --- BFS Paket: vollständig/ unvollständig (wie gehabt)
   - id: BFS_INCOMPLETE
+    category: completeness
     severity: WARN
     metric: bfs_incomplete
     operator: is_true

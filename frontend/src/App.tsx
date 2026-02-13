@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { CaseSummary, CaseDetail, Severity } from "./types";
+import type { CaseSummary, CaseDetail, Severity, DayState } from "./types";
 import { Toast } from "./Toast";
 
 type ToastState =
@@ -73,15 +73,19 @@ async function apiJson<T>(path: string, init: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
-async function fetchCases(auth: AuthState): Promise<CaseSummary[]> {
-  return apiJson<CaseSummary[]>("/api/cases", {
+type ViewMode = "all" | "completeness" | "medical";
+
+async function fetchCases(auth: AuthState, view: ViewMode): Promise<CaseSummary[]> {
+  const qs = new URLSearchParams({ view }).toString();
+  return apiJson<CaseSummary[]>(`/api/cases?${qs}`, {
     method: "GET",
     headers: authHeaders(auth),
   });
 }
 
-async function fetchCaseDetail(caseId: string, auth: AuthState): Promise<CaseDetail> {
-  return apiJson<CaseDetail>(`/api/cases/${encodeURIComponent(caseId)}`, {
+async function fetchCaseDetail(caseId: string, auth: AuthState, view: ViewMode): Promise<CaseDetail> {
+  const qs = new URLSearchParams({ view }).toString();
+  return apiJson<CaseDetail>(`/api/cases/${encodeURIComponent(caseId)}?${qs}`, {
     method: "GET",
     headers: authHeaders(auth),
   });
@@ -107,6 +111,28 @@ async function ackRule(
   });
 }
 
+async function shiftRule(caseId: string, ruleId: string, shift: "a" | "b" | "c", auth: AuthState): Promise<{ acked_at: string }> {
+  return apiJson<{ acked_at: string }>("/api/ack", {
+    method: "POST",
+    headers: authHeaders(auth),
+    body: JSON.stringify({ case_id: caseId, ack_scope: "rule", scope_id: ruleId, action: "SHIFT", shift_code: shift }),
+  });
+}
+
+async function fetchDayState(auth: AuthState): Promise<DayState> {
+  return apiJson<DayState>("/api/day_state", {
+    method: "GET",
+    headers: authHeaders(auth),
+  });
+}
+
+async function resetToday(auth: AuthState): Promise<DayState> {
+  return apiJson<DayState>("/api/reset_today", {
+    method: "POST",
+    headers: authHeaders(auth),
+  });
+}
+
 export default function App() {
   const [auth, setAuth] = useState<AuthState>(() => loadAuth());
   const [stations, setStations] = useState<string[]>(["A1", "B0", "B2"]);
@@ -120,6 +146,12 @@ export default function App() {
 
   const roles = useMemo(() => parseRoles(auth.rolesCsv), [auth.rolesCsv]);
   const canAck = roles.has("ACK_ALERT");
+
+  // Dashboard-Sicht: alle Alerts, nur Vollständigkeit, oder nur medizinische Werte.
+  const [viewMode, setViewMode] = useState<ViewMode>("all");
+
+  // Tageszustand (Geschäftstag + Version/"Vers")
+  const [dayState, setDayState] = useState<DayState | null>(null);
 
   const [cases, setCases] = useState<CaseSummary[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -148,9 +180,13 @@ export default function App() {
 
     const load = async () => {
       try {
-        const data = await fetchCases(auth);
+        const [data, ds] = await Promise.all([
+          fetchCases(auth, viewMode),
+          fetchDayState(auth),
+        ]);
         if (!alive) return;
         setCases(data);
+        setDayState(ds);
         setError(null);
 
         // Only show CRITICAL toast if:
@@ -185,7 +221,7 @@ export default function App() {
       window.clearInterval(id);
     };
     // auth changes should restart polling
-  }, [auth, toast]);
+  }, [auth, toast, viewMode]);
 
   // Load detail when selection changes OR auth changes (station context changes)
   useEffect(() => {
@@ -196,14 +232,14 @@ export default function App() {
     }
 
     setDetailLoading(true);
-    fetchCaseDetail(selectedCaseId, auth)
+    fetchCaseDetail(selectedCaseId, auth, viewMode)
       .then((d) => {
         setDetail(d);
         setDetailError(null);
       })
       .catch((err) => setDetailError(err?.message ?? String(err)))
       .finally(() => setDetailLoading(false));
-  }, [selectedCaseId, auth]);
+  }, [selectedCaseId, auth, viewMode]);
 
   // Keep detail acked_at in sync with list after polling refresh
   useEffect(() => {
@@ -297,7 +333,56 @@ export default function App() {
           <h1 style={{ margin: 0 }}>Dashboard – Station {auth.stationId}</h1>
           <div style={{ fontSize: 12, opacity: 0.75 }}>
             User: <code>{auth.userId}</code> · Rollen: <code>{auth.rolesCsv || "—"}</code>
+            {dayState ? (
+              <>
+                {" "}· Tag: <code>{dayState.business_date}</code> · Vers: <code>{dayState.version}</code>
+              </>
+            ) : null}
           </div>
+
+          <div className="toolbar" style={{ marginTop: 10 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 12, opacity: 0.75 }}>Sicht</span>
+              <select
+                value={viewMode}
+                onChange={(e) => {
+                  setViewMode(e.target.value as ViewMode);
+                  // Wenn die Sicht wechselt, kann ein zuvor selektierter Fall
+                  // in dieser Sicht anders aussehen; wir laden Detail neu über useEffect.
+                }}
+                style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc", background: "#fff" }}
+              >
+                <option value="all">Alle</option>
+                <option value="completeness">Vollständigkeit</option>
+                <option value="medical">Medizinisch</option>
+              </select>
+            </label>
+
+            <button
+              className="btn"
+              disabled={!canAck}
+              onClick={async () => {
+                if (!canAck) return;
+                try {
+                  const ds = await resetToday(auth);
+                  setDayState(ds);
+                  // Nach Reset: Liste + Detail neu laden
+                  const data = await fetchCases(auth, viewMode);
+                  setCases(data);
+                  if (selectedCaseId) {
+                    const d = await fetchCaseDetail(selectedCaseId, auth, viewMode);
+                    setDetail(d);
+                  }
+                } catch (e: any) {
+                  setError(e?.message ?? String(e));
+                }
+              }}
+              title={canAck ? "Reset: alle heutigen Quittierungen/Schieben verwerfen" : "Keine Berechtigung"}
+            >
+              Reset (heute)
+            </button>
+          </div>
+
         </div>
 
         <details style={{ border: "1px solid #ddd", borderRadius: 10, padding: "0.6rem 0.9rem", background: "#fff" }}>
@@ -426,7 +511,9 @@ export default function App() {
 
               {!detail.acked_at && (
                 <button
-                  disabled={!canAck}
+                  // Fall quittieren nur möglich, wenn in der aktuellen Sicht
+                  // keine offenen Alerts mehr da sind.
+                  disabled={!canAck || detail.alerts.length > 0}
                   onClick={async () => {
                     if (!canAck) return;
                     try {
@@ -454,7 +541,13 @@ export default function App() {
                     fontWeight: 600,
                     cursor: canAck ? "pointer" : "not-allowed",
                   }}
-                  title={canAck ? "Fall quittieren" : "Keine Berechtigung (ACK_ALERT fehlt)"}
+                  title={
+                    !canAck
+                      ? "Keine Berechtigung (ACK_ALERT fehlt)"
+                      : detail.alerts.length > 0
+                      ? "Fall kann erst quittiert werden, wenn alle Alerts quittiert oder geschoben sind"
+                      : "Fall quittieren"
+                  }
                 >
                   Fall quittieren
                 </button>
@@ -484,7 +577,7 @@ export default function App() {
                           <strong>{a.severity}:</strong> {a.message}
                         </div>
                         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                        <label style={{ display: "flex", gap: 6, alignItems: "center" }} title="Platzhalter-Auswahl (a/b/c)">
+                        <label style={{ display: "flex", gap: 6, alignItems: "center" }} title="Schieben blendet die Meldung für heute aus (Vers-abhängig).">
                           <span style={{ fontSize: "0.9em", opacity: 0.9 }}>Schieben</span>
                           <select
                             disabled={!canAck}
@@ -506,6 +599,40 @@ export default function App() {
                         </label>
 
                         <button
+                          disabled={!canAck || !(shiftByAlert[`${detail.case_id}::${a.rule_id}`] ?? "")}
+                          onClick={async () => {
+                            if (!canAck) return;
+                            const val = (shiftByAlert[`${detail.case_id}::${a.rule_id}`] ?? "") as any;
+                            if (!val) return;
+                            try {
+                              await shiftRule(detail.case_id, a.rule_id, val, auth);
+                              // Auswahl zurücksetzen (UI)
+                              setShift(detail.case_id, a.rule_id, "");
+
+                              // Refresh both list + detail so the alert disappears immediately
+                              const [newList, newDetail] = await Promise.all([
+                                fetchCases(auth, viewMode),
+                                fetchCaseDetail(detail.case_id, auth, viewMode),
+                              ]);
+                              setCases(newList);
+                              setDetail(newDetail);
+                            } catch (e: any) {
+                              setError(e?.message ?? String(e));
+                            }
+                          }}
+                          style={{
+                            padding: "6px 10px",
+                            borderRadius: 10,
+                            border: "1px solid #333",
+                            background: canAck ? "#fff" : "#eee",
+                            cursor: canAck ? "pointer" : "not-allowed",
+                          }}
+                          title={canAck ? "Meldung schieben" : "Keine Berechtigung"}
+                        >
+                          Schieben
+                        </button>
+
+                        <button
                           disabled={!canAck}
                           onClick={async () => {
                             if (!canAck) return;
@@ -513,8 +640,8 @@ export default function App() {
                               await ackRule(detail.case_id, a.rule_id, auth);
                               // Refresh both list + detail so the alert disappears immediately
                               const [newList, newDetail] = await Promise.all([
-                                fetchCases(auth),
-                                fetchCaseDetail(detail.case_id, auth),
+                                fetchCases(auth, viewMode),
+                                fetchCaseDetail(detail.case_id, auth, viewMode),
                               ]);
                               setCases(newList);
                               setDetail(newDetail);
@@ -556,22 +683,11 @@ export default function App() {
         <Toast
           kind={toast.kind}
           message={toast.message}
-          actionLabel={canAck ? "Quittieren" : undefined}
-          onAction={
-            canAck
-              ? async () => {
-                  try {
-                    await ackCase(toast.caseId, auth);
-                    setToast(null);
-                    // refresh list to reflect ack
-                    const data = await fetchCases(auth);
-                    setCases(data);
-                  } catch (e: any) {
-                    setError(e?.message ?? String(e));
-                  }
-                }
-              : undefined
-          }
+          actionLabel="Öffnen"
+          onAction={async () => {
+            setSelectedCaseId(toast.caseId);
+            setToast(null);
+          }}
           onClose={() => setToast(null)}
         />
       )}
