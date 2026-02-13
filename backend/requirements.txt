@@ -4,5 +4,8 @@ pydantic==2.10.6
 pyyaml==6.0.2
 SQLAlchemy>=2.0
 python-dotenv
-pydantic>=2.0
 tzdata
+
+# tests
+pytest==8.3.3
+httpx==0.27.2

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CaseSummary, CaseDetail, Severity, DayState } from "./types";
 import { Toast } from "./Toast";
+import { AdminPanel } from "./AdminPanel";
 
 type ToastState =
   | { caseId: string; message: string; kind: "critical" | "warn" | "info" }
@@ -9,16 +10,21 @@ type ToastState =
 type AuthState = {
   stationId: string;
   userId: string;
-  rolesCsv: string; // "VIEW_DASHBOARD,ACK_ALERT"
 };
 
-
 type MetaUser = { user_id: string; roles: string[] };
+
+type MetaMe = {
+  user_id: string;
+  station_id: string;
+  roles: string[];
+  permissions: string[];
+  break_glass: boolean;
+};
 
 const LS_KEYS = {
   stationId: "dashboard.stationId",
   userId: "dashboard.userId",
-  rolesCsv: "dashboard.rolesCsv",
 };
 
 function severityColor(severity: Severity): string {
@@ -36,23 +42,12 @@ function loadAuth(): AuthState {
   return {
     stationId: localStorage.getItem(LS_KEYS.stationId) ?? "ST01",
     userId: localStorage.getItem(LS_KEYS.userId) ?? "demo",
-    rolesCsv: localStorage.getItem(LS_KEYS.rolesCsv) ?? "VIEW_DASHBOARD,ACK_ALERT",
   };
 }
 
 function saveAuth(a: AuthState) {
   localStorage.setItem(LS_KEYS.stationId, a.stationId);
   localStorage.setItem(LS_KEYS.userId, a.userId);
-  localStorage.setItem(LS_KEYS.rolesCsv, a.rolesCsv);
-}
-
-function parseRoles(csv: string): Set<string> {
-  return new Set(
-    csv
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean)
-  );
 }
 
 function authHeaders(auth: AuthState): HeadersInit {
@@ -60,12 +55,52 @@ function authHeaders(auth: AuthState): HeadersInit {
     "Content-Type": "application/json",
     "X-Station-Id": auth.stationId,
     "X-User-Id": auth.userId,
-    "X-Roles": auth.rolesCsv,
   };
 }
 
+function isAdminPath(pathname: string): boolean {
+  return pathname.startsWith("/api/admin/");
+}
+
+function headerLookup(h: HeadersInit | undefined, key: string): string | undefined {
+  if (!h) return undefined;
+  if (h instanceof Headers) return h.get(key) ?? undefined;
+  if (Array.isArray(h)) {
+    const found = h.find(([k]) => k.toLowerCase() === key.toLowerCase());
+    return found?.[1];
+  }
+  const obj = h as Record<string, string>;
+  const direct = obj[key];
+  if (direct) return direct;
+  const lowerKey = key.toLowerCase();
+  for (const k of Object.keys(obj)) {
+    if (k.toLowerCase() === lowerKey) return obj[k];
+  }
+  return undefined;
+}
+
+function withCtx(path: string, init: RequestInit): string {
+  if (!path.startsWith("/api/")) return path;
+
+  const url = new URL(path, window.location.origin);
+
+  if (isAdminPath(url.pathname)) return url.pathname + url.search;
+
+  if (url.searchParams.has("ctx")) return url.pathname + url.search;
+
+  const h = init.headers;
+  const ctx =
+    headerLookup(h, "X-Scope-Ctx") ||
+    headerLookup(h, "X-Station-Id") ||
+    localStorage.getItem(LS_KEYS.stationId) ||
+    "global";
+
+  url.searchParams.set("ctx", ctx);
+  return url.pathname + "?" + url.searchParams.toString();
+}
+
 async function apiJson<T>(path: string, init: RequestInit): Promise<T> {
-  const res = await fetch(path, init);
+  const res = await fetch(withCtx(path, init), init);
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(text || `HTTP ${res.status}`);
@@ -73,7 +108,7 @@ async function apiJson<T>(path: string, init: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
-type ViewMode = "all" | "completeness" | "medical";
+type ViewMode = "all" | "completeness" | "medical" | "admin";
 
 async function fetchCases(auth: AuthState, view: ViewMode): Promise<CaseSummary[]> {
   const qs = new URLSearchParams({ view }).toString();
@@ -99,11 +134,7 @@ async function ackCase(caseId: string, auth: AuthState): Promise<{ acked_at: str
   });
 }
 
-async function ackRule(
-  caseId: string,
-  ruleId: string,
-  auth: AuthState
-): Promise<{ acked_at: string }> {
+async function ackRule(caseId: string, ruleId: string, auth: AuthState): Promise<{ acked_at: string }> {
   return apiJson<{ acked_at: string }>("/api/ack", {
     method: "POST",
     headers: authHeaders(auth),
@@ -111,11 +142,22 @@ async function ackRule(
   });
 }
 
-async function shiftRule(caseId: string, ruleId: string, shift: "a" | "b" | "c", auth: AuthState): Promise<{ acked_at: string }> {
+async function shiftRule(
+  caseId: string,
+  ruleId: string,
+  shift: "a" | "b" | "c",
+  auth: AuthState
+): Promise<{ acked_at: string }> {
   return apiJson<{ acked_at: string }>("/api/ack", {
     method: "POST",
     headers: authHeaders(auth),
-    body: JSON.stringify({ case_id: caseId, ack_scope: "rule", scope_id: ruleId, action: "SHIFT", shift_code: shift }),
+    body: JSON.stringify({
+      case_id: caseId,
+      ack_scope: "rule",
+      scope_id: ruleId,
+      action: "SHIFT",
+      shift_code: shift,
+    }),
   });
 }
 
@@ -135,22 +177,25 @@ async function resetToday(auth: AuthState): Promise<DayState> {
 
 export default function App() {
   const [auth, setAuth] = useState<AuthState>(() => loadAuth());
+  const [me, setMe] = useState<MetaMe | null>(null);
+
   const [stations, setStations] = useState<string[]>(["A1", "B0", "B2"]);
   const [metaUsers, setMetaUsers] = useState<MetaUser[]>([
-    { user_id: "demo", roles: ["VIEW_DASHBOARD", "ACK_ALERT"] },
-    { user_id: "pflege1", roles: ["VIEW_DASHBOARD"] },
-    { user_id: "arzt1", roles: ["VIEW_DASHBOARD", "ACK_ALERT"] },
-    { user_id: "manager1", roles: ["VIEW_DASHBOARD", "ACK_ALERT"] },
+    { user_id: "demo", roles: ["admin"] },
+    { user_id: "pflege1", roles: ["viewer"] },
+    { user_id: "arzt1", roles: ["admin"] },
+    { user_id: "manager1", roles: ["admin"] },
   ]);
   const [metaError, setMetaError] = useState<string | null>(null);
 
-  const roles = useMemo(() => parseRoles(auth.rolesCsv), [auth.rolesCsv]);
-  const canAck = roles.has("ACK_ALERT");
+  const permissions = useMemo(() => new Set(me?.permissions ?? []), [me]);
+  const canAck = permissions.has("ack:write");
+  const canReset = permissions.has("reset:today");
+  const canAdmin =
+    permissions.has("admin:read") || permissions.has("admin:write") || permissions.has("audit:read");
 
-  // Dashboard-Sicht: alle Alerts, nur Vollständigkeit, oder nur medizinische Werte.
   const [viewMode, setViewMode] = useState<ViewMode>("all");
 
-  // Tageszustand (Geschäftstag + Version/"Vers")
   const [dayState, setDayState] = useState<DayState | null>(null);
 
   const [cases, setCases] = useState<CaseSummary[]>([]);
@@ -163,7 +208,8 @@ export default function App() {
 
   const [toast, setToast] = useState<ToastState>(null);
 
-  // UI-only placeholder state for the new 'Schieben' selector (a/b/c) per alert
+  const [isAdminOpen, setIsAdminOpen] = useState(false);
+
   const [shiftByAlert, setShiftByAlert] = useState<Record<string, "a" | "b" | "c" | "">>({});
 
   const setShift = (caseId: string, ruleId: string, value: "a" | "b" | "c" | "") => {
@@ -171,31 +217,56 @@ export default function App() {
     setShiftByAlert((prev) => ({ ...prev, [key]: value }));
   };
 
-  // Dedup for critical toasts across refresh cycles (per session)
   const shownCriticalRef = useRef<Record<string, true>>({});
 
-  // Polling: prototype-friendly. Keep interval moderate.
+  function updateAuth(patch: Partial<AuthState>) {
+    const next = { ...auth, ...patch };
+    setAuth(next);
+    saveAuth(next);
+  }
+
+  // Kontextwechsel: Detail/Fehler/Schieben/Toast-Session zurücksetzen (alles andere bleibt)
+  useEffect(() => {
+    setSelectedCaseId(null);
+    setDetail(null);
+    setDetailError(null);
+    setDetailLoading(false);
+    setShiftByAlert({});
+    setToast(null);
+    shownCriticalRef.current = {};
+  }, [auth.stationId, auth.userId]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const data = await apiJson<MetaMe>("/api/meta/me", {
+          method: "GET",
+          headers: authHeaders(auth),
+        });
+        setMe(data);
+      } catch (e) {
+        console.error(e);
+        setMe(null);
+      }
+    })();
+  }, [auth.stationId, auth.userId]);
+
   useEffect(() => {
     let alive = true;
 
     const load = async () => {
       try {
-        const [data, ds] = await Promise.all([
-          fetchCases(auth, viewMode),
-          fetchDayState(auth),
-        ]);
+        const [data, ds] = await Promise.all([fetchCases(auth, viewMode), fetchDayState(auth)]);
         if (!alive) return;
         setCases(data);
         setDayState(ds);
         setError(null);
 
-        // Only show CRITICAL toast if:
-        // - there is currently no toast open
-        // - there is at least 1 visible critical alert
-        // - toast for that case wasn't shown already (session)
         if (!toast) {
           const firstCritical = data.find(
-            (c) => (c.critical_count ?? (c.severity === "CRITICAL" ? 1 : 0)) > 0 && !shownCriticalRef.current[c.case_id]
+            (c) =>
+              (c.critical_count ?? (c.severity === "CRITICAL" ? 1 : 0)) > 0 &&
+              !shownCriticalRef.current[c.case_id]
           );
           if (firstCritical) {
             setToast({
@@ -212,7 +283,6 @@ export default function App() {
       }
     };
 
-    // initial + interval
     load();
     const id = window.setInterval(load, 10_000);
 
@@ -220,10 +290,8 @@ export default function App() {
       alive = false;
       window.clearInterval(id);
     };
-    // auth changes should restart polling
   }, [auth, toast, viewMode]);
 
-  // Load detail when selection changes OR auth changes (station context changes)
   useEffect(() => {
     if (!selectedCaseId) {
       setDetail(null);
@@ -238,21 +306,18 @@ export default function App() {
         setDetailError(null);
       })
       .catch((err) => {
-    const msg = err?.message ?? String(err);
-    // Robust gegen Kontextwechsel: Wenn der Fall im neuen Kontext nicht existiert,
-    // räumen wir die Selektion auf statt die UI in einem Fehlerzustand zu belassen.
-    if (String(msg).includes("404") || String(msg).toLowerCase().includes("not found")) {
-      setSelectedCaseId(null);
-      setDetail(null);
-      setDetailError(null);
-      return;
-    }
-    setDetailError(msg);
-  })
+        const msg = err?.message ?? String(err);
+        if (String(msg).includes("404") || String(msg).toLowerCase().includes("not found")) {
+          setSelectedCaseId(null);
+          setDetail(null);
+          setDetailError(null);
+          return;
+        }
+        setDetailError(msg);
+      })
       .finally(() => setDetailLoading(false));
   }, [selectedCaseId, auth, viewMode]);
 
-  // Keep detail acked_at in sync with list after polling refresh
   useEffect(() => {
     if (!detail || !selectedCaseId) return;
     const fromList = cases.find((c) => c.case_id === selectedCaseId);
@@ -263,28 +328,15 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cases, selectedCaseId]);
 
-  function updateAuth(patch: Partial<AuthState>) {
-    const next = { ...auth, ...patch };
-    setAuth(next);
-    saveAuth(next);
-  }
-
-// Kontextwechsel (Station/User): Detail/Fehler/Schieben zurücksetzen.
-// Ziel: Von jeder Ansicht aus soll alles funktionieren, ohne "hängende" Selektionen.
-useEffect(() => {
-  setSelectedCaseId(null);
-  setDetail(null);
-  setDetailError(null);
-  setDetailLoading(false);
-  setShiftByAlert({});
-}, [auth.stationId, auth.userId]);
-
-  // Load station/user choices from backend (prototyp) so you don't need to know valid IDs.
+  // Meta stations/users vom Backend (fallback bleibt)
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
-        const st = await fetch("/api/meta/stations").then(r => r.ok ? r.json() : Promise.reject(new Error("meta/stations")));
+        const st = await apiJson<{ stations: string[] }>("/api/meta/stations", {
+          method: "GET",
+          headers: authHeaders(auth),
+        });
         if (alive && Array.isArray(st?.stations) && st.stations.length) {
           setStations(st.stations);
           if (!st.stations.includes(auth.stationId)) {
@@ -296,13 +348,14 @@ useEffect(() => {
       }
 
       try {
-        const us = await fetch("/api/meta/users").then(r => r.ok ? r.json() : Promise.reject(new Error("meta/users")));
+        const us = await apiJson<{ users: MetaUser[] }>("/api/meta/users", {
+          method: "GET",
+          headers: authHeaders(auth),
+        });
         if (alive && Array.isArray(us?.users) && us.users.length) {
           setMetaUsers(us.users);
           const u = us.users.find((x: MetaUser) => x.user_id === auth.userId) ?? us.users[0];
-          if (u) {
-            updateAuth({ userId: u.user_id, rolesCsv: (u.roles ?? []).join(",") });
-          }
+          if (u) updateAuth({ userId: u.user_id });
         }
       } catch (e: any) {
         if (!alive) return;
@@ -316,428 +369,629 @@ useEffect(() => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // When user changes, derive roles automatically from meta list (no free-text roles).
-  useEffect(() => {
-    const u = metaUsers.find((x) => x.user_id === auth.userId);
-    if (u) {
-      const next = (u.roles ?? []).join(",");
-      if (next && next !== auth.rolesCsv) updateAuth({ rolesCsv: next });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [auth.userId, metaUsers]);
-
-  function splitRoles(rolesCsv: string): string[] {
-    return rolesCsv
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-  }
-
   return (
-    <main style={{ padding: "1rem", fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial" }}>
-      <style>{`
-        :root{ --app-bg:#f6f7fb; --card:#ffffff; --border:#e6e8ef; --text:#0f172a; --muted:#64748b; --shadow:0 6px 20px rgba(15,23,42,.06); }
-        body{ background:var(--app-bg); color:var(--text); }
-        .wrap{ max-width:1200px; margin:0 auto; }
-        .panel{ background:var(--card); border:1px solid var(--border); border-radius:14px; box-shadow:var(--shadow); }
-        .gridMain{ display:grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr); gap:16px; align-items:start; }
-        .gridMain > *{ min-width:0; }
-        .panel{ min-width:0; }
-        .wrap{ max-width:1200px; margin:0 auto; padding: 0 12px; }
-        .truncate{ overflow-wrap:anywhere; word-break:break-word; }
-        .scrollX{ overflow-x:auto; }
-        @media (max-width: 980px){ .gridMain{ grid-template-columns: 1fr; } }
-        .toolbar{ display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
-        .search{ padding:10px 12px; border-radius:12px; border:1px solid var(--border); width: min(520px, 100%); background:#fff; }
-        .btn{ padding:8px 12px; border-radius:12px; border:1px solid var(--border); background:#fff; cursor:pointer; }
-        .btn:disabled{ opacity:.5; cursor:not-allowed; }
-      `}</style>
-      <div className="wrap">
-
-      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 16 }}>
-        <div>
-          <h1 style={{ margin: 0 }}>Dashboard – Station {auth.stationId}</h1>
-          <div style={{ fontSize: 12, opacity: 0.75 }}>
-            User: <code>{auth.userId}</code> · Rollen: <code>{auth.rolesCsv || "—"}</code>
-            {dayState ? (
-              <>
-                {" "}· Tag: <code>{dayState.business_date}</code> · Vers: <code>{dayState.version}</code>
-              </>
-            ) : null}
-          </div>
-
-          <div className="toolbar" style={{ marginTop: 10 }}>
-            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span style={{ fontSize: 12, opacity: 0.75 }}>Sicht</span>
-              <select
-                value={viewMode}
-                onChange={(e) => {
-                  setViewMode(e.target.value as ViewMode);
-                  // Wenn die Sicht wechselt, kann ein zuvor selektierter Fall
-                  // in dieser Sicht anders aussehen; wir laden Detail neu über useEffect.
-                }}
-                style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc", background: "#fff" }}
-              >
-                <option value="all">Alle</option>
-                <option value="completeness">Vollständigkeit</option>
-                <option value="medical">Medizinisch</option>
-              </select>
-            </label>
-
-            <button
-              className="btn"
-              disabled={!canAck}
-              onClick={async () => {
-                if (!canAck) return;
-
-                const ok = window.confirm(
-                  `Achtung:\n\n` +
-                    `Dadurch werden alle heutigen Quittierungen und Schiebe-Entscheidungen für Station ${auth.stationId} zurückgesetzt.\n\n` +
-                    `Alle Fälle/Meldungen erscheinen wieder als offen (Stand Tagesbeginn).\n\n` +
-                    `Fortfahren?`
-                );
-                if (!ok) return;
-
-                try {
-                  const ds = await resetToday(auth);
-                  setDayState(ds);
-
-                  // Nach Reset: Liste neu laden und Detail/Selektion zurücksetzen.
-                  const data = await fetchCases(auth, viewMode);
-                  setCases(data);
-
-                  setSelectedCaseId(null);
-                  setDetail(null);
-                  setDetailError(null);
-                  setShiftByAlert({});
-                } catch (e: any) {
-                  setError(e?.message ?? String(e));
-                }
-              }}
-title={canAck ? "Reset: alle heutigen Quittierungen/Schieben verwerfen" : "Keine Berechtigung"}
-            >
-              Reset (heute)
-            </button>
-          </div>
-
-        </div>
-
-        <details style={{ border: "1px solid #ddd", borderRadius: 10, padding: "0.6rem 0.9rem", background: "#fff" }}>
-          <summary style={{ cursor: "pointer", fontWeight: 600 }}>Kontext (Prototyp)</summary>
-          <div style={{ marginTop: 10, display: "grid", gap: 10, minWidth: 320 }}>
-            <div style={{ display: "grid", gap: 6 }}>
-              <span style={{ fontSize: 12, opacity: 0.75 }}>Station</span>
-              <select
-                value={auth.stationId}
-                onChange={(e) => updateAuth({ stationId: e.target.value })}
-                style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc", background: "#fff" }}
-              >
-                {stations.map((s) => (
-                  <option key={s} value={s}>{s}</option>
-                ))}
-              </select>
-            </div>
-
-            <div style={{ display: "grid", gap: 6 }}>
-              <span style={{ fontSize: 12, opacity: 0.75 }}>User</span>
-              <select
-                value={auth.userId}
-                onChange={(e) => updateAuth({ userId: e.target.value })}
-                style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc", background: "#fff" }}
-              >
-                {metaUsers.map((u) => (
-                  <option key={u.user_id} value={u.user_id}>{u.user_id}</option>
-                ))}
-              </select>
-            </div>
-
-            <div style={{ display: "grid", gap: 6 }}>
-              <span style={{ fontSize: 12, opacity: 0.75 }}>Rollen</span>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                {splitRoles(auth.rolesCsv).map((r) => (
-                  <span key={r} style={{ fontSize: 12, padding: "2px 8px", borderRadius: 999, border: "1px solid #ddd", background: "#fafafa" }}>
-                    {r}
-                  </span>
-                ))}
-              </div>
-              <div style={{ fontSize: 12, opacity: 0.65 }}>
-                Rollen werden aus dem User abgeleitet (kein Freitext). {metaError ? `(${metaError})` : ""}
-              </div>
-            </div>
-          </div>
-        </details>
-      </div>
-
-      {error && <p style={{ color: "red" }}>Fehler: {error}</p>}
-
-      <div
+    <main
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        height: "100vh",
+        width: "100vw",
+        overflow: "hidden",
+        fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial",
+        backgroundColor: "#f4f7f6",
+      }}
+    >
+      {/* HEADER */}
+      <header
+  style={{
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "stretch",
+    padding: "0.8rem 1.5rem",
+    backgroundColor: "#fff",
+    borderBottom: "1px solid #d1d9e0",
+    boxShadow: "0 2px 4px rgba(0,0,0,0.05)",
+    zIndex: 100,
+    gap: 16,
+  }}
+>
+  {/* LEFT: Title row + Context row */}
+  <div style={{ display: "flex", flexDirection: "column", gap: 10, minWidth: 0 }}>
+    {/* Row 1: headline + logo placeholder */}
+    <div style={{ display: "flex", alignItems: "center", gap: 14, minWidth: 0 }}>
+      <h1
         style={{
-          marginTop: 12,
-          display: "grid",
-          gridTemplateColumns: "1fr 360px",
-          gap: "1rem",
-          alignItems: "start",
+          margin: 0,
+          fontSize: "1.25rem",
+          color: "#1a1a1a",
+          lineHeight: 1.1,
         }}
       >
-        {/* Left: Cards */}
-        <div style={{ display: "grid", gap: "0.75rem" }}>
-          {cases.map((c) => (
-            <button
-              key={c.case_id}
-              onClick={() => setSelectedCaseId(c.case_id)}
-              style={{
-                textAlign: "left",
-                padding: "0.75rem 1rem",
-                borderRadius: 6,
-                background: severityColor(c.severity),
-                border: selectedCaseId === c.case_id ? "2px solid #333" : "1px solid #ddd",
-                cursor: "pointer",
-                opacity: c.acked_at ? 0.7 : 1,
-              }}
-              title={c.acked_at ? `Quittiert: ${c.acked_at}` : "Nicht quittiert"}
-            >
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-                <div style={{ fontWeight: 700 }}>{c.case_id}</div>
-                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  {!!(c.critical_count && c.critical_count > 0) && (
-                    <span style={{ fontSize: 12, opacity: 0.85 }}>‼ {c.critical_count}</span>
+        Stations-Dashboard
+      </h1>
+
+      {/* Logo placeholder (optional) */}
+      <div
+        style={{
+          marginLeft: 8,
+          minWidth: 180,
+          height: 28,
+          borderRadius: 8,
+          border: "1px dashed #cbd5e1",
+          color: "#64748b",
+          fontSize: 12,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: "0 10px",
+          whiteSpace: "nowrap",
+          flexShrink: 0,
+        }}
+        title="Platzhalter für Logo"
+      >
+        Logo
+      </div>
+    </div>
+
+    {/* Row 2: context controls (as before) */}
+    <div style={{ display: "flex", alignItems: "center", gap: 14, minWidth: 0, flexWrap: "wrap" }}>
+      <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontSize: 12, color: "#666", fontWeight: 700 }}>Station</span>
+        <select
+          value={auth.stationId}
+          onChange={(e) => updateAuth({ stationId: e.target.value })}
+          style={{
+            padding: "6px 10px",
+            borderRadius: 10,
+            border: "1px solid #ccc",
+            background: "#fff",
+            cursor: "pointer",
+          }}
+          title="Kontext: Station"
+        >
+          {stations.map((s) => (
+            <option key={s} value={s}>
+              {s}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontSize: 12, color: "#666", fontWeight: 700 }}>User</span>
+        <select
+          value={auth.userId}
+          onChange={(e) => updateAuth({ userId: e.target.value })}
+          style={{
+            padding: "6px 10px",
+            borderRadius: 10,
+            border: "1px solid #ccc",
+            background: "#fff",
+            cursor: "pointer",
+          }}
+          title="Kontext: User"
+        >
+          {metaUsers.map((u) => (
+            <option key={u.user_id} value={u.user_id}>
+              {u.user_id} ({(u.roles ?? []).join(",") || "—"})
+            </option>
+          ))}
+        </select>
+      </label>
+
+      {dayState ? (
+        <span style={{ color: "#666", fontSize: "0.9rem", whiteSpace: "nowrap" }}>
+          · Tag: {dayState.business_date} · Vers: {dayState.version}
+        </span>
+      ) : null}
+    </div>
+  </div>
+
+  {/* RIGHT: Controls + Me (unchanged) */}
+  <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", justifyContent: "flex-end" }}>
+    <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <span style={{ fontSize: 12, color: "#666" }}>Sicht</span>
+      <select
+        value={viewMode}
+        onChange={(e) => setViewMode(e.target.value as ViewMode)}
+        style={{
+          padding: "6px 10px",
+          borderRadius: 10,
+          border: "1px solid #ccc",
+          background: "#fff",
+          cursor: "pointer",
+        }}
+      >
+        <option value="all">Alle</option>
+        <option value="completeness">Vollständigkeit</option>
+        <option value="medical">Medizinisch</option>
+        {canAdmin ? <option value="admin">Admin</option> : null}
+      </select>
+    </label>
+
+    <button
+      onClick={async () => {
+        if (!canReset) return;
+        const ok = window.confirm(
+          `Achtung:\n\n` +
+            `Dadurch werden alle heutigen Quittierungen und Schiebe-Entscheidungen für Station ${auth.stationId} zurückgesetzt.\n\n` +
+            `Alle Fälle/Meldungen erscheinen wieder als offen (Stand Tagesbeginn).\n\n` +
+            `Fortfahren?`
+        );
+        if (!ok) return;
+
+        try {
+          const ds = await resetToday(auth);
+          setDayState(ds);
+
+          const data = await fetchCases(auth, viewMode);
+          setCases(data);
+
+          setSelectedCaseId(null);
+          setDetail(null);
+          setDetailError(null);
+          setShiftByAlert({});
+        } catch (e: any) {
+          setError(e?.message ?? String(e));
+        }
+      }}
+      disabled={!canReset}
+      style={{
+        padding: "6px 12px",
+        cursor: canReset ? "pointer" : "not-allowed",
+        borderRadius: 10,
+        border: "1px solid #ccc",
+        background: canReset ? "#fff" : "#f0f0f0",
+        opacity: canReset ? 1 : 0.6,
+      }}
+      title={canReset ? "Reset: alle heutigen Quittierungen/Schieben verwerfen" : "Keine Berechtigung"}
+    >
+      Reset (heute)
+    </button>
+
+    <div style={{ fontSize: "0.85rem", textAlign: "right", lineHeight: 1.2 }}>
+      <div style={{ fontWeight: 700 }}>{me?.user_id || auth.userId}</div>
+      <div style={{ color: "#666" }}>Rollen: {(me?.roles ?? []).join(", ") || "—"}</div>
+    </div>
+
+    <button
+      onClick={() => setIsAdminOpen(true)}
+      disabled={!canAdmin}
+      style={{
+        padding: "6px 12px",
+        cursor: canAdmin ? "pointer" : "not-allowed",
+        borderRadius: 10,
+        border: "1px solid #ccc",
+        background: canAdmin ? "#f0f0f0" : "#f6f6f6",
+        opacity: canAdmin ? 1 : 0.6,
+      }}
+      title={canAdmin ? "Admin öffnen" : "Keine Admin-Rechte"}
+    >
+      ⚙ Admin
+    </button>
+  </div>
+</header>
+
+
+      {metaError ? (
+        <div style={{ padding: "10px 16px", color: "#666", background: "#fff", borderBottom: "1px solid #eee" }}>
+          {metaError}
+        </div>
+      ) : null}
+
+      {error && (
+        <div style={{ padding: "10px 16px", color: "#b42318", background: "#fff", borderBottom: "1px solid #eee" }}>
+          Fehler: {error}
+        </div>
+      )}
+
+      {/* MAIN: split */}
+      <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
+        {/* LEFT: case list */}
+        <section
+          style={{
+            flex: "0 0 360px",
+            borderRight: "1px solid #d1d9e0",
+            overflowY: "auto",
+            backgroundColor: "#fff",
+          }}
+        >
+          {cases.length === 0 ? (
+            <div style={{ padding: 20, color: "#999" }}>Keine Fälle für diese Station.</div>
+          ) : (
+            cases.map((c) => {
+              const isSelected = selectedCaseId === c.case_id;
+              const critical = (c.critical_count ?? (c.severity === "CRITICAL" ? 1 : 0)) > 0;
+
+              return (
+                <div
+                  key={c.case_id}
+                  onClick={() => setSelectedCaseId(c.case_id)}
+                  style={{
+                    padding: "14px 14px",
+                    borderBottom: "1px solid #eee",
+                    cursor: "pointer",
+                    backgroundColor: isSelected ? "#eef6ff" : "transparent",
+                    borderLeft: isSelected ? "4px solid #007bff" : "4px solid transparent",
+                    transition: "background 0.2s",
+                    opacity: c.acked_at ? 0.75 : 1,
+                  }}
+                  title={c.acked_at ? `Quittiert: ${c.acked_at}` : "Nicht quittiert"}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10 }}>
+                    <div style={{ fontWeight: 700, overflowWrap: "anywhere" }}>{c.case_id}</div>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      {critical ? (
+                        <span
+                          style={{
+                            fontSize: 12,
+                            background: "#ff4d4f",
+                            color: "white",
+                            padding: "2px 8px",
+                            borderRadius: 999,
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          ‼ {c.critical_count ?? 1}
+                        </span>
+                      ) : null}
+                      {!!(c.warn_count && c.warn_count > 0) ? (
+                        <span style={{ fontSize: 12, color: "#333", whiteSpace: "nowrap" }}>⚠ {c.warn_count}</span>
+                      ) : null}
+                      {c.acked_at ? <span style={{ fontSize: 12, color: "#333" }}>✓</span> : null}
+                    </div>
+                  </div>
+
+                  <div style={{ fontSize: "0.85rem", color: "#666", marginTop: 4 }}>Status: {c.severity}</div>
+                  {c.top_alert ? (
+                    <div style={{ fontSize: "0.85rem", color: "#444", marginTop: 6 }}>⚠ {c.top_alert}</div>
+                  ) : null}
+                </div>
+              );
+            })
+          )}
+        </section>
+
+        {/* RIGHT: details */}
+        <aside style={{ flex: 1, overflowY: "auto", padding: "1.5rem 1.75rem", position: "relative" }}>
+          {detailLoading && <div style={{ position: "absolute", top: 16, right: 16, color: "#666" }}>Lädt…</div>}
+
+          {!selectedCaseId ? (
+            <div style={{ display: "flex", justifyContent: "center", alignItems: "center", height: "100%", color: "#999" }}>
+              Wählen Sie einen Fall aus der Liste aus, um Details anzuzeigen.
+            </div>
+          ) : detailError ? (
+            <div style={{ color: "#b42318" }}>Fehler: {detailError}</div>
+          ) : detail ? (
+            <div style={{ maxWidth: 980, margin: "0 auto" }}>
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "flex-start",
+                  gap: 16,
+                  marginBottom: "1.25rem",
+                }}
+              >
+                <div style={{ minWidth: 0 }}>
+                  <h2 style={{ margin: 0 }}>Fall: {detail.case_id}</h2>
+                  <p style={{ color: "#666", marginTop: 6 }}>
+                    Station: {detail.station_id}
+                    {typeof (detail as any).last_updated === "string"
+                      ? ` | Letztes Update: ${new Date((detail as any).last_updated).toLocaleString()}`
+                      : null}
+                  </p>
+
+                  <p style={{ marginTop: 6 }}>
+                    <strong>Quittiert:</strong> {detail.acked_at ? `Ja (${detail.acked_at})` : "Nein"}
+                  </p>
+
+                  {!detail.acked_at && (
+                    <button
+                      disabled={!canAck || detail.alerts.length > 0}
+                      onClick={async () => {
+                        if (!canAck) return;
+                        try {
+                          const res = await ackCase(detail.case_id, auth);
+
+                          setDetail({ ...detail, acked_at: res.acked_at });
+                          setCases((prev) =>
+                            prev.map((c) => (c.case_id === detail.case_id ? { ...c, acked_at: res.acked_at } : c))
+                          );
+                          setToast((t) => (t && t.caseId === detail.case_id ? null : t));
+                        } catch (e: any) {
+                          setError(e?.message ?? String(e));
+                        }
+                      }}
+                      style={{
+                        marginTop: 8,
+                        padding: "8px 12px",
+                        borderRadius: 10,
+                        border: "1px solid #333",
+                        background: canAck ? "#333" : "#999",
+                        color: "white",
+                        fontWeight: 700,
+                        cursor: canAck ? "pointer" : "not-allowed",
+                      }}
+                      title={
+                        !canAck
+                          ? "Keine Berechtigung (ack:write fehlt)"
+                          : detail.alerts.length > 0
+                          ? "Fall kann erst quittiert werden, wenn alle Alerts quittiert oder geschoben sind"
+                          : "Fall quittieren"
+                      }
+                    >
+                      Fall quittieren
+                    </button>
                   )}
-                  {!!(c.warn_count && c.warn_count > 0) && (
-                    <span style={{ fontSize: 12, opacity: 0.85 }}>⚠ {c.warn_count}</span>
-                  )}
-                  {c.acked_at ? <span style={{ fontSize: 12, opacity: 0.85 }}>✓ quittiert</span> : null}
+                </div>
+
+                {!!(detail as any).break_glass_active ? (
+                  <div
+                    style={{
+                      background: "#fff2f0",
+                      border: "1px solid #ffccc7",
+                      padding: 10,
+                      borderRadius: 10,
+                      color: "#ff4d4f",
+                      fontWeight: 800,
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    ⚠️ NOTFALLZUGRIFF AKTIV
+                  </div>
+                ) : null}
+              </div>
+
+              <div
+                style={{
+                  marginBottom: 18,
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+                  gap: 12,
+                }}
+              >
+                <div style={{ padding: 12, borderRadius: 12, background: "#fff", border: "1px solid #eee" }}>
+                  <div style={{ fontSize: 12, color: "#666", marginBottom: 6 }}>Fall</div>
+                  <div style={{ overflowWrap: "anywhere" }}>
+                    <strong>Station:</strong> {detail.station_id}
+                  </div>
+                  <div style={{ overflowWrap: "anywhere" }}>
+                    <strong>Eintritt:</strong> {(detail as any).admission_date ?? "—"}
+                  </div>
+                </div>
+
+                <div style={{ padding: 12, borderRadius: 12, background: "#fff", border: "1px solid #eee" }}>
+                  <div style={{ fontSize: 12, color: "#666", marginBottom: 6 }}>Scores</div>
+                  <div style={{ overflowWrap: "anywhere" }}>
+                    <strong>HONOS:</strong> {(detail as any).honos ?? "—"}
+                  </div>
+                  <div style={{ overflowWrap: "anywhere" }}>
+                    <strong>BSCL:</strong> {(detail as any).bscl ?? "—"}
+                  </div>
+                </div>
+
+                <div style={{ padding: 12, borderRadius: 12, background: "#fff", border: "1px solid #eee" }}>
+                  <div style={{ fontSize: 12, color: "#666", marginBottom: 6 }}>Vollständigkeit</div>
+                  <div style={{ overflowWrap: "anywhere" }}>
+                    <strong>BFS vollständig:</strong> {(detail as any).bfs_complete ? "Ja" : "Nein"}
+                  </div>
+                  <div style={{ overflowWrap: "anywhere" }}>
+                    <strong>Quittiert:</strong> {detail.acked_at ? `Ja (${detail.acked_at})` : "Nein"}
+                  </div>
                 </div>
               </div>
 
-              <div>Status: {c.severity}</div>
-              {c.top_alert && <div style={{ marginTop: 4 }}>⚠ {c.top_alert}</div>}
-            </button>
-          ))}
+              <h3 style={{ margin: "0 0 10px 0" }}>Alerts</h3>
 
-          {cases.length === 0 && !error && <p style={{ opacity: 0.8 }}>Keine Fälle für diese Station.</p>}
-        </div>
-
-        {/* Right: Detail Panel */}
-        <aside
-          style={{
-            border: "1px solid #ddd",
-            borderRadius: 6,
-            padding: "0.75rem 1rem",
-            background: "#fff",
-            minHeight: 200,
-          }}
-        >
-          {!selectedCaseId && <p>Fall auswählen, um Details zu sehen.</p>}
-
-          {selectedCaseId && detailLoading && <p>Lade Details…</p>}
-
-          {selectedCaseId && detailError && <p style={{ color: "red" }}>Fehler: {detailError}</p>}
-
-          {detail && !detailLoading && !detailError && (
-            <div>
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-                <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{detail.case_id}</h2>
-                <button onClick={() => setSelectedCaseId(null)} aria-label="Close details">
-                  ✕
-                </button>
-              </div>
-
-              <p style={{ marginTop: 8 }}>
-                <strong>Quittiert:</strong> {detail.acked_at ? `Ja (${detail.acked_at})` : "Nein"}
-              </p>
-
-              {!detail.acked_at && (
-                <button
-                  // Fall quittieren nur möglich, wenn in der aktuellen Sicht
-                  // keine offenen Alerts mehr da sind.
-                  disabled={!canAck || detail.alerts.length > 0}
-                  onClick={async () => {
-                    if (!canAck) return;
-                    try {
-                      const res = await ackCase(detail.case_id, auth);
-
-                      // optimistic update: update detail and list
-                      setDetail({ ...detail, acked_at: res.acked_at });
-                      setCases((prev) =>
-                        prev.map((c) => (c.case_id === detail.case_id ? { ...c, acked_at: res.acked_at } : c))
-                      );
-
-                      // clear toast if it refers to this case
-                      setToast((t) => (t && t.caseId === detail.case_id ? null : t));
-                    } catch (e: any) {
-                      setError(e?.message ?? String(e));
-                    }
-                  }}
-                  style={{
-                    marginTop: 8,
-                    padding: "8px 12px",
-                    borderRadius: 6,
-                    border: "1px solid #333",
-                    background: canAck ? "#333" : "#999",
-                    color: "white",
-                    fontWeight: 600,
-                    cursor: canAck ? "pointer" : "not-allowed",
-                  }}
-                  title={
-                    !canAck
-                      ? "Keine Berechtigung (ACK_ALERT fehlt)"
-                      : detail.alerts.length > 0
-                      ? "Fall kann erst quittiert werden, wenn alle Alerts quittiert oder geschoben sind"
-                      : "Fall quittieren"
-                  }
-                >
-                  Fall quittieren
-                </button>
-              )}
-
-              <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 10 }}>
-  <div className="panel" style={{ padding: 10, borderRadius: 12 }}>
-    <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 6 }}>Fall</div>
-    <div className="truncate"><strong>Station:</strong> {detail.station_id}</div>
-    <div className="truncate"><strong>Eintritt:</strong> {detail.admission_date}</div>
-  </div>
-
-  <div className="panel" style={{ padding: 10, borderRadius: 12 }}>
-    <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 6 }}>Scores</div>
-    <div className="truncate"><strong>HONOS:</strong> {detail.honos ?? "—"}</div>
-    <div className="truncate"><strong>BSCL:</strong> {detail.bscl ?? "—"}</div>
-  </div>
-
-  <div className="panel" style={{ padding: 10, borderRadius: 12 }}>
-    <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 6 }}>Vollständigkeit</div>
-    <div className="truncate"><strong>BFS vollständig:</strong> {detail.bfs_complete ? "Ja" : "Nein"}</div>
-    <div className="truncate"><strong>Quittiert:</strong> {detail.acked_at ? `Ja (${detail.acked_at})` : "Nein"}</div>
-  </div>
-</div>
-
-
-              <h3 style={{ marginBottom: 6, fontSize: "1rem" }}>Alerts</h3>
               {detail.alerts.length === 0 ? (
-                <p>Keine Alerts.</p>
+                <div style={{ color: "#666" }}>Keine Alerts.</div>
               ) : (
-                <ul style={{ paddingLeft: 18, marginTop: 0 }}>
-                  {detail.alerts.map((a) => (
-                    <li key={a.rule_id} style={{ marginBottom: 10 }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                        <div>
-                          <strong>{a.severity}:</strong> {a.message}
+                <div style={{ display: "grid", gap: 12 }}>
+                  {detail.alerts.map((a) => {
+                    const key = `${detail.case_id}::${a.rule_id}`;
+                    const shiftVal = (shiftByAlert[key] ?? "") as any;
+
+                    return (
+                      <div
+                        key={a.rule_id}
+                        style={{
+                          padding: 14,
+                          borderRadius: 12,
+                          backgroundColor: severityColor(a.severity),
+                          border: "1px solid rgba(0,0,0,0.05)",
+                          display: "flex",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                          gap: 14,
+                        }}
+                      >
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontWeight: 800, marginBottom: 6, overflowWrap: "anywhere" }}>{a.rule_id}</div>
+                          <div style={{ fontSize: "0.95rem", overflowWrap: "anywhere" }}>{(a as any).message ?? ""}</div>
+                          {(a as any).explanation ? (
+                            <div style={{ fontSize: "0.85rem", color: "#333", marginTop: 6, overflowWrap: "anywhere" }}>
+                              {(a as any).explanation}
+                            </div>
+                          ) : null}
                         </div>
-                        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                        <label style={{ display: "flex", gap: 6, alignItems: "center" }} title="Schieben blendet die Meldung für heute aus (Vers-abhängig).">
-                          <span style={{ fontSize: "0.9em", opacity: 0.9 }}>Schieben</span>
-                          <select
-                            disabled={!canAck}
-                            value={shiftByAlert[`${detail.case_id}::${a.rule_id}`] ?? ""}
-                            onChange={(e) => setShift(detail.case_id, a.rule_id, e.target.value as any)}
+
+                        <div
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 10,
+                            flexWrap: "wrap",
+                            justifyContent: "flex-end",
+                          }}
+                        >
+                          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <span style={{ fontSize: 12, color: "#333" }}>Schieben</span>
+                            <select
+                              disabled={!canAck}
+                              value={shiftVal}
+                              onChange={(e) => setShift(detail.case_id, a.rule_id, e.target.value as any)}
+                              style={{
+                                padding: "6px 10px",
+                                borderRadius: 10,
+                                border: "1px solid #333",
+                                background: canAck ? "#fff" : "#eee",
+                                cursor: canAck ? "pointer" : "not-allowed",
+                              }}
+                              title="Schieben blendet die Meldung für heute aus (Vers-abhängig)."
+                            >
+                              <option value="">–</option>
+                              <option value="a">a</option>
+                              <option value="b">b</option>
+                              <option value="c">c</option>
+                            </select>
+                          </label>
+
+                          <button
+                            disabled={!canAck || !shiftVal}
+                            onClick={async () => {
+                              if (!canAck) return;
+                              if (!shiftVal) return;
+                              try {
+                                await shiftRule(detail.case_id, a.rule_id, shiftVal, auth);
+                                setShift(detail.case_id, a.rule_id, "");
+
+                                const [newList, newDetail] = await Promise.all([
+                                  fetchCases(auth, viewMode),
+                                  fetchCaseDetail(detail.case_id, auth, viewMode),
+                                ]);
+                                setCases(newList);
+                                setDetail(newDetail);
+                              } catch (e: any) {
+                                setError(e?.message ?? String(e));
+                              }
+                            }}
                             style={{
-                              padding: "6px 10px",
+                              padding: "8px 12px",
                               borderRadius: 10,
                               border: "1px solid #333",
-                              background: canAck ? "#fff" : "#eee",
-                              cursor: canAck ? "pointer" : "not-allowed",
+                              background: "#fff",
+                              cursor: canAck && shiftVal ? "pointer" : "not-allowed",
+                              opacity: canAck && shiftVal ? 1 : 0.6,
                             }}
+                            title={canAck ? "Meldung schieben" : "Keine Berechtigung"}
                           >
-                            <option value="">–</option>
-                            <option value="a">a</option>
-                            <option value="b">b</option>
-                            <option value="c">c</option>
-                          </select>
-                        </label>
+                            Schieben
+                          </button>
 
-                        <button
-                          disabled={!canAck || !(shiftByAlert[`${detail.case_id}::${a.rule_id}`] ?? "")}
-                          onClick={async () => {
-                            if (!canAck) return;
-                            const val = (shiftByAlert[`${detail.case_id}::${a.rule_id}`] ?? "") as any;
-                            if (!val) return;
-                            try {
-                              await shiftRule(detail.case_id, a.rule_id, val, auth);
-                              // Auswahl zurücksetzen (UI)
-                              setShift(detail.case_id, a.rule_id, "");
+                          <button
+                            disabled={!canAck}
+                            onClick={async () => {
+                              if (!canAck) return;
+                              try {
+                                await ackRule(detail.case_id, a.rule_id, auth);
 
-                              // Refresh both list + detail so the alert disappears immediately
-                              const [newList, newDetail] = await Promise.all([
-                                fetchCases(auth, viewMode),
-                                fetchCaseDetail(detail.case_id, auth, viewMode),
-                              ]);
-                              setCases(newList);
-                              setDetail(newDetail);
-                            } catch (e: any) {
-                              setError(e?.message ?? String(e));
-                            }
-                          }}
-                          style={{
-                            padding: "6px 10px",
-                            borderRadius: 10,
-                            border: "1px solid #333",
-                            background: canAck ? "#fff" : "#eee",
-                            cursor: canAck ? "pointer" : "not-allowed",
-                          }}
-                          title={canAck ? "Meldung schieben" : "Keine Berechtigung"}
-                        >
-                          Schieben
-                        </button>
+                                const [newList, newDetail] = await Promise.all([
+                                  fetchCases(auth, viewMode),
+                                  fetchCaseDetail(detail.case_id, auth, viewMode),
+                                ]);
+                                setCases(newList);
+                                setDetail(newDetail);
 
-                        <button
-                          disabled={!canAck}
-                          onClick={async () => {
-                            if (!canAck) return;
-                            try {
-                              await ackRule(detail.case_id, a.rule_id, auth);
-                              // Refresh both list + detail so the alert disappears immediately
-                              const [newList, newDetail] = await Promise.all([
-                                fetchCases(auth, viewMode),
-                                fetchCaseDetail(detail.case_id, auth, viewMode),
-                              ]);
-                              setCases(newList);
-                              setDetail(newDetail);
-                              // clear toast if it refers to this case and no critical remains
-                              setToast((t) => {
-                                if (!t || t.caseId !== detail.case_id) return t;
-                                const updated = newList.find((x) => x.case_id === detail.case_id);
-                                if (!updated || (updated.critical_count ?? 0) === 0) return null;
-                                return t;
-                              });
-                            } catch (e: any) {
-                              setError(e?.message ?? String(e));
-                            }
-                          }}
-                          style={{
-                            padding: "6px 10px",
-                            borderRadius: 10,
-                            border: "1px solid #333",
-                            background: canAck ? "#fff" : "#eee",
-                            cursor: canAck ? "pointer" : "not-allowed",
-                          }}
-                          title={canAck ? "Alert quittieren (bis morgen ausgeblendet)" : "Keine Berechtigung"}
-                        >
-                          Quittieren
-                        </button>
+                                setToast((t) => {
+                                  if (!t || t.caseId !== detail.case_id) return t;
+                                  const updated = newList.find((x) => x.case_id === detail.case_id);
+                                  if (!updated || (updated.critical_count ?? 0) === 0) return null;
+                                  return t;
+                                });
+                              } catch (e: any) {
+                                setError(e?.message ?? String(e));
+                              }
+                            }}
+                            style={{
+                              padding: "8px 12px",
+                              borderRadius: 10,
+                              border: "1px solid #333",
+                              background: "#fff",
+                              cursor: canAck ? "pointer" : "not-allowed",
+                              opacity: canAck ? 1 : 0.6,
+                            }}
+                            title={canAck ? "Alert quittieren (bis morgen ausgeblendet)" : "Keine Berechtigung"}
+                          >
+                            Quittieren
+                          </button>
+                        </div>
                       </div>
-                      </div>
-                      <div style={{ fontSize: "0.9em", opacity: 0.9 }}>{a.explanation}</div>
-                    </li>
-                  ))}
-                </ul>
+                    );
+                  })}
+                </div>
               )}
             </div>
-          )}
+          ) : null}
         </aside>
       </div>
 
+      {/* ADMIN MODAL */}
+      {isAdminOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.35)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 18,
+            zIndex: 1000,
+          }}
+          onClick={() => setIsAdminOpen(false)}
+        >
+          <div
+            style={{
+              width: "min(1100px, 96vw)",
+              maxHeight: "92vh",
+              overflow: "auto",
+              background: "#fff",
+              borderRadius: 14,
+              border: "1px solid #ddd",
+              boxShadow: "0 10px 30px rgba(0,0,0,0.2)",
+              padding: 14,
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+              <div style={{ fontWeight: 800 }}>Admin</div>
+              <button
+                onClick={() => setIsAdminOpen(false)}
+                style={{
+                  padding: "6px 10px",
+                  borderRadius: 10,
+                  border: "1px solid #ccc",
+                  background: "#fff",
+                  cursor: "pointer",
+                }}
+              >
+                ✕
+              </button>
+            </div>
+
+            <div style={{ marginTop: 12 }}>
+              <AdminPanel auth={auth} authHeaders={authHeaders} me={me} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TOAST */}
       {toast && (
         <Toast
           kind={toast.kind}
           message={toast.message}
-          actionLabel="Öffnen"
-          onAction={async () => {
+          onClose={() => setToast(null)}
+          onAction={() => {
             setSelectedCaseId(toast.caseId);
             setToast(null);
           }}
-          onClose={() => setToast(null)}
+          actionLabel="Öffnen"
         />
       )}
-          </div>
     </main>
   );
 }

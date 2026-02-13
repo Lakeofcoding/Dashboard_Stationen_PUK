@@ -20,7 +20,7 @@ Hinweis:
 
 from typing import Optional
 
-from sqlalchemy import Integer, String, Text
+from sqlalchemy import Boolean, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -113,4 +113,125 @@ class DayState(Base):
     version: Mapped[int] = mapped_column(Integer, default=1)
 
 
-__all__ = ["Ack", "AckEvent", "DayState"]
+# -----------------------------------------------------------------------------
+# RBAC / Admin / Security Models (MVE-RBAC)
+# -----------------------------------------------------------------------------
+
+class User(Base):
+    """Interner Benutzer (Identität).
+
+    Hinweis:
+      - Authentifizierung (SSO) kommt später. Aktuell wird X-User-Id als Identitäts-
+        Hinweis akzeptiert und gegen diese Tabelle gemappt.
+      - Autorisierung ist ausschließlich DB-basiert (Rollen/Permissions).
+    """
+
+    __tablename__ = "user"
+
+    user_id: Mapped[str] = mapped_column(String, primary_key=True)  # stable external id
+    display_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[str] = mapped_column(String)  # ISO timestamp (UTC)
+
+
+class Role(Base):
+    """Rolle (stabiler Name, z.B. 'viewer', 'clinician', 'admin')."""
+
+    __tablename__ = "role"
+
+    role_id: Mapped[str] = mapped_column(String, primary_key=True)  # e.g. "viewer"
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    is_system: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class Permission(Base):
+    """Einzelrecht (String)."""
+
+    __tablename__ = "permission"
+
+    perm_id: Mapped[str] = mapped_column(String, primary_key=True)  # e.g. "dashboard:view"
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    is_system: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class RolePermission(Base):
+    """Many-to-many: Rollen -> Permissions."""
+
+    __tablename__ = "role_permission"
+
+    role_id: Mapped[str] = mapped_column(String, ForeignKey("role.role_id"), primary_key=True)
+    perm_id: Mapped[str] = mapped_column(String, ForeignKey("permission.perm_id"), primary_key=True)
+
+
+class UserRole(Base):
+    """Rollen-Zuweisung (stationsgebunden).
+
+    station_id:
+      - konkreter Stationscode (z.B. 'ST01')
+      - '*' = gilt für alle Stationen
+    """
+
+    __tablename__ = "user_role"
+
+    user_id: Mapped[str] = mapped_column(String, ForeignKey("user.user_id"), primary_key=True)
+    role_id: Mapped[str] = mapped_column(String, ForeignKey("role.role_id"), primary_key=True)
+    station_id: Mapped[str] = mapped_column(String, primary_key=True, default="*")
+
+    created_at: Mapped[str] = mapped_column(String)  # ISO timestamp (UTC)
+    created_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+
+class BreakGlassSession(Base):
+    """Notfallzugang (zeitlich begrenzte Elevation, append-only + revoke)."""
+
+    __tablename__ = "break_glass_session"
+
+    session_id: Mapped[str] = mapped_column(String, primary_key=True)  # UUID
+    user_id: Mapped[str] = mapped_column(String, ForeignKey("user.user_id"))
+    station_id: Mapped[str] = mapped_column(String)  # scope of elevation, '*' allowed
+
+    reason: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(String)   # ISO timestamp (UTC)
+    expires_at: Mapped[str] = mapped_column(String)   # ISO timestamp (UTC)
+
+    revoked_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    revoked_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    review_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class SecurityEvent(Base):
+    """Sicherheits-/Admin-Audit (append-only)."""
+
+    __tablename__ = "security_event"
+
+    event_id: Mapped[str] = mapped_column(String, primary_key=True)  # UUID
+    ts: Mapped[str] = mapped_column(String)  # ISO timestamp (UTC)
+
+    actor_user_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    actor_station_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    action: Mapped[str] = mapped_column(String)  # e.g. "ADMIN_USER_CREATE", "RBAC_DENY"
+    target_type: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    target_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    success: Mapped[bool] = mapped_column(Boolean, default=True)
+    message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    ip: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    user_agent: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    details: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON
+
+
+__all__ = [
+    "Ack",
+    "AckEvent",
+    "DayState",
+    "User",
+    "Role",
+    "Permission",
+    "RolePermission",
+    "UserRole",
+    "BreakGlassSession",
+    "SecurityEvent",
+]

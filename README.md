@@ -135,3 +135,45 @@ Empfohlene nächste Stufe:
 - `frontend/` React/Vite SPA
 - `rules/` YAML Regelwerk
 
+
+
+## Security / RBAC (MVE-RBAC)
+
+Dieses Repo enthält nun ein **Minimum Viable Enterprise RBAC** (ohne SSO), das Identität und Autorisierung trennt:
+
+- **Identität**: aktuell via Header `X-User-Id` (SSO/Entra später)
+- **Station-Scope**: `X-Station-Id` ist Teil des Request-Kontexts; Rollen können stationsgebunden oder global (`*`) vergeben werden
+- **Autorisierung**: Rollen/Permissions sind **DB-basiert**, nicht mehr über `X-Roles`
+- **Audit**: sicherheitsrelevante Aktionen und Admin-Aktionen werden in `security_event` append-only protokolliert
+- **Break-glass**: Notfallzugang `/api/break_glass/activate` (zeitlich begrenzt, mit Audit); Review/Revoke über `/api/admin/break_glass`
+
+### Systemrollen (Seed)
+
+- `viewer` (read)
+- `clinician` (read + ack/shift)
+- `shift_lead` (clinician + reset)
+- `manager` (read + break-glass self)
+- `admin` (voller Admin + Audit)
+- `break_glass_admin` (temporär über Break-glass)
+
+### Admin UI
+
+Im Frontend gibt es eine **Admin-Ansicht** (Dropdown „Admin“), sichtbar sobald die Permissions `admin:*` bzw. `audit:read` vorhanden sind.
+
+### Lokales Testen
+
+Backend:
+
+```bash
+cd backend
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn main:app --reload
+```
+
+Tests:
+
+```bash
+pytest -q
+```
+

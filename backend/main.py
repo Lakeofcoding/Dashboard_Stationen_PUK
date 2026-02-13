@@ -6,12 +6,20 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Optional
 import yaml
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 from zoneinfo import ZoneInfo
 
 from app.ack_store import AckStore
-from app.auth import AuthContext, get_auth_context, require_role
+from app.auth import AuthContext, get_auth_context, require_ctx
+from app.audit import log_security_event
+from app.rbac import (
+    activate_break_glass,
+    require_permission,
+    revoke_break_glass,
+    seed_rbac,
+)
+
 from app.db import SessionLocal, init_db
 from app.models import DayState
 
@@ -52,7 +60,40 @@ ack_store = AckStore()
 @app.on_event("startup")
 def _startup():
     init_db()
-
+    with SessionLocal() as db:
+        # 1. Rollen und Permissions anlegen
+        seed_rbac(db)
+        
+        from app.models import User, UserRole
+        from datetime import datetime
+        
+        # 2. Sicherstellen, dass der User 'demo' existiert
+        user = db.query(User).filter(User.user_id == "demo").first()
+        if not user:
+            user = User(user_id="demo", full_name="Demo User", is_active=True)
+            db.add(user)
+            db.flush() 
+        
+        # 3. Rolle 'admin' dem User 'demo' zuweisen
+        existing_role = db.query(UserRole).filter(
+            UserRole.user_id == "demo", 
+            UserRole.role_id == "admin"
+        ).first()
+        
+        if not existing_role:
+            # Hier fügen wir die fehlenden Felder hinzu, um den IntegrityError zu beheben
+            new_user_role = UserRole(
+                user_id="demo", 
+                role_id="admin",
+                station_id="*",      # "*" bedeutet oft "alle Stationen" in deinem System
+                created_at=datetime.now().isoformat(), # Zeitstempel als String
+                created_by="system"  # Verpflichtendes Feld aus deinem Modell
+            )
+            db.add(new_user_role)
+            print("Rolle 'admin' wurde User 'demo' neu zugewiesen.")
+        
+        db.commit()
+    print("Sicherheits-System erfolgreich initialisiert.")
 
 # -----------------------------------------------------------------------------
 # API models
@@ -630,8 +671,9 @@ def health():
 def list_cases(
     view: Literal["all", "completeness", "medical"] = "all",
     ctx: AuthContext = Depends(get_auth_context),
+    _ctx: str = Depends(require_ctx),
+    _perm: None = Depends(require_permission("dashboard:view")),
 ):
-    require_role(ctx, "VIEW_DASHBOARD")
 
     station_id = ctx.station_id
     station_cases = [enrich_case(c) for c in DUMMY_CASES if c["station_id"] == station_id]
@@ -722,8 +764,9 @@ def get_case(
     case_id: str,
     view: Literal["all", "completeness", "medical"] = "all",
     ctx: AuthContext = Depends(get_auth_context),
+    _ctx: str = Depends(require_ctx),
+    _perm: None = Depends(require_permission("dashboard:view")),
 ):
-    require_role(ctx, "VIEW_DASHBOARD")
 
     raw = next((x for x in DUMMY_CASES if x["case_id"] == case_id), None)
     if raw is None:
@@ -812,7 +855,11 @@ def get_case(
 
 
 @app.get("/api/debug/rules")
-def debug_rules():
+def debug_rules(
+    ctx: AuthContext = Depends(get_auth_context),
+    _ctx: str = Depends(require_ctx),
+    _perm: None = Depends(require_permission("debug:view")),
+):
     rules = load_rules()
     return {
         "rules_path": str(RULES_PATH),
@@ -823,8 +870,12 @@ def debug_rules():
 
 
 @app.get("/api/debug/eval/{case_id}")
-def debug_eval(case_id: str, ctx: AuthContext = Depends(get_auth_context)):
-    require_role(ctx, "VIEW_DASHBOARD")
+def debug_eval(
+    case_id: str,
+    ctx: AuthContext = Depends(get_auth_context),
+    _ctx: str = Depends(require_ctx),
+    _perm: None = Depends(require_permission("debug:view")),
+):
     raw = next((x for x in DUMMY_CASES if x["case_id"] == case_id), None)
     if raw is None:
         raise HTTPException(status_code=404, detail="Case not found")
@@ -839,8 +890,12 @@ def debug_eval(case_id: str, ctx: AuthContext = Depends(get_auth_context)):
 
 
 @app.get("/api/debug/ack-events")
-def debug_ack_events(ctx: AuthContext = Depends(get_auth_context), case_id: str | None = None):
-    require_role(ctx, "VIEW_DASHBOARD")
+def debug_ack_events(
+    ctx: AuthContext = Depends(get_auth_context),
+    _ctx: str = Depends(require_ctx),
+    case_id: str | None = None,
+    _perm: None = Depends(require_permission("debug:view")),
+):
     events = ack_store.list_events(station_id=ctx.station_id, case_id=case_id, limit=200)
     return [
         {
@@ -857,21 +912,55 @@ def debug_ack_events(ctx: AuthContext = Depends(get_auth_context), case_id: str 
     ]
 
 @app.get("/api/meta/stations")
-def meta_stations(ctx: AuthContext = Depends(get_auth_context)):
+def meta_stations(
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("meta:read")),
+):
     # Für Prototyp: aus Dummy-Cases ableiten
     stations = sorted({c["station_id"] for c in DUMMY_CASES})
     return {"stations": stations}
 
+
 @app.get("/api/meta/users")
-def meta_users(ctx: AuthContext = Depends(get_auth_context)):
-    # Prototyp: fixe Demo-User; später: aus SSO/KISIM
+def meta_users(
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("meta:read")),
+):
+    from app.models import User, UserRole
+
+    with SessionLocal() as db:
+        users = db.query(User).filter(User.is_active == True).order_by(User.user_id.asc()).all()  # noqa: E712
+        roles = db.query(UserRole).all()
+        by_user: dict[str, set[str]] = {}
+        for r in roles:
+            if r.station_id == "*" or r.station_id == ctx.station_id:
+                by_user.setdefault(r.user_id, set()).add(r.role_id)
+
+        return {
+            "users": [
+                {"user_id": u.user_id, "roles": sorted(by_user.get(u.user_id, set()))}
+                for u in users
+            ]
+        }
+
+
+@app.get("/api/meta/me")
+def meta_me(
+    ctx: AuthContext = Depends(get_auth_context),
+):
+    """Return the caller's effective roles/permissions for the current scope.
+
+    Purpose: UI bootstrap (feature gating) without requiring any elevated meta permission.
+    Scope resolution:
+      - ctx is optional; if omitted, the auth layer resolves to global scope ("*").
+      - callers can still send ?ctx=... or X-Scope-Ctx / X-Station-Id.
+    """
     return {
-        "users": [
-            {"user_id": "demo", "roles": ["VIEW_DASHBOARD", "ACK_ALERT"]},
-            {"user_id": "pflege1", "roles": ["VIEW_DASHBOARD"]},
-            {"user_id": "arzt1", "roles": ["VIEW_DASHBOARD", "ACK_ALERT"]},
-            {"user_id": "manager1", "roles": ["VIEW_DASHBOARD", "ACK_ALERT"]},
-        ]
+        "user_id": ctx.user_id,
+        "station_id": ctx.station_id,
+        "roles": sorted(ctx.roles),
+        "permissions": sorted(ctx.permissions),
+        "break_glass": bool(ctx.is_break_glass),
     }
 
 # -----------------------------------------------------------------------------
@@ -891,8 +980,12 @@ class AckRequest(BaseModel):
 
 
 @app.post("/api/ack")
-def ack(req: AckRequest, ctx: AuthContext = Depends(get_auth_context)):
-    require_role(ctx, "ACK_ALERT")
+def ack(
+    req: AckRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+    _ctx: str = Depends(require_ctx),
+    _perm: None = Depends(require_permission("ack:write")),
+):
 
     if req.ack_scope not in ("case", "rule"):
         raise HTTPException(status_code=400, detail="ack_scope must be 'case' or 'rule'")
@@ -991,9 +1084,12 @@ def ack(req: AckRequest, ctx: AuthContext = Depends(get_auth_context)):
 # -----------------------------------------------------------------------------
 
 @app.get("/api/day_state")
-def get_day_state(ctx: AuthContext = Depends(get_auth_context)):
+def get_day_state(
+    ctx: AuthContext = Depends(get_auth_context),
+    _ctx: str = Depends(require_ctx),
+    _perm: None = Depends(require_permission("dashboard:view")),
+):
     """Liefert die aktuelle Tagesversion ("Vers") für die Station des Users."""
-    require_role(ctx, "VIEW_DASHBOARD")
     return {
         "station_id": ctx.station_id,
         "business_date": today_local().isoformat(),
@@ -1002,7 +1098,11 @@ def get_day_state(ctx: AuthContext = Depends(get_auth_context)):
 
 
 @app.post("/api/reset_today")
-def reset_today(ctx: AuthContext = Depends(get_auth_context)):
+def reset_today(
+    ctx: AuthContext = Depends(get_auth_context),
+    _ctx: str = Depends(require_ctx),
+    _perm: None = Depends(require_permission("reset:today")),
+):
     """Inkrementiert die Tagesversion.
 
     Effekt:
@@ -1011,7 +1111,6 @@ def reset_today(ctx: AuthContext = Depends(get_auth_context)):
 
     Zusätzlich schreiben wir ein Audit-Event in `ack_event`.
     """
-    require_role(ctx, "ACK_ALERT")
 
     bdate = today_local().isoformat()
     with SessionLocal() as db:
@@ -1047,3 +1146,294 @@ def reset_today(ctx: AuthContext = Depends(get_auth_context)):
         "business_date": bdate,
         "version": get_day_version(station_id=ctx.station_id),
     }
+
+
+# -----------------------------------------------------------------------------
+# Admin API (RBAC / Audit / Break-glass)
+# -----------------------------------------------------------------------------
+
+class AdminUserCreate(BaseModel):
+    user_id: str = Field(..., min_length=1)
+    display_name: Optional[str] = None
+    is_active: bool = True
+
+class AdminUserUpdate(BaseModel):
+    display_name: Optional[str] = None
+    is_active: Optional[bool] = None
+
+class AdminAssignRole(BaseModel):
+    role_id: str
+    station_id: str = "*"   # specific station or '*'
+
+@app.get("/api/admin/users")
+def admin_list_users(
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:read")),
+):
+    from app.models import User, UserRole
+    with SessionLocal() as db:
+        users = db.query(User).order_by(User.user_id.asc()).all()
+        roles = db.query(UserRole).all()
+        by_user: dict[str, list[dict[str, str]]] = {}
+        for r in roles:
+            by_user.setdefault(r.user_id, []).append({"role_id": r.role_id, "station_id": r.station_id})
+        return {
+            "users": [
+                {
+                    "user_id": u.user_id,
+                    "display_name": u.display_name,
+                    "is_active": bool(u.is_active),
+                    "created_at": u.created_at,
+                    "roles": sorted(by_user.get(u.user_id, []), key=lambda x: (x["role_id"], x["station_id"])),
+                }
+                for u in users
+            ]
+        }
+
+@app.post("/api/admin/users")
+def admin_create_user(
+    body: AdminUserCreate,
+    request: Request,
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:write")),
+):
+    from app.models import User
+    with SessionLocal() as db:
+        if db.get(User, body.user_id) is not None:
+            raise HTTPException(status_code=409, detail="user already exists")
+        u = User(user_id=body.user_id.strip(), display_name=body.display_name, is_active=body.is_active, created_at=datetime.now(timezone.utc).isoformat())
+        db.add(u)
+        db.commit()
+        log_security_event(
+            db,
+            request=request,
+            actor_user_id=ctx.user_id,
+            actor_station_id=ctx.station_id,
+            action="ADMIN_USER_CREATE",
+            target_type="user",
+            target_id=u.user_id,
+            success=True,
+            details={"display_name": body.display_name, "is_active": body.is_active},
+        )
+        return {"user_id": u.user_id}
+
+@app.put("/api/admin/users/{user_id}")
+def admin_update_user(
+    user_id: str,
+    body: AdminUserUpdate,
+    request: Request,
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:write")),
+):
+    from app.models import User
+    with SessionLocal() as db:
+        u = db.get(User, user_id)
+        if u is None:
+            raise HTTPException(status_code=404, detail="user not found")
+        if body.display_name is not None:
+            u.display_name = body.display_name
+        if body.is_active is not None:
+            u.is_active = bool(body.is_active)
+        db.add(u)
+        db.commit()
+        log_security_event(
+            db,
+            request=request,
+            actor_user_id=ctx.user_id,
+            actor_station_id=ctx.station_id,
+            action="ADMIN_USER_UPDATE",
+            target_type="user",
+            target_id=user_id,
+            success=True,
+            details={"display_name": body.display_name, "is_active": body.is_active},
+        )
+        return {"ok": True}
+
+@app.post("/api/admin/users/{user_id}/roles")
+def admin_assign_role(
+    user_id: str,
+    body: AdminAssignRole,
+    request: Request,
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:write")),
+):
+    from app.models import User, Role, UserRole
+    with SessionLocal() as db:
+        if db.get(User, user_id) is None:
+            raise HTTPException(status_code=404, detail="user not found")
+        if db.get(Role, body.role_id) is None:
+            raise HTTPException(status_code=404, detail="role not found")
+        key=(user_id, body.role_id, body.station_id)
+        if db.get(UserRole, key) is None:
+            db.add(UserRole(user_id=user_id, role_id=body.role_id, station_id=body.station_id, created_at=datetime.now(timezone.utc).isoformat(), created_by=ctx.user_id))
+            db.commit()
+        log_security_event(
+            db,
+            request=request,
+            actor_user_id=ctx.user_id,
+            actor_station_id=ctx.station_id,
+            action="ADMIN_ROLE_ASSIGN",
+            target_type="user_role",
+            target_id=":".join(key),
+            success=True,
+            details={"user_id": user_id, "role_id": body.role_id, "station_id": body.station_id},
+        )
+        return {"ok": True}
+
+@app.delete("/api/admin/users/{user_id}/roles/{role_id}/{station_id}")
+def admin_remove_role(
+    user_id: str,
+    role_id: str,
+    station_id: str,
+    request: Request,
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:write")),
+):
+    from app.models import UserRole
+    with SessionLocal() as db:
+        r = db.get(UserRole, (user_id, role_id, station_id))
+        if r is None:
+            raise HTTPException(status_code=404, detail="assignment not found")
+        db.delete(r)
+        db.commit()
+        log_security_event(
+            db,
+            request=request,
+            actor_user_id=ctx.user_id,
+            actor_station_id=ctx.station_id,
+            action="ADMIN_ROLE_REMOVE",
+            target_type="user_role",
+            target_id=":".join([user_id, role_id, station_id]),
+            success=True,
+        )
+        return {"ok": True}
+
+@app.get("/api/admin/roles")
+def admin_list_roles(
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:read")),
+):
+    from app.models import Role, RolePermission
+    with SessionLocal() as db:
+        roles = db.query(Role).order_by(Role.role_id.asc()).all()
+        rp = db.query(RolePermission).all()
+        by_role: dict[str, list[str]] = {}
+        for row in rp:
+            by_role.setdefault(row.role_id, []).append(row.perm_id)
+        return {
+            "roles": [
+                {
+                    "role_id": r.role_id,
+                    "description": r.description,
+                    "permissions": sorted(by_role.get(r.role_id, [])),
+                    "is_system": bool(r.is_system),
+                }
+                for r in roles
+            ]
+        }
+
+@app.get("/api/admin/audit")
+def admin_audit(
+    limit: int = 200,
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("audit:read")),
+):
+    from app.models import SecurityEvent
+    with SessionLocal() as db:
+        rows = (
+            db.query(SecurityEvent)
+            .order_by(SecurityEvent.ts.desc())
+            .limit(max(1, min(int(limit), 1000)))
+            .all()
+        )
+        return {
+            "events": [
+                {
+                    "event_id": e.event_id,
+                    "ts": e.ts,
+                    "actor_user_id": e.actor_user_id,
+                    "actor_station_id": e.actor_station_id,
+                    "action": e.action,
+                    "target_type": e.target_type,
+                    "target_id": e.target_id,
+                    "success": bool(e.success),
+                    "message": e.message,
+                    "ip": e.ip,
+                    "user_agent": e.user_agent,
+                    "details": e.details,
+                }
+                for e in rows
+            ]
+        }
+
+class BreakGlassActivateReq(BaseModel):
+    reason: str = Field(..., min_length=5)
+    duration_minutes: int = Field(default=60, ge=5, le=720)
+    station_scope: str = Field(default="*")
+
+@app.post("/api/break_glass/activate")
+def break_glass_activate(
+    body: BreakGlassActivateReq,
+    request: Request,
+    ctx: AuthContext = Depends(get_auth_context),
+    _ctx: str = Depends(require_ctx),
+    _perm: None = Depends(require_permission("breakglass:activate")),
+):
+    with SessionLocal() as db:
+        s = activate_break_glass(
+            db,
+            request=request,
+            actor_user_id=ctx.user_id,
+            actor_station_id=ctx.station_id,
+            station_scope=body.station_scope,
+            reason=body.reason,
+            duration_minutes=body.duration_minutes,
+        )
+        return {"session_id": s.session_id, "expires_at": s.expires_at, "station_scope": s.station_id}
+
+class BreakGlassRevokeReq(BaseModel):
+    review_note: Optional[str] = None
+
+@app.post("/api/admin/break_glass/{session_id}/revoke")
+def break_glass_revoke(
+    session_id: str,
+    body: BreakGlassRevokeReq,
+    request: Request,
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("breakglass:review")),
+):
+    with SessionLocal() as db:
+        revoke_break_glass(
+            db,
+            request=request,
+            actor_user_id=ctx.user_id,
+            actor_station_id=ctx.station_id,
+            session_id=session_id,
+            review_note=body.review_note,
+        )
+    return {"ok": True}
+
+@app.get("/api/admin/break_glass")
+def break_glass_list(
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("breakglass:review")),
+):
+    from app.models import BreakGlassSession
+    with SessionLocal() as db:
+        rows = db.query(BreakGlassSession).order_by(BreakGlassSession.created_at.desc()).limit(200).all()
+        return {
+            "sessions": [
+                {
+                    "session_id": s.session_id,
+                    "user_id": s.user_id,
+                    "station_id": s.station_id,
+                    "reason": s.reason,
+                    "created_at": s.created_at,
+                    "expires_at": s.expires_at,
+                    "revoked_at": s.revoked_at,
+                    "revoked_by": s.revoked_by,
+                    "review_note": s.review_note,
+                }
+                for s in rows
+            ]
+        }

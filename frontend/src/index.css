@@ -24,10 +24,15 @@ a:hover {
 
 body {
   margin: 0;
-  display: flex;
-  place-items: center;
-  min-width: 320px;
+  display: block; /* Weg von flex/place-items */
+  min-width: 100vw;
   min-height: 100vh;
+  background-color: #f5f7f9; /* Hellerer, klinischer Hintergrund */
+  color: #1a1a1a;
+}
+
+#root {
+  width: 100%;
 }
 
 h1 {
