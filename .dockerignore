@@ -1,0 +1,82 @@
+# PUK Dashboard - Docker Ignore
+# Dateien die nicht in Docker-Images kopiert werden sollen
+
+# === Git ===
+.git/
+.gitignore
+.gitattributes
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+
+# === Node ===
+node_modules/
+npm-debug.log*
+dist/
+dist-ssr/
+
+# === Datenbank & Daten ===
+*.db
+*.db-shm
+*.db-wal
+data/
+uploads/
+backups/
+
+# === Logs ===
+logs/
+*.log
+
+# === Temporär ===
+*.tmp
+*.temp
+.cache/
+
+# === Dokumentation ===
+README.md
+INSTALLATION.md
+CHANGELOG.md
+docs/
+*.md
+
+# === IDE ===
+.idea/
+.vscode/
+*.iml
+
+# === OS ===
+.DS_Store
+Thumbs.db
+
+# === Secrets ===
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# === Docker ===
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# === Tests ===
+tests/
+*_test.py
+test_*.py
+.pytest_cache/
+.coverage
+htmlcov/
+
+# === CI/CD ===
+.github/
+.gitlab-ci.yml
+Jenkinsfile
