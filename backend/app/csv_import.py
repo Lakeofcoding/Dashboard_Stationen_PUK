@@ -1,10 +1,8 @@
 """
 Datei: backend/app/csv_import.py
 
-Zweck:
-- CSV/Excel Import-Funktionalität für Dummy-Daten und spätere Datenimporte
-- Validierung und Transformation von Case-Daten
-- Bulk-Import mit Fehlerbehandlung
+CSV/Excel Import-Funktionalität für Case-Daten.
+Importiert Fälle aus CSV/XLSX in die case_data-Tabelle.
 
 Sicherheit:
 - Validierung aller Eingabedaten
@@ -15,74 +13,50 @@ Sicherheit:
 from __future__ import annotations
 
 import io
+import json
 import logging
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from decimal import Decimal
 
 import pandas as pd
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
+
+from app.models import Case
 
 logger = logging.getLogger(__name__)
 
 
-class CaseImportRow(BaseModel):
-    """Validierungsmodell für eine importierte Fall-Zeile."""
-    
-    case_id: str = Field(..., min_length=1, max_length=50)
-    station_id: str = Field(..., min_length=1, max_length=20)
-    
-    # Stammdaten
-    patient_initials: Optional[str] = Field(None, max_length=10)
-    admission_date: date
-    discharge_date: Optional[date] = None
-    
-    # HONOS Scores
-    honos_entry_total: Optional[int] = Field(None, ge=0, le=48)
-    honos_discharge_total: Optional[int] = Field(None, ge=0, le=48)
-    honos_entry_suicidality: Optional[int] = Field(None, ge=0, le=4)
-    honos_discharge_suicidality: Optional[int] = Field(None, ge=0, le=4)
-    
-    # BSCL Scores
-    bscl_total_entry: Optional[float] = Field(None, ge=0.0, le=4.0)
-    bscl_total_discharge: Optional[float] = Field(None, ge=0.0, le=4.0)
-    bscl_entry_suicidality: Optional[float] = Field(None, ge=0.0, le=4.0)
-    bscl_discharge_suicidality: Optional[float] = Field(None, ge=0.0, le=4.0)
-    
-    # BFS Daten
-    bfs_1: Optional[str] = Field(None, max_length=50)
-    bfs_2: Optional[str] = Field(None, max_length=50)
-    bfs_3: Optional[str] = Field(None, max_length=50)
-    
-    # Isolation
-    isolation_start: Optional[datetime] = None
-    isolation_end: Optional[datetime] = None
-    
-    @validator('discharge_date')
-    def validate_discharge(cls, v, values):
-        """Austritt darf nicht vor Eintritt liegen."""
-        if v and 'admission_date' in values:
-            if v < values['admission_date']:
-                raise ValueError('Austrittsdatum darf nicht vor Eintrittsdatum liegen')
-        return v
-    
-    @validator('isolation_end')
-    def validate_isolation(cls, v, values):
-        """Isolation Ende darf nicht vor Start liegen."""
-        if v and 'isolation_start' in values and values['isolation_start']:
-            if v < values['isolation_start']:
-                raise ValueError('Isolation Ende darf nicht vor Start liegen')
-        return v
+# ---- Column Mapping ----
+# Maps possible CSV column names to our internal field names
+COLUMN_ALIASES = {
+    "case_id": ["case_id", "fall_id", "fallnummer", "fall_nr", "case"],
+    "station_id": ["station_id", "station", "ward", "ward_id"],
+    "patient_id": ["patient_id", "pat_id", "patient_nr"],
+    "patient_initials": ["patient_initials", "initials", "initialen"],
+    "clinic": ["clinic", "klinik"],
+    "center": ["center", "zentrum"],
+    "admission_date": ["admission_date", "eintritt", "eintrittsdatum", "aufnahme", "aufnahmedatum"],
+    "discharge_date": ["discharge_date", "austritt", "austrittsdatum", "entlassung", "entlassungsdatum"],
+    "honos_entry_total": ["honos_entry_total", "honos_eintritt", "honos_entry"],
+    "honos_discharge_total": ["honos_discharge_total", "honos_austritt", "honos_discharge"],
+    "honos_discharge_suicidality": ["honos_discharge_suicidality", "honos_suizid_austritt"],
+    "bscl_total_entry": ["bscl_total_entry", "bscl_eintritt", "bscl_entry"],
+    "bscl_total_discharge": ["bscl_total_discharge", "bscl_austritt", "bscl_discharge"],
+    "bscl_discharge_suicidality": ["bscl_discharge_suicidality", "bscl_suizid_austritt"],
+    "bfs_1": ["bfs_1", "bfs1"],
+    "bfs_2": ["bfs_2", "bfs2"],
+    "bfs_3": ["bfs_3", "bfs3"],
+}
 
 
 class ImportResult(BaseModel):
     """Ergebnis eines Imports."""
-    
     success: bool
     total_rows: int
     imported_rows: int
+    skipped_rows: int
     failed_rows: int
     errors: List[Dict[str, Any]] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)
@@ -90,257 +64,283 @@ class ImportResult(BaseModel):
 
 class CSVImporter:
     """CSV/Excel Import-Handler."""
-    
+
     def __init__(self, max_rows: int = 10000, max_file_size_mb: int = 50):
         self.max_rows = max_rows
         self.max_file_size_bytes = max_file_size_mb * 1024 * 1024
-    
-    def import_from_file(
-        self,
-        file_path: Path | str,
-        db: Session,
-        station_id: Optional[str] = None,
-        overwrite: bool = False
-    ) -> ImportResult:
-        """
-        Importiert Cases aus einer CSV- oder Excel-Datei.
-        
-        Args:
-            file_path: Pfad zur Datei
-            db: Datenbank-Session
-            station_id: Optional: Station-ID für alle importierten Cases
-            overwrite: Falls True, werden existierende Cases überschrieben
-            
-        Returns:
-            ImportResult mit Details zum Import
-        """
-        file_path = Path(file_path)
-        
-        # Dateigrößen-Check
-        file_size = file_path.stat().st_size
-        if file_size > self.max_file_size_bytes:
-            return ImportResult(
-                success=False,
-                total_rows=0,
-                imported_rows=0,
-                failed_rows=0,
-                errors=[{
-                    'row': 0,
-                    'error': f'Datei zu groß: {file_size / 1024 / 1024:.1f}MB (max: {self.max_file_size_bytes / 1024 / 1024}MB)'
-                }]
-            )
-        
-        # Datei einlesen
-        try:
-            if file_path.suffix.lower() in ['.xlsx', '.xls']:
-                df = pd.read_excel(file_path, engine='openpyxl' if file_path.suffix.lower() == '.xlsx' else None)
-            else:
-                df = pd.read_csv(file_path, encoding='utf-8')
-        except Exception as e:
-            logger.error(f"Fehler beim Lesen der Datei: {e}")
-            return ImportResult(
-                success=False,
-                total_rows=0,
-                imported_rows=0,
-                failed_rows=0,
-                errors=[{'row': 0, 'error': f'Datei konnte nicht gelesen werden: {str(e)}'}]
-            )
-        
-        # Anzahl Zeilen prüfen
-        if len(df) > self.max_rows:
-            return ImportResult(
-                success=False,
-                total_rows=len(df),
-                imported_rows=0,
-                failed_rows=0,
-                errors=[{
-                    'row': 0,
-                    'error': f'Zu viele Zeilen: {len(df)} (max: {self.max_rows})'
-                }]
-            )
-        
-        # Import durchführen
-        return self._process_dataframe(df, db, station_id, overwrite)
-    
+
     def import_from_bytes(
         self,
         file_content: bytes,
         filename: str,
         db: Session,
         station_id: Optional[str] = None,
-        overwrite: bool = False
+        overwrite: bool = False,
+        imported_by: str = "system",
     ) -> ImportResult:
-        """
-        Importiert Cases aus Datei-Bytes (für Upload-Endpoint).
-        
-        Args:
-            file_content: Datei-Inhalt als Bytes
-            filename: Dateiname (für Format-Erkennung)
-            db: Datenbank-Session
-            station_id: Optional: Station-ID für alle importierten Cases
-            overwrite: Falls True, werden existierende Cases überschrieben
-            
-        Returns:
-            ImportResult mit Details zum Import
-        """
-        # Größen-Check
+        """Importiert Cases aus Datei-Bytes (für Upload-Endpoint)."""
+
         if len(file_content) > self.max_file_size_bytes:
             return ImportResult(
-                success=False,
-                total_rows=0,
-                imported_rows=0,
-                failed_rows=0,
-                errors=[{
-                    'row': 0,
-                    'error': f'Datei zu groß: {len(file_content) / 1024 / 1024:.1f}MB'
-                }]
+                success=False, total_rows=0, imported_rows=0, skipped_rows=0, failed_rows=0,
+                errors=[{"row": 0, "error": f"Datei zu groß: {len(file_content) / 1024 / 1024:.1f}MB"}],
             )
-        
-        # Datei einlesen
+
         try:
             file_obj = io.BytesIO(file_content)
-            if filename.lower().endswith(('.xlsx', '.xls')):
-                df = pd.read_excel(file_obj, engine='openpyxl' if filename.lower().endswith('.xlsx') else None)
+            if filename.lower().endswith((".xlsx", ".xls")):
+                df = pd.read_excel(file_obj, engine="openpyxl" if filename.lower().endswith(".xlsx") else None)
             else:
-                df = pd.read_csv(file_obj, encoding='utf-8')
+                # Try different encodings
+                for enc in ["utf-8", "latin-1", "cp1252"]:
+                    try:
+                        file_obj.seek(0)
+                        df = pd.read_csv(file_obj, encoding=enc, sep=None, engine="python")
+                        break
+                    except Exception:
+                        continue
+                else:
+                    return ImportResult(
+                        success=False, total_rows=0, imported_rows=0, skipped_rows=0, failed_rows=0,
+                        errors=[{"row": 0, "error": "Datei konnte nicht gelesen werden (Encoding-Problem)"}],
+                    )
         except Exception as e:
-            logger.error(f"Fehler beim Lesen der Datei: {e}")
             return ImportResult(
-                success=False,
-                total_rows=0,
-                imported_rows=0,
-                failed_rows=0,
-                errors=[{'row': 0, 'error': f'Datei konnte nicht gelesen werden: {str(e)}'}]
+                success=False, total_rows=0, imported_rows=0, skipped_rows=0, failed_rows=0,
+                errors=[{"row": 0, "error": f"Datei konnte nicht gelesen werden: {str(e)}"}],
             )
-        
-        return self._process_dataframe(df, db, station_id, overwrite)
-    
+
+        if len(df) > self.max_rows:
+            return ImportResult(
+                success=False, total_rows=len(df), imported_rows=0, skipped_rows=0, failed_rows=0,
+                errors=[{"row": 0, "error": f"Zu viele Zeilen: {len(df)} (max: {self.max_rows})"}],
+            )
+
+        return self._process_dataframe(df, db, station_id, overwrite, imported_by)
+
+    def _normalize_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Normalisiert Spaltennamen und mappt Aliase."""
+        df.columns = df.columns.str.strip().str.lower().str.replace(" ", "_")
+
+        rename_map = {}
+        for target, aliases in COLUMN_ALIASES.items():
+            for alias in aliases:
+                if alias in df.columns and alias != target:
+                    rename_map[alias] = target
+                    break
+
+        if rename_map:
+            df = df.rename(columns=rename_map)
+
+        return df
+
     def _process_dataframe(
         self,
         df: pd.DataFrame,
         db: Session,
         station_id: Optional[str],
-        overwrite: bool
+        overwrite: bool,
+        imported_by: str,
     ) -> ImportResult:
         """Verarbeitet einen DataFrame und importiert die Daten."""
-        
+
+        df = self._normalize_columns(df)
+
         result = ImportResult(
-            success=True,
-            total_rows=len(df),
-            imported_rows=0,
-            failed_rows=0
+            success=True, total_rows=len(df), imported_rows=0, skipped_rows=0, failed_rows=0,
         )
-        
-        # Spalten normalisieren (Leerzeichen entfernen, lowercase)
-        df.columns = df.columns.str.strip().str.lower().str.replace(' ', '_')
-        
-        # Zeile für Zeile verarbeiten
+
+        # Validate required columns
+        if "case_id" not in df.columns:
+            result.success = False
+            result.errors.append({"row": 0, "error": "Spalte 'case_id' fehlt"})
+            return result
+
+        if "station_id" not in df.columns and not station_id:
+            result.success = False
+            result.errors.append({"row": 0, "error": "Spalte 'station_id' fehlt und keine Station angegeben"})
+            return result
+
+        now_iso = datetime.utcnow().isoformat()
+
         for idx, row in df.iterrows():
             try:
-                # Station-ID überschreiben falls angegeben
                 row_dict = row.to_dict()
-                if station_id:
-                    row_dict['station_id'] = station_id
-                
-                # NaN zu None konvertieren
+
+                # NaN → None
                 for key, value in row_dict.items():
                     if pd.isna(value):
                         row_dict[key] = None
-                
-                # Validieren
-                case_row = CaseImportRow(**row_dict)
-                
-                # In Datenbank speichern (hier müsste die tatsächliche DB-Logik hin)
-                # Dies ist ein Platzhalter - in der echten Implementation würde hier
-                # der Case in die Datenbank geschrieben werden
-                self._save_case_to_db(case_row, db, overwrite)
-                
+
+                cid = str(row_dict.get("case_id", "")).strip()
+                if not cid:
+                    result.failed_rows += 1
+                    result.errors.append({"row": int(idx) + 2, "error": "case_id ist leer"})
+                    continue
+
+                sid = station_id or str(row_dict.get("station_id", "")).strip()
+                if not sid:
+                    result.failed_rows += 1
+                    result.errors.append({"row": int(idx) + 2, "case_id": cid, "error": "station_id ist leer"})
+                    continue
+
+                # Parse dates
+                admission_date = self._parse_date(row_dict.get("admission_date"))
+                discharge_date = self._parse_date(row_dict.get("discharge_date"))
+
+                if not admission_date:
+                    result.failed_rows += 1
+                    result.errors.append({"row": int(idx) + 2, "case_id": cid, "error": "admission_date fehlt oder ungültig"})
+                    continue
+
+                # Check if case exists
+                existing = db.get(Case, cid)
+                if existing and not overwrite:
+                    result.skipped_rows += 1
+                    result.warnings.append(f"Zeile {int(idx) + 2}: case_id '{cid}' existiert bereits (übersprungen)")
+                    continue
+
+                case = existing or Case(case_id=cid)
+                case.station_id = sid
+                case.patient_id = str(row_dict.get("patient_id", "")) or None
+                case.patient_initials = str(row_dict.get("patient_initials", "")) or None
+                case.clinic = str(row_dict.get("clinic", "")) or "EPP"
+                case.center = str(row_dict.get("center", "")) or None
+                case.admission_date = admission_date
+                case.discharge_date = discharge_date
+
+                case.honos_entry_total = self._safe_int(row_dict.get("honos_entry_total"))
+                case.honos_entry_date = self._parse_date(row_dict.get("honos_entry_date"))
+                case.honos_discharge_total = self._safe_int(row_dict.get("honos_discharge_total"))
+                case.honos_discharge_date = self._parse_date(row_dict.get("honos_discharge_date"))
+                case.honos_discharge_suicidality = self._safe_int(row_dict.get("honos_discharge_suicidality"))
+
+                case.bscl_total_entry = self._safe_int(row_dict.get("bscl_total_entry"))
+                case.bscl_entry_date = self._parse_date(row_dict.get("bscl_entry_date"))
+                case.bscl_total_discharge = self._safe_int(row_dict.get("bscl_total_discharge"))
+                case.bscl_discharge_date = self._parse_date(row_dict.get("bscl_discharge_date"))
+                case.bscl_discharge_suicidality = self._safe_int(row_dict.get("bscl_discharge_suicidality"))
+
+                case.bfs_1 = str(row_dict.get("bfs_1")) if row_dict.get("bfs_1") is not None else None
+                case.bfs_2 = str(row_dict.get("bfs_2")) if row_dict.get("bfs_2") is not None else None
+                case.bfs_3 = str(row_dict.get("bfs_3")) if row_dict.get("bfs_3") is not None else None
+
+                case.isolations_json = None  # CSV hat normalerweise keine Isolation-Daten
+
+                case.imported_at = now_iso
+                case.imported_by = imported_by
+                case.source = "csv"
+
+                db.merge(case)
                 result.imported_rows += 1
-                
+
             except Exception as e:
                 result.failed_rows += 1
                 result.errors.append({
-                    'row': int(idx) + 2,  # +2 wegen Header und 0-basiertem Index
-                    'case_id': row.get('case_id', 'UNKNOWN'),
-                    'error': str(e)
+                    "row": int(idx) + 2,
+                    "case_id": row.get("case_id", "UNKNOWN"),
+                    "error": str(e),
                 })
                 logger.warning(f"Fehler beim Import von Zeile {idx + 2}: {e}")
-        
+
+        try:
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            result.success = False
+            result.errors.append({"row": 0, "error": f"DB-Commit fehlgeschlagen: {str(e)}"})
+            return result
+
         result.success = result.failed_rows == 0
-        
+
         if result.failed_rows > 0:
             result.warnings.append(
                 f"{result.failed_rows} von {result.total_rows} Zeilen konnten nicht importiert werden"
             )
-        
+        if result.skipped_rows > 0:
+            result.warnings.append(
+                f"{result.skipped_rows} Zeilen übersprungen (existieren bereits)"
+            )
+
         return result
-    
-    def _save_case_to_db(self, case_row: CaseImportRow, db: Session, overwrite: bool):
-        """
-        Speichert einen Case in der Datenbank.
-        
-        TODO: Diese Methode muss noch mit der tatsächlichen Case-Datenstruktur
-        aus dem Hauptprojekt verbunden werden.
-        """
-        # Platzhalter - hier würde die echte DB-Logik implementiert
-        pass
+
+    @staticmethod
+    def _parse_date(val) -> Optional[str]:
+        """Parst ein Datum aus verschiedenen Formaten → ISO-String oder None."""
+        if val is None:
+            return None
+        if isinstance(val, date):
+            return val.isoformat()
+        if isinstance(val, datetime):
+            return val.date().isoformat()
+
+        s = str(val).strip()
+        if not s or s.lower() in ("nan", "nat", "none", "null", ""):
+            return None
+
+        # Try common formats
+        for fmt in ["%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y", "%m/%d/%Y", "%Y-%m-%dT%H:%M:%S"]:
+            try:
+                return datetime.strptime(s, fmt).date().isoformat()
+            except ValueError:
+                continue
+
+        # Try pandas
+        try:
+            return pd.to_datetime(s).date().isoformat()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _safe_int(val) -> Optional[int]:
+        """Konvertiert sicher zu int oder None."""
+        if val is None:
+            return None
+        try:
+            f = float(val)
+            if pd.isna(f):
+                return None
+            return int(f)
+        except (ValueError, TypeError):
+            return None
 
 
-def generate_sample_csv(output_path: Path, num_rows: int = 100) -> Path:
-    """
-    Generiert eine Beispiel-CSV mit Dummy-Daten für Tests.
-    
-    Args:
-        output_path: Ausgabepfad
-        num_rows: Anzahl zu generierender Zeilen
-        
-    Returns:
-        Pfad zur erstellten Datei
-    """
-    from faker import Faker
+def generate_sample_csv() -> str:
+    """Generiert eine Beispiel-CSV als String."""
     import random
-    
-    fake = Faker('de_CH')
-    
-    data = []
-    stations = ['ST01', 'ST02', 'ST03', 'A1', 'A2', 'B1']
-    
-    for i in range(num_rows):
-        admission = fake.date_between(start_date='-90d', end_date='today')
-        discharge = None
-        if random.random() > 0.3:  # 70% haben Austritt
-            discharge = fake.date_between(start_date=admission, end_date='today')
-        
-        # Scores
-        honos_entry = random.randint(0, 48) if random.random() > 0.1 else None
-        honos_discharge = random.randint(0, 48) if discharge and random.random() > 0.2 else None
-        
-        bscl_entry = round(random.uniform(0, 4), 2) if random.random() > 0.1 else None
-        bscl_discharge = round(random.uniform(0, 4), 2) if discharge and random.random() > 0.2 else None
-        
-        row = {
-            'case_id': f'CASE_{i+1:05d}',
-            'station_id': random.choice(stations),
-            'patient_initials': f"{fake.first_name()[0]}{fake.last_name()[0]}",
-            'admission_date': admission.isoformat(),
-            'discharge_date': discharge.isoformat() if discharge else None,
-            'honos_entry_total': honos_entry,
-            'honos_discharge_total': honos_discharge,
-            'honos_entry_suicidality': random.randint(0, 4) if honos_entry else None,
-            'honos_discharge_suicidality': random.randint(0, 4) if honos_discharge else None,
-            'bscl_total_entry': bscl_entry,
-            'bscl_total_discharge': bscl_discharge,
-            'bscl_entry_suicidality': round(random.uniform(0, 4), 2) if bscl_entry else None,
-            'bscl_discharge_suicidality': round(random.uniform(0, 4), 2) if bscl_discharge else None,
-            'bfs_1': random.choice(['V1', 'V2', 'V3', None]),
-            'bfs_2': random.choice(['A', 'B', 'C', None]),
-            'bfs_3': random.choice(['X', 'Y', 'Z', None]),
-        }
-        
-        data.append(row)
-    
-    df = pd.DataFrame(data)
-    df.to_csv(output_path, index=False, encoding='utf-8')
-    
-    logger.info(f"Beispiel-CSV mit {num_rows} Zeilen erstellt: {output_path}")
-    return output_path
+
+    headers = [
+        "case_id", "station_id", "patient_id", "patient_initials", "clinic",
+        "admission_date", "discharge_date",
+        "honos_entry_total", "honos_discharge_total", "honos_discharge_suicidality",
+        "bscl_total_entry", "bscl_total_discharge", "bscl_discharge_suicidality",
+        "bfs_1", "bfs_2", "bfs_3",
+    ]
+
+    rows = [",".join(headers)]
+    stations = ["A1", "B0", "B2", "ST01", "ST02"]
+
+    for i in range(20):
+        sid = random.choice(stations)
+        adm = date(2026, 1, random.randint(1, 31) if random.randint(1, 31) <= 28 else 28)
+        dis = ""
+        if random.random() > 0.3:
+            dis = date(2026, 2, random.randint(1, 13)).isoformat()
+
+        row = [
+            f"CASE_{i+1:04d}", sid, f"PAT_{i+1:04d}",
+            f"{chr(65 + i % 26)}{chr(75 + i % 26)}", "EPP",
+            adm.isoformat(), dis,
+            str(random.randint(5, 40)) if random.random() > 0.2 else "",
+            str(random.randint(5, 40)) if dis and random.random() > 0.3 else "",
+            str(random.randint(0, 4)) if dis and random.random() > 0.5 else "",
+            str(random.randint(10, 80)) if random.random() > 0.2 else "",
+            str(random.randint(10, 80)) if dis and random.random() > 0.3 else "",
+            str(random.randint(0, 4)) if dis and random.random() > 0.5 else "",
+            str(random.randint(1, 15)) if random.random() > 0.1 else "",
+            str(random.randint(1, 15)) if random.random() > 0.1 else "",
+            str(random.randint(1, 15)) if random.random() > 0.1 else "",
+        ]
+        rows.append(",".join(row))
+
+    return "\n".join(rows)

@@ -288,6 +288,81 @@ class RuleDefinition(Base):
 
 
 
+# -----------------------------------------------------------------------------
+# Case (importiert aus CSV / KIS)
+# -----------------------------------------------------------------------------
+
+class Case(Base):
+    """
+    Importierter Patientenfall.
+
+    Wird via CSV-Upload oder KIS-Anbindung befüllt.
+    Enthält alle klinischen Daten, die für die Regel-Evaluation benötigt werden.
+    """
+
+    __tablename__ = "case_data"
+
+    case_id: Mapped[str] = mapped_column(String, primary_key=True)
+    station_id: Mapped[str] = mapped_column(String, index=True)
+
+    patient_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    patient_initials: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    clinic: Mapped[Optional[str]] = mapped_column(String, nullable=True, default="EPP")
+    center: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    admission_date: Mapped[str] = mapped_column(String)  # ISO date
+    discharge_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    # HONOS
+    honos_entry_total: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    honos_entry_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    honos_discharge_total: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    honos_discharge_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    honos_discharge_suicidality: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    # BSCL
+    bscl_total_entry: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    bscl_entry_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    bscl_total_discharge: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    bscl_discharge_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    bscl_discharge_suicidality: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    # BFS
+    bfs_1: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    bfs_2: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    bfs_3: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    # Isolation (JSON-encoded list)
+    isolations_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Metadata
+    imported_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    imported_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    source: Mapped[Optional[str]] = mapped_column(String, nullable=True, default="csv")
+
+
+# -----------------------------------------------------------------------------
+# ShiftReason (konfigurierbare Schiebe-Gründe)
+# -----------------------------------------------------------------------------
+
+class ShiftReason(Base):
+    """
+    Konfigurierbare Gründe für das Schieben (Erinnern) von Alerts.
+
+    Standard-Gründe: a, b, c mit sinnvollen Labels.
+    Admins können weitere hinzufügen oder bestehende ändern.
+    """
+
+    __tablename__ = "shift_reason"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String, unique=True)  # z.B. "a", "b", "c"
+    label: Mapped[str] = mapped_column(String)  # z.B. "Noch in Bearbeitung"
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+
+
 __all__ = [
     "Ack",
     "AckEvent",
@@ -300,4 +375,6 @@ __all__ = [
     "BreakGlassSession",
     "SecurityEvent",
     "RuleDefinition",
+    "Case",
+    "ShiftReason",
 ]

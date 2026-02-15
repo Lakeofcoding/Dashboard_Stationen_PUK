@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal, Optional
 import yaml
@@ -32,7 +32,7 @@ from app.rbac import (
 )
 
 from app.db import SessionLocal, init_db
-from app.models import DayState, RuleDefinition
+from app.models import DayState, RuleDefinition, Case, ShiftReason
 
 # -----------------------------------------------------------------------------
 # Helpers: condition hash
@@ -109,11 +109,191 @@ def _startup():
             print("Rolle 'admin' wurde User 'demo' neu zugewiesen.")
         
         db.commit()
+    
+    # Seed ShiftReasons
+    _seed_shift_reasons()
+    
+    # Seed DUMMY_CASES into DB (only if no cases exist yet)
+    _seed_dummy_cases_to_db()
+    
     print("Sicherheits-System erfolgreich initialisiert.")
 
 # -----------------------------------------------------------------------------
 # API models
 # -----------------------------------------------------------------------------
+
+# --- ShiftReason Seeding ---
+def _seed_shift_reasons():
+    """Seed default shift reasons if none exist."""
+    defaults = [
+        {"code": "a", "label": "Noch in Bearbeitung", "description": "Daten werden noch erfasst / nachgetragen.", "sort_order": 1},
+        {"code": "b", "label": "Warte auf Rückmeldung", "description": "Information von anderer Stelle benötigt.", "sort_order": 2},
+        {"code": "c", "label": "Nicht relevant / Ausnahme", "description": "Klinisch begründete Ausnahme von der Regel.", "sort_order": 3},
+    ]
+    with SessionLocal() as db:
+        existing = db.query(ShiftReason).count()
+        if existing == 0:
+            for d in defaults:
+                db.add(ShiftReason(**d, is_active=True))
+            db.commit()
+            print("✓ Standard-Schiebegründe angelegt")
+
+
+def _seed_dummy_cases_to_db():
+    """Seeds DUMMY_CASES into the case_data table.
+
+    Demo-Fälle werden bei jedem Start aufgefrischt (damit Datumswerte stimmen).
+    CSV-importierte Fälle (source != 'demo') bleiben erhalten.
+    """
+    with SessionLocal() as db:
+        # CSV-importierte Fälle zählen
+        csv_count = db.query(Case).filter(Case.source != "demo").count()
+
+        # Alte Demo-Fälle löschen (werden gleich neu angelegt)
+        db.query(Case).filter(Case.source == "demo").delete()
+        db.commit()
+
+        # Falls CSV-Daten vorhanden UND keine Demo-Daten gewünscht: nichts tun
+        # (Aktuell seeden wir Demo immer, damit es im Dev-Modus Beispieldaten gibt)
+
+        for c in DUMMY_CASES:
+            case = Case(
+                case_id=c["case_id"],
+                station_id=c["station_id"],
+                patient_id=c.get("patient_id"),
+                clinic=c.get("clinic", "EPP"),
+                center=STATION_CENTER.get(c["station_id"], "UNKNOWN"),
+                admission_date=c["admission_date"].isoformat() if isinstance(c["admission_date"], date) else str(c["admission_date"]),
+                discharge_date=c["discharge_date"].isoformat() if isinstance(c.get("discharge_date"), date) else None,
+                honos_entry_total=c.get("honos_entry_total"),
+                honos_entry_date=c.get("honos_entry_date", "").isoformat() if isinstance(c.get("honos_entry_date"), date) else None,
+                honos_discharge_total=c.get("honos_discharge_total"),
+                honos_discharge_date=c.get("honos_discharge_date", "").isoformat() if isinstance(c.get("honos_discharge_date"), date) else None,
+                honos_discharge_suicidality=c.get("honos_discharge_suicidality"),
+                bscl_total_entry=c.get("bscl_total_entry"),
+                bscl_entry_date=c.get("bscl_entry_date", "").isoformat() if isinstance(c.get("bscl_entry_date"), date) else None,
+                bscl_total_discharge=c.get("bscl_total_discharge"),
+                bscl_discharge_date=c.get("bscl_discharge_date", "").isoformat() if isinstance(c.get("bscl_discharge_date"), date) else None,
+                bscl_discharge_suicidality=c.get("bscl_discharge_suicidality"),
+                bfs_1=str(c.get("bfs_1")) if c.get("bfs_1") is not None else None,
+                bfs_2=str(c.get("bfs_2")) if c.get("bfs_2") is not None else None,
+                bfs_3=str(c.get("bfs_3")) if c.get("bfs_3") is not None else None,
+                isolations_json=json.dumps(c.get("isolations", [])) if c.get("isolations") else None,
+                source="demo",
+            )
+            db.merge(case)
+        db.commit()
+        print(f"✓ {len(DUMMY_CASES)} Demo-Fälle in DB importiert (aufgefrischt)")
+
+
+def _load_raw_cases_from_db(station_id: str) -> list[dict]:
+    """Lädt ALLE Fälle aus der DB für eine Station (OHNE Filterung/Auto-Expire)."""
+    with SessionLocal() as db:
+        cases = db.query(Case).filter(Case.station_id == station_id).all()
+        result = []
+        for c in cases:
+            case_dict = {
+                "case_id": c.case_id,
+                "patient_id": c.patient_id or c.case_id,
+                "clinic": c.clinic or "EPP",
+                "station_id": c.station_id,
+                "center": c.center or STATION_CENTER.get(c.station_id, "UNKNOWN"),
+                "admission_date": date.fromisoformat(c.admission_date) if c.admission_date else today_local(),
+                "discharge_date": date.fromisoformat(c.discharge_date) if c.discharge_date else None,
+                "honos_entry_total": c.honos_entry_total,
+                "honos_entry_date": date.fromisoformat(c.honos_entry_date) if c.honos_entry_date else None,
+                "honos_discharge_total": c.honos_discharge_total,
+                "honos_discharge_date": date.fromisoformat(c.honos_discharge_date) if c.honos_discharge_date else None,
+                "honos_discharge_suicidality": c.honos_discharge_suicidality,
+                "bscl_total_entry": c.bscl_total_entry,
+                "bscl_entry_date": date.fromisoformat(c.bscl_entry_date) if c.bscl_entry_date else None,
+                "bscl_total_discharge": c.bscl_total_discharge,
+                "bscl_discharge_date": date.fromisoformat(c.bscl_discharge_date) if c.bscl_discharge_date else None,
+                "bscl_discharge_suicidality": c.bscl_discharge_suicidality,
+                "bfs_1": int(c.bfs_1) if c.bfs_1 and c.bfs_1.isdigit() else c.bfs_1,
+                "bfs_2": int(c.bfs_2) if c.bfs_2 and c.bfs_2.isdigit() else c.bfs_2,
+                "bfs_3": int(c.bfs_3) if c.bfs_3 and c.bfs_3.isdigit() else c.bfs_3,
+                "isolations": json.loads(c.isolations_json) if c.isolations_json else [],
+            }
+            result.append(case_dict)
+        return result
+
+
+def load_cases_from_db(station_id: str) -> list[dict]:
+    """Lädt Fälle aus der DB mit Auto-Expire-Filterung.
+
+    Auto-Expire: Fälle verschwinden 3 Tage nach Austritt, WENN alle Alerts quittiert.
+    Nutzt _load_raw_cases_from_db (ohne Rekursion!).
+    """
+    all_cases = _load_raw_cases_from_db(station_id)
+    result = []
+    for c in all_cases:
+        if c["discharge_date"]:
+            try:
+                days_since = (today_local() - c["discharge_date"]).days
+                if days_since > 3:
+                    if _all_alerts_resolved(c, station_id):
+                        continue  # Auto-Expire: Fall ausblenden
+            except Exception:
+                pass
+        result.append(c)
+    return result
+
+
+def _all_alerts_resolved(case_dict: dict, station_id: str) -> bool:
+    """Prüft, ob alle Alerts eines Falls quittiert/geschoben sind.
+
+    WICHTIG: Nimmt case_dict direkt entgegen (KEIN load_cases_from_db-Aufruf!)
+    um Endlosrekursion zu vermeiden.
+    """
+    case_id = case_dict["case_id"]
+    enriched = enrich_case(case_dict)
+    alerts = evaluate_alerts(enriched)
+
+    if not alerts:
+        return True
+
+    # Check if all alerts are acked
+    current_version = get_day_version(station_id=station_id)
+    acks = ack_store.get_acks_for_cases([case_id], station_id)
+    current_hashes = {a.rule_id: a.condition_hash for a in alerts}
+
+    handled = set()
+    for a in acks:
+        if a.ack_scope == "rule":
+            rid = a.scope_id
+            if current_hashes.get(rid) and getattr(a, "condition_hash", None) == current_hashes[rid]:
+                handled.add(rid)
+
+    return all(a.rule_id in handled for a in alerts)
+
+
+# --- Get all cases (from DB, with DUMMY fallback) ---
+def get_station_cases(station_id: str) -> list[dict]:
+    """Lädt Fälle für eine Station. Nutzt DB, mit Fallback auf DUMMY_CASES."""
+    db_cases = load_cases_from_db(station_id)
+    if db_cases:
+        return [enrich_case(c) for c in db_cases]
+
+    # Fallback: DUMMY_CASES (für Abwärtskompatibilität)
+    return [enrich_case(c) for c in DUMMY_CASES if c["station_id"] == station_id]
+
+
+# --- Get single case (OHNE Auto-Expire, damit Detail-View immer funktioniert) ---
+def get_single_case(case_id: str) -> dict | None:
+    """Lädt einen einzelnen Fall. Direkt aus DB, OHNE Auto-Expire-Filter."""
+    with SessionLocal() as db:
+        case_obj = db.get(Case, case_id)
+        if case_obj:
+            # Direkt aus DB laden (NICHT durch load_cases_from_db mit Auto-Expire)
+            raw_cases = _load_raw_cases_from_db(case_obj.station_id)
+            return next((c for c in raw_cases if c["case_id"] == case_id), None)
+
+    # Fallback
+    return next((x for x in DUMMY_CASES if x["case_id"] == case_id), None)
+
+
+
 
 Severity = Literal["OK", "WARN", "CRITICAL"]
 
@@ -253,176 +433,181 @@ CLINIC_DEFAULT = "EPP"
 
 
 
-DUMMY_CASES = [
-  # 1) Eintritt: HONOS/BSCL fehlen, >3 Tage seit Eintritt => CRITICAL
-  {
-    "case_id": "4645342",
-    "patient_id": "4534234",
-    "clinic": "EPP",
-    "station_id": "A1",
-    "center": "ZAPE",
-    "admission_date": date(2026, 1, 1),
-    "discharge_date": None,
+def _make_dummy_cases() -> list[dict]:
+    """Erstellt Demo-Fälle mit relativen Daten (immer aktuell)."""
+    _today = date.today()
+    return [
+      # 1) Eintritt: HONOS/BSCL fehlen, >3 Tage seit Eintritt => CRITICAL
+      {
+        "case_id": "4645342",
+        "patient_id": "4534234",
+        "clinic": "EPP",
+        "station_id": "A1",
+        "center": "ZAPE",
+        "admission_date": _today - timedelta(days=10),
+        "discharge_date": None,
 
-    "honos_entry_total": None,
-    "honos_entry_date": None,
-    "honos_discharge_total": None,
-    "honos_discharge_date": None,
-    "honos_discharge_suicidality": None,
+        "honos_entry_total": None,
+        "honos_entry_date": None,
+        "honos_discharge_total": None,
+        "honos_discharge_date": None,
+        "honos_discharge_suicidality": None,
 
-    "bscl_total_entry": None,
-    "bscl_entry_date": None,
-    "bscl_total_discharge": None,
-    "bscl_discharge_date": None,
-    "bscl_discharge_suicidality": None,
+        "bscl_total_entry": None,
+        "bscl_entry_date": None,
+        "bscl_total_discharge": None,
+        "bscl_discharge_date": None,
+        "bscl_discharge_suicidality": None,
 
-    "bfs_1": 11, "bfs_2": None, "bfs_3": None,
+        "bfs_1": 11, "bfs_2": None, "bfs_3": None,
 
-    "isolations": []
-  },
+        "isolations": []
+      },
 
-  # 2) Eintritt HONOS/BSCL vorhanden, aber starke Verschlechterung >5 => WARN (Risk)
-  {
-    "case_id": "4645343",
-    "patient_id": "4534235",
-    "clinic": "EPP",
-    "station_id": "B0",
-    "center": "ZDAP",
-    "admission_date": date(2026, 1, 10),
-    "discharge_date": date(2026, 1, 20),
+      # 2) Eintritt HONOS/BSCL vorhanden, Verschlechterung >5 => WARN
+      {
+        "case_id": "4645343",
+        "patient_id": "4534235",
+        "clinic": "EPP",
+        "station_id": "B0",
+        "center": "ZDAP",
+        "admission_date": _today - timedelta(days=12),
+        "discharge_date": _today - timedelta(days=2),
 
-    "honos_entry_total": 12,
-    "honos_entry_date": date(2026, 1, 11),
-    "honos_discharge_total": 20,
-    "honos_discharge_date": date(2026, 1, 20),
-    "honos_discharge_suicidality": 1,
+        "honos_entry_total": 12,
+        "honos_entry_date": _today - timedelta(days=11),
+        "honos_discharge_total": 20,
+        "honos_discharge_date": _today - timedelta(days=2),
+        "honos_discharge_suicidality": 1,
 
-    "bscl_total_entry": 40,
-    "bscl_entry_date": date(2026, 1, 11),
-    "bscl_total_discharge": 50,
-    "bscl_discharge_date": date(2026, 1, 20),
-    "bscl_discharge_suicidality": 2,
+        "bscl_total_entry": 40,
+        "bscl_entry_date": _today - timedelta(days=11),
+        "bscl_total_discharge": 50,
+        "bscl_discharge_date": _today - timedelta(days=2),
+        "bscl_discharge_suicidality": 2,
 
-    "bfs_1": 10, "bfs_2": 12, "bfs_3": 9,
+        "bfs_1": 10, "bfs_2": 12, "bfs_3": 9,
 
-    "isolations": []
-  },
+        "isolations": []
+      },
 
-  # 3) Austritt: HONOS/BSCL fehlen, discharge vor 5 Tagen => CRITICAL (Austrittfenster 3 Tage)
-  {
-    "case_id": "4645344",
-    "patient_id": "4534236",
-    "clinic": "EPP",
-    "station_id": "B2",
-    "center": "ZDAP",
-    "admission_date": date(2025, 12, 15),
-    "discharge_date": date(2026, 1, 5),
+      # 3) Austritt: HONOS/BSCL fehlen, discharge >3 Tage => CRITICAL
+      {
+        "case_id": "4645344",
+        "patient_id": "4534236",
+        "clinic": "EPP",
+        "station_id": "B2",
+        "center": "ZDAP",
+        "admission_date": _today - timedelta(days=20),
+        "discharge_date": _today - timedelta(days=5),
 
-    "honos_entry_total": 18,
-    "honos_entry_date": date(2025, 12, 16),
-    "honos_discharge_total": None,
-    "honos_discharge_date": None,
-    "honos_discharge_suicidality": None,
+        "honos_entry_total": 18,
+        "honos_entry_date": _today - timedelta(days=19),
+        "honos_discharge_total": None,
+        "honos_discharge_date": None,
+        "honos_discharge_suicidality": None,
 
-    "bscl_total_entry": 55,
-    "bscl_entry_date": date(2025, 12, 16),
-    "bscl_total_discharge": None,
-    "bscl_discharge_date": None,
-    "bscl_discharge_suicidality": None,
+        "bscl_total_entry": 55,
+        "bscl_entry_date": _today - timedelta(days=19),
+        "bscl_total_discharge": None,
+        "bscl_discharge_date": None,
+        "bscl_discharge_suicidality": None,
 
-    "bfs_1": None, "bfs_2": None, "bfs_3": None,
+        "bfs_1": None, "bfs_2": None, "bfs_3": None,
 
-    "isolations": []
-  },
+        "isolations": []
+      },
 
-  # 4) Suizidalität hoch bei Austritt (HONOS >=3 oder BSCL >=3) => CRITICAL + Extra Info
-  {
-    "case_id": "4645345",
-    "patient_id": "4534237",
-    "clinic": "EPP",
-    "station_id": "A1",
-    "center": "ZAPE",
-    "admission_date": date(2026, 1, 2),
-    "discharge_date": date(2026, 1, 12),
+      # 4) Suizidalität hoch bei Austritt (HONOS >=3) => CRITICAL
+      {
+        "case_id": "4645345",
+        "patient_id": "4534237",
+        "clinic": "EPP",
+        "station_id": "A1",
+        "center": "ZAPE",
+        "admission_date": _today - timedelta(days=14),
+        "discharge_date": _today - timedelta(days=1),
 
-    "honos_entry_total": 16,
-    "honos_entry_date": date(2026, 1, 3),
-    "honos_discharge_total": 15,
-    "honos_discharge_date": date(2026, 1, 12),
-    "honos_discharge_suicidality": 3,
+        "honos_entry_total": 16,
+        "honos_entry_date": _today - timedelta(days=13),
+        "honos_discharge_total": 15,
+        "honos_discharge_date": _today - timedelta(days=1),
+        "honos_discharge_suicidality": 3,
 
-    "bscl_total_entry": 48,
-    "bscl_entry_date": date(2026, 1, 3),
-    "bscl_total_discharge": 47,
-    "bscl_discharge_date": date(2026, 1, 12),
-    "bscl_discharge_suicidality": 2,
+        "bscl_total_entry": 48,
+        "bscl_entry_date": _today - timedelta(days=13),
+        "bscl_total_discharge": 47,
+        "bscl_discharge_date": _today - timedelta(days=1),
+        "bscl_discharge_suicidality": 2,
 
-    "bfs_1": 7, "bfs_2": 8, "bfs_3": 9,
+        "bfs_1": 7, "bfs_2": 8, "bfs_3": 9,
 
-    "isolations": [
-  { "start": "2026-01-10T08:00:00Z", "stop": None }
-]
-  },
-
-  # 5) Isolation ohne Stop >48h => CRITICAL
-  {
-    "case_id": "4645346",
-    "patient_id": "4534238",
-    "clinic": "EPP",
-    "station_id": "B0",
-    "center": "ZDAP",
-    "admission_date": date(2026, 1, 8),
-    "discharge_date": None,
-
-    "honos_entry_total": 22,
-    "honos_entry_date": date(2026, 1, 9),
-    "honos_discharge_total": None,
-    "honos_discharge_date": None,
-    "honos_discharge_suicidality": None,
-
-    "bscl_total_entry": 60,
-    "bscl_entry_date": date(2026, 1, 9),
-    "bscl_total_discharge": None,
-    "bscl_discharge_date": None,
-    "bscl_discharge_suicidality": 3,
-
-    "bfs_1": 1, "bfs_2": 2, "bfs_3": 3,
-
-    "isolations": [
-      {"start": "2026-01-10T08:00:00Z", "stop": None}
+        "isolations": [
+      { "start": (_today - timedelta(days=3)).isoformat() + "T08:00:00Z", "stop": None }
     ]
-  },
+      },
 
-  # 6) Mehrfach-Isolation (mehr als 1 Episode) => WARN, auch wenn alles sonst ok
-  {
-    "case_id": "4645347",
-    "patient_id": "4534239",
-    "clinic": "EPP",
-    "station_id": "B2",
-    "center": "ZDAP",
-    "admission_date": date(2026, 1, 5),
-    "discharge_date": None,
+      # 5) Isolation ohne Stop >48h => CRITICAL
+      {
+        "case_id": "4645346",
+        "patient_id": "4534238",
+        "clinic": "EPP",
+        "station_id": "B0",
+        "center": "ZDAP",
+        "admission_date": _today - timedelta(days=8),
+        "discharge_date": None,
 
-    "honos_entry_total": 10,
-    "honos_entry_date": date(2026, 1, 6),
-    "honos_discharge_total": None,
-    "honos_discharge_date": None,
-    "honos_discharge_suicidality": None,
+        "honos_entry_total": 22,
+        "honos_entry_date": _today - timedelta(days=7),
+        "honos_discharge_total": None,
+        "honos_discharge_date": None,
+        "honos_discharge_suicidality": None,
 
-    "bscl_total_entry": 35,
-    "bscl_entry_date": date(2026, 1, 6),
-    "bscl_total_discharge": None,
-    "bscl_discharge_date": None,
-    "bscl_discharge_suicidality": None,
+        "bscl_total_entry": 60,
+        "bscl_entry_date": _today - timedelta(days=7),
+        "bscl_total_discharge": None,
+        "bscl_discharge_date": None,
+        "bscl_discharge_suicidality": 3,
 
-    "bfs_1": 4, "bfs_2": 5, "bfs_3": 6,
+        "bfs_1": 1, "bfs_2": 2, "bfs_3": 3,
 
-    "isolations": [
-      {"start": "2026-01-07T10:00:00Z", "stop": "2026-01-07T14:00:00Z"},
-      {"start": "2026-01-09T12:00:00Z", "stop": "2026-01-09T15:00:00Z"}
+        "isolations": [
+          {"start": (_today - timedelta(days=4)).isoformat() + "T08:00:00Z", "stop": None}
+        ]
+      },
+
+      # 6) Mehrfach-Isolation => WARN
+      {
+        "case_id": "4645347",
+        "patient_id": "4534239",
+        "clinic": "EPP",
+        "station_id": "B2",
+        "center": "ZDAP",
+        "admission_date": _today - timedelta(days=15),
+        "discharge_date": None,
+
+        "honos_entry_total": 10,
+        "honos_entry_date": _today - timedelta(days=14),
+        "honos_discharge_total": None,
+        "honos_discharge_date": None,
+        "honos_discharge_suicidality": None,
+
+        "bscl_total_entry": 35,
+        "bscl_entry_date": _today - timedelta(days=14),
+        "bscl_total_discharge": None,
+        "bscl_discharge_date": None,
+        "bscl_discharge_suicidality": None,
+
+        "bfs_1": 4, "bfs_2": 5, "bfs_3": 6,
+
+        "isolations": [
+          {"start": (_today - timedelta(days=10)).isoformat() + "T10:00:00Z", "stop": (_today - timedelta(days=10)).isoformat() + "T14:00:00Z"},
+          {"start": (_today - timedelta(days=8)).isoformat() + "T12:00:00Z", "stop": (_today - timedelta(days=8)).isoformat() + "T15:00:00Z"}
+        ]
+      },
     ]
-  },
-]
+
+DUMMY_CASES = _make_dummy_cases()
 
 
 
@@ -780,7 +965,7 @@ def list_cases(
 ):
 
     station_id = ctx.station_id
-    station_cases = [enrich_case(c) for c in DUMMY_CASES if c["station_id"] == station_id]
+    station_cases = get_station_cases(station_id)
     case_ids = [c["case_id"] for c in station_cases]
 
     # Tagesversion ("Vers") der Station. Acks sind nur gültig, wenn sie zur
@@ -838,11 +1023,6 @@ def list_cases(
 
         severity, top_alert, critical_count, warn_count = summarize_severity(visible_alerts)
 
-        # Fall verschwindet aus der Liste, sobald er heute "Fall quittiert" wurde.
-        # (Reset oder nächster Geschäftstag lassen ihn wieder erscheinen.)
-        if case_level_acked_at.get(c["case_id"]):
-            continue
-
         out.append(
             CaseSummary(
                 case_id=c["case_id"],
@@ -874,7 +1054,7 @@ def get_case(
     _perm: None = Depends(require_permission("dashboard:view")),
 ):
 
-    raw = next((x for x in DUMMY_CASES if x["case_id"] == case_id), None)
+    raw = get_single_case(case_id)
     if raw is None:
         raise HTTPException(status_code=404, detail="Case not found")
 
@@ -986,7 +1166,7 @@ def debug_eval(
     _ctx: str = Depends(require_ctx),
     _perm: None = Depends(require_permission("debug:view")),
 ):
-    raw = next((x for x in DUMMY_CASES if x["case_id"] == case_id), None)
+    raw = get_single_case(case_id)
     if raw is None:
         raise HTTPException(status_code=404, detail="Case not found")
     c = enrich_case(raw)
@@ -1030,8 +1210,13 @@ def meta_stations(
     ctx: AuthContext = Depends(get_auth_context),
     _perm: None = Depends(require_permission("meta:read")),
 ):
-    # Für Prototyp: aus Dummy-Cases ableiten
-    stations = sorted({c["station_id"] for c in DUMMY_CASES})
+    # Stationen aus DB laden (alle einzigartigen station_ids)
+    with SessionLocal() as db:
+        db_stations = db.query(Case.station_id).distinct().all()
+        stations = sorted({s[0] for s in db_stations})
+    if not stations:
+        # Fallback: aus DUMMY_CASES
+        stations = sorted({c["station_id"] for c in DUMMY_CASES})
     return {"stations": stations}
 
 
@@ -1093,9 +1278,16 @@ class AckRequest(BaseModel):
     comment: Optional[str] = None
 
     # NEW: Aktionstyp. Standard ist ACK.
-    # Für "Schieben" nutzt das Frontend action='SHIFT' und shift_code='a'|'b'|'c'.
     action: Optional[Literal["ACK", "SHIFT"]] = "ACK"
-    shift_code: Optional[Literal["a", "b", "c"]] = None
+    shift_code: Optional[str] = None  # Dynamic: loaded from ShiftReason table
+
+
+def _get_valid_shift_codes() -> set[str]:
+    """Returns set of valid shift codes from DB."""
+    with SessionLocal() as db:
+        reasons = db.query(ShiftReason).filter(ShiftReason.is_active == True).all()  # noqa: E712
+        codes = {r.code for r in reasons}
+    return codes or {"a", "b", "c"}  # fallback
 
 
 # Route: HTTP-Endpoint – Auth/Permissions werden serverseitig geprüft (nicht nur im Frontend).
@@ -1111,7 +1303,7 @@ def ack(
     if req.ack_scope not in ("case", "rule"):
         raise HTTPException(status_code=400, detail="ack_scope must be 'case' or 'rule'")
 
-    raw = next((x for x in DUMMY_CASES if x["case_id"] == req.case_id), None)
+    raw = get_single_case(req.case_id)
     if raw is None:
         raise HTTPException(status_code=404, detail="Case not found")
 
@@ -1120,8 +1312,11 @@ def ack(
         raise HTTPException(status_code=404, detail="Case not found")
 
     # --- Eingabevalidierung für SHIFT
-    if (req.action or "ACK") == "SHIFT" and (req.shift_code not in ("a", "b", "c")):
-        raise HTTPException(status_code=400, detail="SHIFT requires shift_code to be one of: a, b, c")
+    if (req.action or "ACK") == "SHIFT":
+        # Validate shift code against configured reasons
+        valid_codes = _get_valid_shift_codes()
+        if req.shift_code not in valid_codes:
+            raise HTTPException(status_code=400, detail=f"SHIFT requires a valid shift_code. Valid: {', '.join(valid_codes)}")
 
     # Tageskontext für diesen Request (Geschäftstag + aktuelle Tagesversion)
     business_date = today_local().isoformat()
@@ -2082,3 +2277,277 @@ def break_glass_list(
                 for s in rows
             ]
         }
+
+
+# =============================================================================
+# CSV Upload API
+# =============================================================================
+
+from fastapi import UploadFile, File, Form
+from app.csv_import import CSVImporter, generate_sample_csv
+
+
+@app.post("/api/admin/csv/upload")
+async def csv_upload(
+    file: UploadFile = File(...),
+    station_id: Optional[str] = Form(None),
+    overwrite: bool = Form(False),
+    request: Request = None,
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:write")),
+):
+    """
+    CSV/XLSX-Upload für Case-Import.
+
+    - Akzeptiert .csv und .xlsx Dateien
+    - Validiert alle Daten
+    - Importiert in case_data-Tabelle
+    - Optional: station_id für alle Zeilen setzen
+    - Optional: overwrite=true um bestehende Cases zu überschreiben
+    """
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Keine Datei angegeben")
+
+    allowed_extensions = {".csv", ".xlsx", ".xls"}
+    ext = "." + file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
+    if ext not in allowed_extensions:
+        raise HTTPException(status_code=400, detail=f"Ungültiges Dateiformat. Erlaubt: {', '.join(allowed_extensions)}")
+
+    content = await file.read()
+    if len(content) == 0:
+        raise HTTPException(status_code=400, detail="Datei ist leer")
+
+    importer = CSVImporter()
+
+    with SessionLocal() as db:
+        result = importer.import_from_bytes(
+            file_content=content,
+            filename=file.filename,
+            db=db,
+            station_id=station_id if station_id and station_id.strip() else None,
+            overwrite=overwrite,
+            imported_by=ctx.user_id,
+        )
+
+    # Audit logging
+    with SessionLocal() as db:
+        log_security_event(
+            db,
+            request=request,
+            actor_user_id=ctx.user_id,
+            actor_station_id=ctx.station_id,
+            action="CSV_IMPORT",
+            target_type="case_data",
+            target_id=file.filename,
+            success=result.success,
+            details={
+                "total_rows": result.total_rows,
+                "imported_rows": result.imported_rows,
+                "skipped_rows": result.skipped_rows,
+                "failed_rows": result.failed_rows,
+                "station_filter": station_id,
+                "overwrite": overwrite,
+            },
+        )
+
+    return result.model_dump()
+
+
+@app.get("/api/admin/csv/sample")
+def csv_sample(
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:read")),
+):
+    """Gibt eine Beispiel-CSV zurück."""
+    from fastapi.responses import Response
+    csv_content = generate_sample_csv()
+    return Response(
+        content=csv_content,
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=sample_cases.csv"},
+    )
+
+
+@app.get("/api/admin/cases/count")
+def admin_cases_count(
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:read")),
+):
+    """Gibt die Anzahl der importierten Fälle zurück."""
+    with SessionLocal() as db:
+        total = db.query(Case).count()
+        by_station = {}
+        stations = db.query(Case.station_id).distinct().all()
+        for (sid,) in stations:
+            by_station[sid] = db.query(Case).filter(Case.station_id == sid).count()
+    return {"total": total, "by_station": by_station}
+
+
+@app.delete("/api/admin/cases/all")
+def admin_delete_all_cases(
+    request: Request,
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:write")),
+):
+    """Löscht ALLE importierten Fälle (Vorsicht!)."""
+    with SessionLocal() as db:
+        count = db.query(Case).count()
+        db.query(Case).delete()
+        db.commit()
+        log_security_event(
+            db,
+            request=request,
+            actor_user_id=ctx.user_id,
+            actor_station_id=ctx.station_id,
+            action="CASES_DELETE_ALL",
+            target_type="case_data",
+            target_id="*",
+            success=True,
+            details={"deleted_count": count},
+        )
+    return {"ok": True, "deleted": count}
+
+
+# =============================================================================
+# ShiftReason API
+# =============================================================================
+
+class ShiftReasonCreate(BaseModel):
+    code: str = Field(..., min_length=1, max_length=20)
+    label: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = None
+    sort_order: int = 0
+
+
+class ShiftReasonUpdate(BaseModel):
+    label: Optional[str] = None
+    description: Optional[str] = None
+    is_active: Optional[bool] = None
+    sort_order: Optional[int] = None
+
+
+@app.get("/api/shift_reasons")
+def list_shift_reasons(
+    ctx: AuthContext = Depends(get_auth_context),
+):
+    """Gibt alle aktiven Schiebe-Gründe zurück (für Frontend)."""
+    with SessionLocal() as db:
+        reasons = db.query(ShiftReason).filter(ShiftReason.is_active == True).order_by(ShiftReason.sort_order).all()  # noqa: E712
+        return {
+            "reasons": [
+                {
+                    "id": r.id,
+                    "code": r.code,
+                    "label": r.label,
+                    "description": r.description,
+                }
+                for r in reasons
+            ]
+        }
+
+
+@app.get("/api/admin/shift_reasons")
+def admin_list_shift_reasons(
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:read")),
+):
+    """Gibt alle Schiebe-Gründe zurück (inkl. inaktiver)."""
+    with SessionLocal() as db:
+        reasons = db.query(ShiftReason).order_by(ShiftReason.sort_order).all()
+        return {
+            "reasons": [
+                {
+                    "id": r.id,
+                    "code": r.code,
+                    "label": r.label,
+                    "description": r.description,
+                    "is_active": r.is_active,
+                    "sort_order": r.sort_order,
+                }
+                for r in reasons
+            ]
+        }
+
+
+@app.post("/api/admin/shift_reasons")
+def create_shift_reason(
+    body: ShiftReasonCreate,
+    request: Request,
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:write")),
+):
+    """Erstellt einen neuen Schiebe-Grund."""
+    with SessionLocal() as db:
+        existing = db.query(ShiftReason).filter(ShiftReason.code == body.code).first()
+        if existing:
+            raise HTTPException(status_code=409, detail=f"Code '{body.code}' existiert bereits")
+        reason = ShiftReason(
+            code=body.code.strip(),
+            label=body.label.strip(),
+            description=body.description,
+            sort_order=body.sort_order,
+            is_active=True,
+        )
+        db.add(reason)
+        db.commit()
+        db.refresh(reason)
+        log_security_event(
+            db, request=request, actor_user_id=ctx.user_id,
+            actor_station_id=ctx.station_id, action="SHIFT_REASON_CREATE",
+            target_type="shift_reason", target_id=str(reason.id), success=True,
+            details={"code": body.code, "label": body.label},
+        )
+        return {"id": reason.id, "code": reason.code}
+
+
+@app.put("/api/admin/shift_reasons/{reason_id}")
+def update_shift_reason(
+    reason_id: int,
+    body: ShiftReasonUpdate,
+    request: Request,
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:write")),
+):
+    """Aktualisiert einen Schiebe-Grund."""
+    with SessionLocal() as db:
+        reason = db.get(ShiftReason, reason_id)
+        if not reason:
+            raise HTTPException(status_code=404, detail="Shift-Grund nicht gefunden")
+        if body.label is not None:
+            reason.label = body.label.strip()
+        if body.description is not None:
+            reason.description = body.description
+        if body.is_active is not None:
+            reason.is_active = body.is_active
+        if body.sort_order is not None:
+            reason.sort_order = body.sort_order
+        db.commit()
+        log_security_event(
+            db, request=request, actor_user_id=ctx.user_id,
+            actor_station_id=ctx.station_id, action="SHIFT_REASON_UPDATE",
+            target_type="shift_reason", target_id=str(reason_id), success=True,
+        )
+        return {"ok": True}
+
+
+@app.delete("/api/admin/shift_reasons/{reason_id}")
+def delete_shift_reason(
+    reason_id: int,
+    request: Request,
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:write")),
+):
+    """Löscht einen Schiebe-Grund."""
+    with SessionLocal() as db:
+        reason = db.get(ShiftReason, reason_id)
+        if not reason:
+            raise HTTPException(status_code=404, detail="Shift-Grund nicht gefunden")
+        db.delete(reason)
+        db.commit()
+        log_security_event(
+            db, request=request, actor_user_id=ctx.user_id,
+            actor_station_id=ctx.station_id, action="SHIFT_REASON_DELETE",
+            target_type="shift_reason", target_id=str(reason_id), success=True,
+        )
+        return {"ok": True}
+

@@ -1,964 +1,550 @@
 /**
  * Datei: frontend/src/AdminPanel.tsx
  *
- * Zweck:
- * - Enthält UI-/Client-Logik dieser Anwendung.
- * - Kommentare wurden ergänzt, um Einstieg und Wartung zu erleichtern.
- *
- * Hinweis:
- * - Kommentare erklären Struktur/Intention; die fachliche Wahrheit kommt aus Backend/API-Verträgen.
+ * Admin-Panel mit Tabs für:
+ * - CSV Import (NEU)
+ * - Schiebe-Gründe (NEU)
+ * - Benutzer
+ * - Rollen
+ * - Regeln
+ * - Audit-Log
  */
 
 import { useEffect, useMemo, useState } from "react";
 
 type AuthState = { stationId: string; userId: string };
 type MetaMe = { user_id: string; station_id: string; roles: string[]; permissions: string[]; break_glass: boolean };
+type Props = { auth: AuthState; authHeaders: (auth: AuthState) => HeadersInit; me: MetaMe | null };
 
-type Props = {
-  auth: AuthState;
-  authHeaders: (auth: AuthState) => HeadersInit;
-  me: MetaMe | null;
-};
-
-type AdminUser = {
-  user_id: string;
-  display_name: string | null;
-  is_active: boolean;
-  created_at: string;
-  roles: { role_id: string; station_id: string }[];
-};
-
-type AdminRole = {
-  role_id: string;
-  description: string | null;
-  permissions: string[];
-  is_system: boolean;
-};
-
-type AdminPermission = {
-  perm_id: string;
-  description: string | null;
-  is_system: boolean;
-};
-
-type RuleDef = {
-  rule_id: string;
-  display_name: string | null;
-  message: string;
-  explanation: string;
-  category: string;
-  severity: "OK" | "WARN" | "CRITICAL";
-  metric: string;
-  operator: string;
-  value_json: string;
-  enabled: boolean;
-  is_system: boolean;
-  updated_at: string | null;
-  updated_by: string | null;
-};
-
-type AuditEvent = {
-  event_id: string;
-  ts: string;
-  actor_user_id: string | null;
-  actor_station_id: string | null;
-  action: string;
-  target_type: string | null;
-  target_id: string | null;
-  success: boolean;
-  message: string | null;
-  details: string | null;
-};
+type AdminUser = { user_id: string; display_name: string | null; is_active: boolean; created_at: string; roles: { role_id: string; station_id: string }[] };
+type AdminRole = { role_id: string; description: string | null; permissions: string[]; is_system: boolean };
+type AdminPermission = { perm_id: string; description: string | null; is_system: boolean };
+type RuleDef = { rule_id: string; display_name: string | null; message: string; explanation: string; category: string; severity: "OK" | "WARN" | "CRITICAL"; metric: string; operator: string; value_json: string; enabled: boolean; is_system: boolean; updated_at: string | null; updated_by: string | null };
+type AuditEvent = { event_id: string; ts: string; actor_user_id: string | null; actor_station_id: string | null; action: string; target_type: string | null; target_id: string | null; success: boolean; message: string | null; details: string | null };
+type ShiftReasonAdmin = { id: number; code: string; label: string; description: string | null; is_active: boolean; sort_order: number };
 
 async function apiJson<T>(path: string, init: RequestInit): Promise<T> {
   const res = await fetch(path, init);
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(text || `HTTP ${res.status}`);
-  }
+  if (!res.ok) { const text = await res.text().catch(() => ""); throw new Error(text || `HTTP ${res.status}`); }
   return (await res.json()) as T;
 }
 
-// Helper: FieldLabel – kapselt eine wiederverwendbare Teilfunktion.
-function FieldLabel({ label, hint }: { label: string; hint?: string }) {
+function SectionCard({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div style={{ display: "grid", gap: 4 }}>
-      <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>{label}</div>
-      {hint ? <div style={{ fontSize: 11, color: "#64748b" }}>{hint}</div> : null}
-    </div>
+    <section style={{ border: "1px solid #e2e8f0", borderRadius: 12, padding: 16, background: "#fff", marginTop: 12 }}>
+      <h3 style={{ marginTop: 0, marginBottom: 12, fontSize: "1rem", color: "#1e293b" }}>{title}</h3>
+      {children}
+    </section>
   );
 }
 
 export function AdminPanel({ auth, authHeaders, me }: Props) {
-// React Memo: berechnet abgeleitete Werte effizient (nur neu bei Dependency-Änderung).
   const canRead = useMemo(() => new Set(me?.permissions ?? []).has("admin:read"), [me]);
   const canWrite = useMemo(() => new Set(me?.permissions ?? []).has("admin:write"), [me]);
 
-  const [tab, setTab] = useState<"users" | "roles" | "rules" | "audit">("users");
+  const [tab, setTab] = useState<"csv" | "shift_reasons" | "users" | "roles" | "rules" | "audit">("csv");
   const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
 
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [roles, setRoles] = useState<AdminRole[]>([]);
   const [permissions, setPermissions] = useState<AdminPermission[]>([]);
   const [rules, setRules] = useState<RuleDef[]>([]);
   const [audit, setAudit] = useState<AuditEvent[]>([]);
-
-  // -------------------------
-  // Loading
-  // -------------------------
+  const [shiftReasons, setShiftReasons] = useState<ShiftReasonAdmin[]>([]);
 
   async function refreshAll() {
     setError(null);
     if (!canRead) return;
-    try {
-      const u = await apiJson<{ users: AdminUser[] }>("/api/admin/users", { method: "GET", headers: authHeaders(auth) });
-      setUsers(u.users);
-    } catch (e: any) {
-      setError(String(e?.message ?? e));
-    }
-    try {
-      const r = await apiJson<{ roles: AdminRole[] }>("/api/admin/roles", { method: "GET", headers: authHeaders(auth) });
-      setRoles(r.roles);
-    } catch {
-      // ignore
-    }
-    try {
-      const p = await apiJson<{ permissions: AdminPermission[] }>("/api/admin/permissions", { method: "GET", headers: authHeaders(auth) });
-      setPermissions(p.permissions);
-    } catch {
-      // ignore
-    }
-    try {
-      const rr = await apiJson<{ rules: RuleDef[] }>("/api/admin/rules", { method: "GET", headers: authHeaders(auth) });
-      setRules(rr.rules);
-    } catch {
-      // ignore
-    }
-    try {
-      const a = await apiJson<{ events: AuditEvent[] }>("/api/admin/audit?limit=200", { method: "GET", headers: authHeaders(auth) });
-      setAudit(a.events);
-    } catch {
-      // audit might be forbidden
-    }
+    try { const u = await apiJson<{ users: AdminUser[] }>("/api/admin/users", { method: "GET", headers: authHeaders(auth) }); setUsers(u.users); } catch {}
+    try { const r = await apiJson<{ roles: AdminRole[] }>("/api/admin/roles", { method: "GET", headers: authHeaders(auth) }); setRoles(r.roles); } catch {}
+    try { const p = await apiJson<{ permissions: AdminPermission[] }>("/api/admin/permissions", { method: "GET", headers: authHeaders(auth) }); setPermissions(p.permissions); } catch {}
+    try { const rr = await apiJson<{ rules: RuleDef[] }>("/api/admin/rules", { method: "GET", headers: authHeaders(auth) }); setRules(rr.rules); } catch {}
+    try { const a = await apiJson<{ events: AuditEvent[] }>("/api/admin/audit?limit=200", { method: "GET", headers: authHeaders(auth) }); setAudit(a.events); } catch {}
+    try { const sr = await apiJson<{ reasons: ShiftReasonAdmin[] }>("/api/admin/shift_reasons", { method: "GET", headers: authHeaders(auth) }); setShiftReasons(sr.reasons); } catch {}
   }
 
-// React Effect: synchronisiert State mit externen Abhängigkeiten (z.B. API, Auth, Selektion).
-  useEffect(() => {
-    refreshAll();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [auth.stationId, auth.userId]);
+  useEffect(() => { refreshAll(); }, [auth.stationId, auth.userId]);
 
-  // -------------------------
-  // Users
-  // -------------------------
-
-  const [createUserId, setCreateUserId] = useState("");
-  const [createDisplayName, setCreateDisplayName] = useState("");
-  const [createInitialRole, setCreateInitialRole] = useState("viewer");
-  const [createInitialStation, setCreateInitialStation] = useState("*");
-
-  async function createUser() {
-    setError(null);
-    try {
-      await apiJson("/api/admin/users", {
-        method: "POST",
-        headers: authHeaders(auth),
-        body: JSON.stringify({
-          user_id: createUserId.trim(),
-          display_name: createDisplayName.trim() || null,
-          is_active: true,
-          roles: [{ role_id: createInitialRole, station_id: createInitialStation || "*" }],
-        }),
-      });
-      setCreateUserId("");
-      setCreateDisplayName("");
-      setCreateInitialRole("viewer");
-      setCreateInitialStation("*");
-      await refreshAll();
-    } catch (e: any) {
-      setError(String(e?.message ?? e));
-    }
-  }
-
-  const [assignUserId, setAssignUserId] = useState("");
-  const [assignRoleId, setAssignRoleId] = useState("viewer");
-  const [assignStationId, setAssignStationId] = useState("*");
-
-  async function assignRole() {
-    setError(null);
-    try {
-      await apiJson(`/api/admin/users/${encodeURIComponent(assignUserId)}/roles`, {
-        method: "POST",
-        headers: authHeaders(auth),
-        body: JSON.stringify({ role_id: assignRoleId, station_id: assignStationId || "*" }),
-      });
-      await refreshAll();
-    } catch (e: any) {
-      setError(String(e?.message ?? e));
-    }
-  }
-
-  async function removeRole(userId: string, roleId: string, stationId: string) {
-    if (!window.confirm(`Rolle entfernen?\n\nUser: ${userId}\nRolle: ${roleId}\nStation: ${stationId}`)) return;
-    setError(null);
-    try {
-      await apiJson(`/api/admin/users/${encodeURIComponent(userId)}/roles/${encodeURIComponent(roleId)}/${encodeURIComponent(stationId)}`, {
-        method: "DELETE",
-        headers: authHeaders(auth),
-      });
-      await refreshAll();
-    } catch (e: any) {
-      setError(String(e?.message ?? e));
-    }
-  }
-
-  async function deleteUser(userId: string) {
-    if (!window.confirm(`User löschen?\n\n${userId}\n\nHinweis: Rollen-Zuweisungen werden mit gelöscht.`)) return;
-    setError(null);
-    try {
-      await apiJson(`/api/admin/users/${encodeURIComponent(userId)}`, { method: "DELETE", headers: authHeaders(auth) });
-      await refreshAll();
-    } catch (e: any) {
-      setError(String(e?.message ?? e));
-    }
-  }
-
-  // -------------------------
-  // Roles & Permissions
-  // -------------------------
-
-  const [createRoleId, setCreateRoleId] = useState("");
-  const [createRoleDesc, setCreateRoleDesc] = useState("");
-  const [selectedRoleId, setSelectedRoleId] = useState<string | null>(null);
-// React Memo: berechnet abgeleitete Werte effizient (nur neu bei Dependency-Änderung).
-  const selectedRole = useMemo(() => roles.find((r) => r.role_id === selectedRoleId) ?? null, [roles, selectedRoleId]);
-  const [roleDescEdit, setRoleDescEdit] = useState("");
-  const [rolePermsEdit, setRolePermsEdit] = useState<Set<string>>(new Set());
-
-// React Effect: synchronisiert State mit externen Abhängigkeiten (z.B. API, Auth, Selektion).
-  useEffect(() => {
-    if (!selectedRole) return;
-    setRoleDescEdit(selectedRole.description ?? "");
-    setRolePermsEdit(new Set(selectedRole.permissions ?? []));
-  }, [selectedRole]);
-
-  async function createRole() {
-    setError(null);
-    try {
-      const rid = createRoleId.trim();
-      if (!rid) return;
-      await apiJson(`/api/admin/roles`, {
-        method: "POST",
-        headers: authHeaders(auth),
-        body: JSON.stringify({ role_id: rid, description: createRoleDesc.trim() || null }),
-      });
-      setCreateRoleId("");
-      setCreateRoleDesc("");
-      await refreshAll();
-      setSelectedRoleId(rid);
-    } catch (e: any) {
-      setError(String(e?.message ?? e));
-    }
-  }
-
-  async function saveRole() {
-    if (!selectedRole) return;
-    if (selectedRole.is_system) {
-      setError("System-Rollen können nicht geändert werden.");
-      return;
-    }
-    setError(null);
-    try {
-      await apiJson(`/api/admin/roles/${encodeURIComponent(selectedRole.role_id)}`, {
-        method: "PUT",
-        headers: authHeaders(auth),
-        body: JSON.stringify({ description: roleDescEdit }),
-      });
-      await apiJson(`/api/admin/roles/${encodeURIComponent(selectedRole.role_id)}/permissions`, {
-        method: "PUT",
-        headers: authHeaders(auth),
-        body: JSON.stringify({ permissions: Array.from(rolePermsEdit.values()).sort() }),
-      });
-      await refreshAll();
-    } catch (e: any) {
-      setError(String(e?.message ?? e));
-    }
-  }
-
-  async function deleteRole(roleId: string) {
-    if (!window.confirm(`Rolle löschen?\n\n${roleId}\n\nHinweis: Zuweisungen und Role->Permission mappings werden gelöscht.`)) return;
-    setError(null);
-    try {
-      await apiJson(`/api/admin/roles/${encodeURIComponent(roleId)}`, { method: "DELETE", headers: authHeaders(auth) });
-      setSelectedRoleId(null);
-      await refreshAll();
-    } catch (e: any) {
-      setError(String(e?.message ?? e));
-    }
-  }
-
-  const [createPermId, setCreatePermId] = useState("");
-  const [createPermDesc, setCreatePermDesc] = useState("");
-  async function createPermission() {
-    setError(null);
-    try {
-      const pid = createPermId.trim();
-      if (!pid) return;
-      await apiJson(`/api/admin/permissions`, {
-        method: "POST",
-        headers: authHeaders(auth),
-        body: JSON.stringify({ perm_id: pid, description: createPermDesc.trim() || null }),
-      });
-      setCreatePermId("");
-      setCreatePermDesc("");
-      await refreshAll();
-    } catch (e: any) {
-      setError(String(e?.message ?? e));
-    }
-  }
-
-  async function deletePermission(permId: string) {
-    if (!window.confirm(`Permission löschen?\n\n${permId}\n\nHinweis: wird aus allen Rollen entfernt.`)) return;
-    setError(null);
-    try {
-      await apiJson(`/api/admin/permissions/${encodeURIComponent(permId)}`, { method: "DELETE", headers: authHeaders(auth) });
-      await refreshAll();
-    } catch (e: any) {
-      setError(String(e?.message ?? e));
-    }
-  }
-
-  // -------------------------
-  // Rules
-  // -------------------------
-
-  const [ruleQuery, setRuleQuery] = useState("");
-// React Memo: berechnet abgeleitete Werte effizient (nur neu bei Dependency-Änderung).
-  const filteredRules = useMemo(() => {
-    const q = ruleQuery.trim().toLowerCase();
-    if (!q) return rules;
-    return rules.filter((r) => (r.rule_id + " " + (r.display_name ?? "") + " " + (r.message ?? "")).toLowerCase().includes(q));
-  }, [rules, ruleQuery]);
-
-  const [selectedRuleId, setSelectedRuleId] = useState<string | null>(null);
-// React Memo: berechnet abgeleitete Werte effizient (nur neu bei Dependency-Änderung).
-  const selectedRule = useMemo(() => rules.find((r) => r.rule_id === selectedRuleId) ?? null, [rules, selectedRuleId]);
-
-  const [ruleEdit, setRuleEdit] = useState<RuleDef | null>(null);
-  const [ruleValueEdit, setRuleValueEdit] = useState<string>("");
-// React Effect: synchronisiert State mit externen Abhängigkeiten (z.B. API, Auth, Selektion).
-  useEffect(() => {
-    if (!selectedRule) {
-      setRuleEdit(null);
-      setRuleValueEdit("");
-      return;
-    }
-    setRuleEdit({ ...selectedRule });
-    setRuleValueEdit(selectedRule.value_json ?? "null");
-  }, [selectedRule]);
-
-// Helper: newRuleDraft – kapselt eine wiederverwendbare Teilfunktion.
-  function newRuleDraft() {
-    const draft: RuleDef = {
-      rule_id: "NEW_RULE_ID",
-      display_name: null,
-      message: "",
-      explanation: "",
-      category: "medical",
-      severity: "WARN",
-      metric: "",
-      operator: "is_true",
-      value_json: "true",
-      enabled: true,
-      is_system: false,
-      updated_at: null,
-      updated_by: null,
-    };
-    setSelectedRuleId(null);
-    setRuleEdit(draft);
-    setRuleValueEdit(draft.value_json);
-  }
-
-  async function saveRule() {
-    if (!ruleEdit) return;
-    if (!canWrite) return;
-    setError(null);
-
-    let parsed: any = null;
-    try {
-      parsed = JSON.parse(ruleValueEdit.trim() || "null");
-    } catch (e: any) {
-      setError(`Value ist kein gültiges JSON: ${String(e?.message ?? e)}`);
-      return;
-    }
-
-    try {
-      const rid = ruleEdit.rule_id.trim();
-      if (!rid) {
-        setError("rule_id fehlt");
-        return;
-      }
-      await apiJson(`/api/admin/rules/${encodeURIComponent(rid)}`, {
-        method: "PUT",
-        headers: authHeaders(auth),
-        body: JSON.stringify({
-          rule_id: rid,
-          display_name: ruleEdit.display_name?.trim() || null,
-          message: ruleEdit.message,
-          explanation: ruleEdit.explanation,
-          category: ruleEdit.category,
-          severity: ruleEdit.severity,
-          metric: ruleEdit.metric,
-          operator: ruleEdit.operator,
-          value: parsed,
-          enabled: !!ruleEdit.enabled,
-        }),
-      });
-      await refreshAll();
-      setSelectedRuleId(rid);
-    } catch (e: any) {
-      setError(String(e?.message ?? e));
-    }
-  }
-
-  async function deleteRule(ruleId: string, isSystem: boolean) {
-    if (isSystem) {
-      setError("System-Regeln können nicht gelöscht werden (nur deaktivieren oder editieren).");
-      return;
-    }
-    if (!window.confirm(`Regel löschen?\n\n${ruleId}`)) return;
-    setError(null);
-    try {
-      await apiJson(`/api/admin/rules/${encodeURIComponent(ruleId)}`, { method: "DELETE", headers: authHeaders(auth) });
-      setSelectedRuleId(null);
-      setRuleEdit(null);
-      await refreshAll();
-    } catch (e: any) {
-      setError(String(e?.message ?? e));
-    }
-  }
-
-  // -------------------------
-  // Render
-  // -------------------------
-
-  if (!canRead) {
-    return (
-      <div style={{ padding: 12 }}>
-        <h2 style={{ marginTop: 0 }}>Admin</h2>
-        <p style={{ color: "#b91c1c" }}>Keine Berechtigung: <code>admin:read</code> fehlt.</p>
-      </div>
-    );
-  }
+  const tabStyle = (t: string) => ({
+    padding: "8px 16px", borderRadius: 8, border: "1px solid #e2e8f0", cursor: "pointer",
+    background: tab === t ? "#3b82f6" : "#fff", color: tab === t ? "#fff" : "#333",
+    fontWeight: tab === t ? 700 : 400, fontSize: 13,
+  });
 
   return (
-    <div style={{ padding: 12 }}>
-      <h2 style={{ marginTop: 0 }}>Admin</h2>
-      <div style={{ fontSize: 13, opacity: 0.8 }}>
-        Eingeloggt als <code>{me?.user_id ?? auth.userId}</code> (Station <code>{me?.station_id ?? auth.stationId}</code>)
+    <div style={{ minHeight: 400 }}>
+      {error && <div style={{ padding: "8px 12px", color: "#b42318", background: "#fef2f2", borderRadius: 8, marginBottom: 8, fontSize: 13 }}>{error}</div>}
+      {success && <div style={{ padding: "8px 12px", color: "#15803d", background: "#f0fdf4", borderRadius: 8, marginBottom: 8, fontSize: 13 }}>{success}</div>}
+
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+        <button style={tabStyle("csv")} onClick={() => setTab("csv")}>📥 CSV Import</button>
+        <button style={tabStyle("shift_reasons")} onClick={() => setTab("shift_reasons")}>🔄 Schiebe-Gründe</button>
+        <button style={tabStyle("users")} onClick={() => setTab("users")}>👤 Benutzer</button>
+        <button style={tabStyle("roles")} onClick={() => setTab("roles")}>🔑 Rollen</button>
+        <button style={tabStyle("rules")} onClick={() => setTab("rules")}>📏 Regeln</button>
+        <button style={tabStyle("audit")} onClick={() => setTab("audit")}>📋 Audit</button>
       </div>
 
-      {error ? <p style={{ color: "#b91c1c" }}>Fehler: {error}</p> : null}
+      {/* CSV IMPORT TAB */}
+      {tab === "csv" && <CSVImportTab auth={auth} authHeaders={authHeaders} canWrite={canWrite} onError={setError} onSuccess={(msg) => { setSuccess(msg); setTimeout(() => setSuccess(null), 5000); }} />}
 
-      <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
-        {(
-          [
-            { id: "users", label: "Users" },
-            { id: "roles", label: "Rollen & Permissions" },
-            { id: "rules", label: "Rules" },
-            { id: "audit", label: "Audit" },
-          ] as const
-        ).map((t) => (
-          <button
-            key={t.id}
-            onClick={() => setTab(t.id)}
-            style={{
-              padding: "6px 10px",
-              borderRadius: 10,
-              border: "1px solid #cbd5e1",
-              background: tab === t.id ? "#eef6ff" : "#fff",
-              cursor: "pointer",
-              fontWeight: tab === t.id ? 700 : 600,
-            }}
-          >
-            {t.label}
-          </button>
-        ))}
-        <button
-          onClick={refreshAll}
-          style={{
-            marginLeft: "auto",
-            padding: "6px 10px",
-            borderRadius: 10,
-            border: "1px solid #cbd5e1",
-            background: "#fff",
-            cursor: "pointer",
-            fontWeight: 600,
-          }}
-        >
-          Refresh
-        </button>
-      </div>
+      {/* SHIFT REASONS TAB */}
+      {tab === "shift_reasons" && <ShiftReasonsTab reasons={shiftReasons} auth={auth} authHeaders={authHeaders} canWrite={canWrite} onRefresh={refreshAll} onError={setError} />}
 
-      {/* USERS */}
-      {tab === "users" && (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 12, marginTop: 12 }}>
-          <section style={{ border: "1px solid #ddd", borderRadius: 12, padding: 12, background: "#fff" }}>
-            <h3 style={{ marginTop: 0 }}>User anlegen</h3>
-            {!canWrite ? <div style={{ color: "#64748b", fontSize: 12 }}>Nur Read: <code>admin:write</code> fehlt.</div> : null}
+      {/* USERS TAB */}
+      {tab === "users" && <UsersTab users={users} roles={roles} auth={auth} authHeaders={authHeaders} canWrite={canWrite} onRefresh={refreshAll} onError={setError} />}
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr auto", gap: 10, alignItems: "end" }}>
-              <div style={{ display: "grid", gap: 6 }}>
-                <FieldLabel label="User-ID" hint="stabiler Identifier (z.B. AD-Login)" />
-                <input value={createUserId} onChange={(e) => setCreateUserId(e.target.value)} placeholder="demo2" style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc" }} />
-              </div>
-              <div style={{ display: "grid", gap: 6 }}>
-                <FieldLabel label="Display Name" hint="optional" />
-                <input value={createDisplayName} onChange={(e) => setCreateDisplayName(e.target.value)} placeholder="Max Muster" style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc" }} />
-              </div>
-              <div style={{ display: "grid", gap: 6 }}>
-                <FieldLabel label="Initiale Rolle" hint="wird direkt zugewiesen" />
-                <select value={createInitialRole} onChange={(e) => setCreateInitialRole(e.target.value)} style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc", background: "#fff" }}>
-                  {roles.map((r) => (
-                    <option key={r.role_id} value={r.role_id}>
-                      {r.role_id}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div style={{ display: "grid", gap: 6 }}>
-                <FieldLabel label="Station" hint="* = alle Stationen" />
-                <input value={createInitialStation} onChange={(e) => setCreateInitialStation(e.target.value)} placeholder="*" style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc" }} />
-              </div>
-              <button onClick={createUser} disabled={!canWrite || !createUserId.trim()} style={{ padding: "8px 12px", borderRadius: 10, border: "1px solid #cbd5e1", background: canWrite ? "#eef6ff" : "#f1f5f9", cursor: canWrite ? "pointer" : "not-allowed", fontWeight: 700 }}>
-                Create
-              </button>
-            </div>
-          </section>
+      {/* ROLES TAB */}
+      {tab === "roles" && <RolesTab roles={roles} permissions={permissions} auth={auth} authHeaders={authHeaders} canWrite={canWrite} onRefresh={refreshAll} onError={setError} />}
 
-          <section style={{ border: "1px solid #ddd", borderRadius: 12, padding: 12, background: "#fff" }}>
-            <h3 style={{ marginTop: 0 }}>Rolle zuweisen</h3>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr auto", gap: 10, alignItems: "end" }}>
-              <div style={{ display: "grid", gap: 6 }}>
-                <FieldLabel label="User" hint="bestehender User" />
-                <select value={assignUserId} onChange={(e) => setAssignUserId(e.target.value)} style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc", background: "#fff" }}>
-                  <option value="">— wählen —</option>
-                  {users.map((u) => (
-                    <option key={u.user_id} value={u.user_id}>
-                      {u.user_id}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div style={{ display: "grid", gap: 6 }}>
-                <FieldLabel label="Rolle" hint="role_id" />
-                <select value={assignRoleId} onChange={(e) => setAssignRoleId(e.target.value)} style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc", background: "#fff" }}>
-                  {roles.map((r) => (
-                    <option key={r.role_id} value={r.role_id}>
-                      {r.role_id}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div style={{ display: "grid", gap: 6 }}>
-                <FieldLabel label="Station" hint="* oder konkreter Code" />
-                <input value={assignStationId} onChange={(e) => setAssignStationId(e.target.value)} placeholder="*" style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc" }} />
-              </div>
-              <button onClick={assignRole} disabled={!canWrite || !assignUserId.trim() || !assignRoleId.trim()} style={{ padding: "8px 12px", borderRadius: 10, border: "1px solid #cbd5e1", background: canWrite ? "#eef6ff" : "#f1f5f9", cursor: canWrite ? "pointer" : "not-allowed", fontWeight: 700 }}>
-                Assign
-              </button>
-            </div>
-          </section>
+      {/* RULES TAB */}
+      {tab === "rules" && <RulesTab rules={rules} auth={auth} authHeaders={authHeaders} canWrite={canWrite} onRefresh={refreshAll} onError={setError} />}
 
-          <section style={{ border: "1px solid #ddd", borderRadius: 12, padding: 12, background: "#fff" }}>
-            <h3 style={{ marginTop: 0 }}>Users</h3>
-            <div style={{ maxHeight: 460, overflow: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                <thead>
-                  <tr>
-                    <th style={{ textAlign: "left", borderBottom: "1px solid #eee", padding: "6px 4px" }}>User</th>
-                    <th style={{ textAlign: "left", borderBottom: "1px solid #eee", padding: "6px 4px" }}>Rollen</th>
-                    <th style={{ textAlign: "left", borderBottom: "1px solid #eee", padding: "6px 4px" }}>Aktionen</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {users.map((u) => (
-                    <tr key={u.user_id}>
-                      <td style={{ verticalAlign: "top", padding: "6px 4px", borderBottom: "1px solid #f2f2f2" }}>
-                        <div>
-                          <code>{u.user_id}</code> {u.display_name ? `· ${u.display_name}` : ""}
-                        </div>
-                        <div style={{ opacity: 0.7 }}>{u.is_active ? "active" : "disabled"}</div>
-                      </td>
-                      <td style={{ padding: "6px 4px", borderBottom: "1px solid #f2f2f2" }}>
-                        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                          {u.roles.map((r) => (
-                            <span key={`${r.role_id}:${r.station_id}`} style={{ border: "1px solid #ddd", borderRadius: 999, padding: "2px 8px" }}>
-                              <code>{r.role_id}</code> <span style={{ opacity: 0.7 }}>({r.station_id})</span>
-                              {canWrite ? (
-                                <button style={{ marginLeft: 6 }} onClick={() => removeRole(u.user_id, r.role_id, r.station_id)}>
-                                  ×
-                                </button>
-                              ) : null}
-                            </span>
-                          ))}
-                        </div>
-                      </td>
-                      <td style={{ padding: "6px 4px", borderBottom: "1px solid #f2f2f2" }}>
-                        {canWrite ? (
-                          <button onClick={() => deleteUser(u.user_id)} style={{ padding: "6px 10px", borderRadius: 10, border: "1px solid #fecaca", background: "#fff1f2", cursor: "pointer", fontWeight: 700 }}>
-                            Delete
-                          </button>
-                        ) : (
-                          <span style={{ color: "#64748b" }}>—</span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        </div>
-      )}
-
-      {/* ROLES */}
-      {tab === "roles" && (
-        <div style={{ display: "grid", gridTemplateColumns: "420px 1fr", gap: 12, marginTop: 12 }}>
-          <section style={{ border: "1px solid #ddd", borderRadius: 12, padding: 12, background: "#fff" }}>
-            <h3 style={{ marginTop: 0 }}>Rollen</h3>
-            <div style={{ display: "grid", gap: 10 }}>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 8, alignItems: "end" }}>
-                <div style={{ display: "grid", gap: 6 }}>
-                  <FieldLabel label="Neue Rolle" hint="role_id (z.B. reporting_viewer)" />
-                  <input value={createRoleId} onChange={(e) => setCreateRoleId(e.target.value)} placeholder="custom_role" style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc" }} />
-                </div>
-                <div style={{ display: "grid", gap: 6 }}>
-                  <FieldLabel label="Beschreibung" hint="optional" />
-                  <input value={createRoleDesc} onChange={(e) => setCreateRoleDesc(e.target.value)} placeholder="..." style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc" }} />
-                </div>
-                <button onClick={createRole} disabled={!canWrite || !createRoleId.trim()} style={{ padding: "8px 12px", borderRadius: 10, border: "1px solid #cbd5e1", background: canWrite ? "#eef6ff" : "#f1f5f9", cursor: canWrite ? "pointer" : "not-allowed", fontWeight: 700 }}>
-                  Create
-                </button>
-              </div>
-
-              <div style={{ maxHeight: 480, overflow: "auto", borderTop: "1px solid #f1f5f9", paddingTop: 10 }}>
-                {roles.map((r) => (
-                  <div
-                    key={r.role_id}
-                    onClick={() => setSelectedRoleId(r.role_id)}
-                    style={{
-                      padding: "8px 10px",
-                      borderRadius: 10,
-                      border: "1px solid #e2e8f0",
-                      cursor: "pointer",
-                      background: selectedRoleId === r.role_id ? "#eef6ff" : "#fff",
-                      marginBottom: 8,
-                    }}
-                  >
-                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                      <code>{r.role_id}</code>
-                      {r.is_system ? <span style={{ fontSize: 11, color: "#64748b" }}>system</span> : <span style={{ fontSize: 11, color: "#64748b" }}>custom</span>}
-                    </div>
-                    {r.description ? <div style={{ fontSize: 12, color: "#475569" }}>{r.description}</div> : null}
-                    <div style={{ fontSize: 11, color: "#64748b" }}>{(r.permissions ?? []).length} permissions</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </section>
-
-          <section style={{ border: "1px solid #ddd", borderRadius: 12, padding: 12, background: "#fff" }}>
-            <h3 style={{ marginTop: 0 }}>Role Editor</h3>
-            {!selectedRole ? (
-              <div style={{ color: "#64748b" }}>Wähle links eine Rolle aus.</div>
-            ) : (
-              <div style={{ display: "grid", gap: 12 }}>
-                {selectedRole.is_system ? (
-                  <div style={{ padding: 10, borderRadius: 10, border: "1px solid #e2e8f0", background: "#f8fafc", color: "#64748b", fontSize: 12 }}>
-                    System-Rolle: Permissions können hier nicht geändert werden (Schutz vor Startup-Seed-Überschreibung).
-                  </div>
-                ) : null}
-
-                <div style={{ display: "grid", gap: 6, maxWidth: 700 }}>
-                  <FieldLabel label="Beschreibung" />
-                  <input value={roleDescEdit} onChange={(e) => setRoleDescEdit(e.target.value)} disabled={!canWrite || selectedRole.is_system} style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc" }} />
-                </div>
-
-                <div style={{ display: "grid", gap: 8 }}>
-                  <FieldLabel label="Permissions" hint="Nur für custom Rollen editierbar" />
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(260px, 1fr))", gap: 8 }}>
-                    {permissions.map((p) => {
-                      const checked = rolePermsEdit.has(p.perm_id);
-                      const disabled = !canWrite || selectedRole.is_system;
-                      return (
-                        <label key={p.perm_id} style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: 8, border: "1px solid #e2e8f0", borderRadius: 10 }}>
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            disabled={disabled}
-                            onChange={(e) => {
-                              const next = new Set(rolePermsEdit);
-                              if (e.target.checked) next.add(p.perm_id);
-                              else next.delete(p.perm_id);
-                              setRolePermsEdit(next);
-                            }}
-                            style={{ marginTop: 3 }}
-                          />
-                          <div style={{ display: "grid", gap: 2 }}>
-                            <code>{p.perm_id}</code>
-                            <div style={{ fontSize: 11, color: "#64748b" }}>{p.description ?? "—"}</div>
-                            {p.is_system ? <div style={{ fontSize: 11, color: "#94a3b8" }}>system permission</div> : null}
-                          </div>
-                        </label>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                  <button onClick={saveRole} disabled={!canWrite || selectedRole.is_system} style={{ padding: "8px 12px", borderRadius: 10, border: "1px solid #cbd5e1", background: canWrite ? "#eef6ff" : "#f1f5f9", cursor: canWrite ? "pointer" : "not-allowed", fontWeight: 800 }}>
-                    Save
-                  </button>
-                  {!selectedRole.is_system ? (
-                    <button onClick={() => deleteRole(selectedRole.role_id)} disabled={!canWrite} style={{ padding: "8px 12px", borderRadius: 10, border: "1px solid #fecaca", background: "#fff1f2", cursor: canWrite ? "pointer" : "not-allowed", fontWeight: 800 }}>
-                      Delete Role
-                    </button>
-                  ) : null}
-                </div>
-
-                <hr style={{ border: "none", borderTop: "1px solid #e2e8f0" }} />
-
-                <h4 style={{ margin: 0 }}>Permissions anlegen</h4>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr auto", gap: 8, alignItems: "end", maxWidth: 820 }}>
-                  <div style={{ display: "grid", gap: 6 }}>
-                    <FieldLabel label="Permission ID" hint="z.B. reports:view" />
-                    <input value={createPermId} onChange={(e) => setCreatePermId(e.target.value)} placeholder="feature_x:use" style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc" }} />
-                  </div>
-                  <div style={{ display: "grid", gap: 6 }}>
-                    <FieldLabel label="Beschreibung" hint="optional" />
-                    <input value={createPermDesc} onChange={(e) => setCreatePermDesc(e.target.value)} placeholder="..." style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc" }} />
-                  </div>
-                  <button onClick={createPermission} disabled={!canWrite || !createPermId.trim()} style={{ padding: "8px 12px", borderRadius: 10, border: "1px solid #cbd5e1", background: canWrite ? "#eef6ff" : "#f1f5f9", cursor: canWrite ? "pointer" : "not-allowed", fontWeight: 800 }}>
-                    Create
-                  </button>
-                </div>
-
-                <div style={{ marginTop: 10, maxHeight: 280, overflow: "auto" }}>
-                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-                    <thead>
-                      <tr>
-                        <th style={{ textAlign: "left", borderBottom: "1px solid #eee", padding: "6px 4px" }}>perm_id</th>
-                        <th style={{ textAlign: "left", borderBottom: "1px solid #eee", padding: "6px 4px" }}>description</th>
-                        <th style={{ textAlign: "left", borderBottom: "1px solid #eee", padding: "6px 4px" }}>actions</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {permissions.map((p) => (
-                        <tr key={p.perm_id}>
-                          <td style={{ padding: "6px 4px", borderBottom: "1px solid #f2f2f2" }}>
-                            <code>{p.perm_id}</code>
-                            {p.is_system ? <span style={{ marginLeft: 8, fontSize: 11, color: "#94a3b8" }}>system</span> : null}
-                          </td>
-                          <td style={{ padding: "6px 4px", borderBottom: "1px solid #f2f2f2" }}>{p.description ?? "—"}</td>
-                          <td style={{ padding: "6px 4px", borderBottom: "1px solid #f2f2f2" }}>
-                            {!p.is_system && canWrite ? (
-                              <button onClick={() => deletePermission(p.perm_id)} style={{ padding: "6px 10px", borderRadius: 10, border: "1px solid #fecaca", background: "#fff1f2", cursor: "pointer", fontWeight: 700 }}>
-                                Delete
-                              </button>
-                            ) : (
-                              <span style={{ color: "#64748b" }}>—</span>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-          </section>
-        </div>
-      )}
-
-      {/* RULES */}
-      {tab === "rules" && (
-        <div style={{ display: "grid", gridTemplateColumns: "420px 1fr", gap: 12, marginTop: 12 }}>
-          <section style={{ border: "1px solid #ddd", borderRadius: 12, padding: 12, background: "#fff" }}>
-            <h3 style={{ marginTop: 0 }}>Rules</h3>
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <input value={ruleQuery} onChange={(e) => setRuleQuery(e.target.value)} placeholder="Suche rule_id / Titel ..." style={{ flex: 1, padding: 8, borderRadius: 10, border: "1px solid #ccc" }} />
-              {canWrite ? (
-                <button onClick={newRuleDraft} style={{ padding: "8px 10px", borderRadius: 10, border: "1px solid #cbd5e1", background: "#eef6ff", cursor: "pointer", fontWeight: 800 }}>
-                  New
-                </button>
-              ) : null}
-            </div>
-
-            <div style={{ marginTop: 10, maxHeight: 520, overflow: "auto" }}>
-              {filteredRules.map((r) => (
-                <div
-                  key={r.rule_id}
-                  onClick={() => setSelectedRuleId(r.rule_id)}
-                  style={{
-                    padding: "8px 10px",
-                    borderRadius: 10,
-                    border: "1px solid #e2e8f0",
-                    cursor: "pointer",
-                    background: selectedRuleId === r.rule_id ? "#eef6ff" : "#fff",
-                    marginBottom: 8,
-                  }}
-                >
-                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                    <code>{r.rule_id}</code>
-                    <span style={{ fontSize: 11, color: r.enabled ? "#15803d" : "#b91c1c" }}>{r.enabled ? "enabled" : "disabled"}</span>
-                  </div>
-                  <div style={{ fontSize: 12, color: "#475569" }}>{r.display_name ?? r.message}</div>
-                  <div style={{ fontSize: 11, color: "#64748b" }}>{r.category} · {r.severity}</div>
-                </div>
-              ))}
-            </div>
-          </section>
-
-          <section style={{ border: "1px solid #ddd", borderRadius: 12, padding: 12, background: "#fff" }}>
-            <h3 style={{ marginTop: 0 }}>Rule Editor</h3>
-            {!ruleEdit ? (
-              <div style={{ color: "#64748b" }}>Wähle links eine Regel aus oder klicke „New“.</div>
-            ) : (
-              <div style={{ display: "grid", gap: 12, maxWidth: 900 }}>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                  <div style={{ display: "grid", gap: 6 }}>
-                    <FieldLabel label="rule_id" hint="stabiler Schlüssel (UI+Engine)" />
-                    <input value={ruleEdit.rule_id} onChange={(e) => setRuleEdit({ ...ruleEdit, rule_id: e.target.value })} disabled={!canWrite || (selectedRule?.is_system ?? false)} style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc" }} />
-                    {(selectedRule?.is_system ?? false) ? <div style={{ fontSize: 11, color: "#94a3b8" }}>System-Regel: rule_id nicht änderbar</div> : null}
-                  </div>
-                  <div style={{ display: "grid", gap: 6 }}>
-                    <FieldLabel label="enabled" hint="deaktiviert unterdrückt die Regel" />
-                    <label style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                      <input type="checkbox" checked={!!ruleEdit.enabled} onChange={(e) => setRuleEdit({ ...ruleEdit, enabled: e.target.checked })} disabled={!canWrite} />
-                      <span style={{ color: ruleEdit.enabled ? "#15803d" : "#b91c1c", fontWeight: 700 }}>{ruleEdit.enabled ? "enabled" : "disabled"}</span>
-                    </label>
-                  </div>
-                </div>
-
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                  <div style={{ display: "grid", gap: 6 }}>
-                    <FieldLabel label="display_name" hint="Titel im UI (Fallback: message)" />
-                    <input value={ruleEdit.display_name ?? ""} onChange={(e) => setRuleEdit({ ...ruleEdit, display_name: e.target.value || null })} disabled={!canWrite} style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc" }} />
-                  </div>
-                  <div style={{ display: "grid", gap: 6 }}>
-                    <FieldLabel label="category" hint="completeness / medical (frei)" />
-                    <input value={ruleEdit.category} onChange={(e) => setRuleEdit({ ...ruleEdit, category: e.target.value })} disabled={!canWrite} style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc" }} />
-                  </div>
-                </div>
-
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                  <div style={{ display: "grid", gap: 6 }}>
-                    <FieldLabel label="severity" hint="WARN / CRITICAL" />
-                    <select value={ruleEdit.severity} onChange={(e) => setRuleEdit({ ...ruleEdit, severity: e.target.value as RuleDef["severity"] })} disabled={!canWrite} style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc", background: "#fff" }}>
-                      <option value="WARN">WARN</option>
-                      <option value="CRITICAL">CRITICAL</option>
-                      <option value="OK">OK</option>
-                    </select>
-                  </div>
-                  <div style={{ display: "grid", gap: 6 }}>
-                    <FieldLabel label="operator" hint="is_true / is_null / > / >= ..." />
-                    <select value={ruleEdit.operator} onChange={(e) => setRuleEdit({ ...ruleEdit, operator: e.target.value })} disabled={!canWrite} style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc", background: "#fff" }}>
-                      <option value="is_true">is_true</option>
-                      <option value="is_false">is_false</option>
-                      <option value="is_null">is_null</option>
-                      <option value=">">&gt;</option>
-                      <option value=">=">&gt;=</option>
-                    </select>
-                  </div>
-                </div>
-
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                  <div style={{ display: "grid", gap: 6 }}>
-                    <FieldLabel label="metric" hint="derived metric key (Backend)" />
-                    <input value={ruleEdit.metric} onChange={(e) => setRuleEdit({ ...ruleEdit, metric: e.target.value })} disabled={!canWrite} style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc" }} />
-                  </div>
-                  <div style={{ display: "grid", gap: 6 }}>
-                    <FieldLabel label="value (JSON)" hint={'Beispiele: true, 5, "abc", null'} />
-                    <input value={ruleValueEdit} onChange={(e) => setRuleValueEdit(e.target.value)} disabled={!canWrite} style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc", fontFamily: "monospace" }} />
-                  </div>
-                </div>
-
-                <div style={{ display: "grid", gap: 6 }}>
-                  <FieldLabel label="message" hint="Kurztext (Fallback wenn display_name leer)" />
-                  <input value={ruleEdit.message} onChange={(e) => setRuleEdit({ ...ruleEdit, message: e.target.value })} disabled={!canWrite} style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc" }} />
-                </div>
-
-                <div style={{ display: "grid", gap: 6 }}>
-                  <FieldLabel label="explanation" hint="Langtext" />
-                  <textarea value={ruleEdit.explanation} onChange={(e) => setRuleEdit({ ...ruleEdit, explanation: e.target.value })} disabled={!canWrite} rows={4} style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc" }} />
-                </div>
-
-                <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                  <button onClick={saveRule} disabled={!canWrite} style={{ padding: "8px 12px", borderRadius: 10, border: "1px solid #cbd5e1", background: canWrite ? "#eef6ff" : "#f1f5f9", cursor: canWrite ? "pointer" : "not-allowed", fontWeight: 800 }}>
-                    Save
-                  </button>
-                  {selectedRule ? (
-                    <button onClick={() => deleteRule(selectedRule.rule_id, selectedRule.is_system)} disabled={!canWrite} style={{ padding: "8px 12px", borderRadius: 10, border: "1px solid #fecaca", background: "#fff1f2", cursor: canWrite ? "pointer" : "not-allowed", fontWeight: 800 }}>
-                      Delete
-                    </button>
-                  ) : null}
-                  {ruleEdit.updated_at ? (
-                    <div style={{ marginLeft: "auto", fontSize: 12, color: "#64748b" }}>
-                      last update: {ruleEdit.updated_at} by <code>{ruleEdit.updated_by ?? "—"}</code>
-                    </div>
-                  ) : null}
-                </div>
-              </div>
-            )}
-          </section>
-        </div>
-      )}
-
-      {/* AUDIT */}
+      {/* AUDIT TAB */}
       {tab === "audit" && (
-        <section style={{ border: "1px solid #ddd", borderRadius: 12, padding: 12, background: "#fff", marginTop: 12 }}>
-          <h3 style={{ marginTop: 0 }}>Audit</h3>
-          <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>
-            Zeigt die letzten Events. Falls hier nichts angezeigt wird, fehlt wahrscheinlich <code>audit:read</code>.
-          </div>
-
-          <div style={{ maxHeight: 520, overflow: "auto" }}>
+        <SectionCard title="Audit-Log">
+          <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>Letzte Aktionen. Erfordert <code>audit:read</code>.</div>
+          <div style={{ maxHeight: 500, overflow: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
               <thead>
                 <tr>
-                  <th style={{ textAlign: "left", borderBottom: "1px solid #eee", padding: "6px 4px" }}>ts</th>
-                  <th style={{ textAlign: "left", borderBottom: "1px solid #eee", padding: "6px 4px" }}>action</th>
-                  <th style={{ textAlign: "left", borderBottom: "1px solid #eee", padding: "6px 4px" }}>actor</th>
-                  <th style={{ textAlign: "left", borderBottom: "1px solid #eee", padding: "6px 4px" }}>target</th>
-                  <th style={{ textAlign: "left", borderBottom: "1px solid #eee", padding: "6px 4px" }}>ok</th>
+                  {["Zeitpunkt", "Aktion", "Akteur", "Ziel", "OK"].map(h => (
+                    <th key={h} style={{ textAlign: "left", borderBottom: "2px solid #e2e8f0", padding: "6px 4px", color: "#64748b" }}>{h}</th>
+                  ))}
                 </tr>
               </thead>
               <tbody>
                 {audit.map((e) => (
                   <tr key={e.event_id}>
-                    <td style={{ padding: "6px 4px", borderBottom: "1px solid #f2f2f2", whiteSpace: "nowrap" }}>{e.ts}</td>
-                    <td style={{ padding: "6px 4px", borderBottom: "1px solid #f2f2f2" }}>
-                      <code>{e.action}</code>
-                      {e.message ? <div style={{ opacity: 0.7 }}>{e.message}</div> : null}
-                      {e.details ? <div style={{ opacity: 0.7, fontFamily: "monospace" }}>{e.details}</div> : null}
-                    </td>
-                    <td style={{ padding: "6px 4px", borderBottom: "1px solid #f2f2f2" }}>
-                      <code>{e.actor_user_id ?? "—"}</code>
-                      <div style={{ opacity: 0.7 }}>{e.actor_station_id ?? "—"}</div>
-                    </td>
-                    <td style={{ padding: "6px 4px", borderBottom: "1px solid #f2f2f2" }}>
-                      <div style={{ opacity: 0.8 }}>{e.target_type ?? "—"}</div>
-                      <div style={{ opacity: 0.8 }}>{e.target_id ?? "—"}</div>
-                    </td>
+                    <td style={{ padding: "6px 4px", borderBottom: "1px solid #f2f2f2", whiteSpace: "nowrap" }}>{e.ts?.substring(0, 19)}</td>
+                    <td style={{ padding: "6px 4px", borderBottom: "1px solid #f2f2f2" }}><code>{e.action}</code></td>
+                    <td style={{ padding: "6px 4px", borderBottom: "1px solid #f2f2f2" }}>{e.actor_user_id ?? "—"}</td>
+                    <td style={{ padding: "6px 4px", borderBottom: "1px solid #f2f2f2" }}>{e.target_type ?? ""} {e.target_id ?? ""}</td>
                     <td style={{ padding: "6px 4px", borderBottom: "1px solid #f2f2f2" }}>{e.success ? "✓" : "✗"}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-        </section>
+        </SectionCard>
       )}
+    </div>
+  );
+}
+
+// ============================================================
+// CSV Import Tab
+// ============================================================
+function CSVImportTab({ auth, authHeaders, canWrite, onError, onSuccess }: {
+  auth: AuthState; authHeaders: (a: AuthState) => HeadersInit; canWrite: boolean;
+  onError: (msg: string) => void; onSuccess: (msg: string) => void;
+}) {
+  const [file, setFile] = useState<File | null>(null);
+  const [stationFilter, setStationFilter] = useState("");
+  const [overwrite, setOverwrite] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [result, setResult] = useState<any>(null);
+  const [caseCount, setCaseCount] = useState<any>(null);
+
+  useEffect(() => {
+    fetch("/api/admin/cases/count", { headers: authHeaders(auth) })
+      .then(r => r.json()).then(setCaseCount).catch(() => {});
+  }, [result]);
+
+  async function handleUpload() {
+    if (!file) return;
+    setUploading(true);
+    setResult(null);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      if (stationFilter.trim()) formData.append("station_id", stationFilter.trim());
+      formData.append("overwrite", String(overwrite));
+
+      const h = authHeaders(auth) as Record<string, string>;
+      delete h["Content-Type"]; // Let browser set multipart boundary
+
+      const res = await fetch("/api/admin/csv/upload", {
+        method: "POST", headers: h, body: formData,
+      });
+      const data = await res.json();
+      setResult(data);
+      if (data.success) onSuccess(`Import erfolgreich: ${data.imported_rows} Fälle importiert`);
+      else onError(`Import teilweise fehlgeschlagen: ${data.failed_rows} Fehler`);
+    } catch (e: any) {
+      onError(e?.message ?? String(e));
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  async function handleDeleteAll() {
+    if (!window.confirm("ACHTUNG: Alle importierten Fälle werden gelöscht!\n\nDiese Aktion kann nicht rückgängig gemacht werden.\n\nFortfahren?")) return;
+    try {
+      const h = authHeaders(auth) as Record<string, string>;
+      await fetch("/api/admin/cases/all", { method: "DELETE", headers: h });
+      onSuccess("Alle Fälle gelöscht");
+      setResult(null);
+      setCaseCount(null);
+    } catch (e: any) { onError(e?.message ?? String(e)); }
+  }
+
+  return (
+    <SectionCard title="CSV / Excel Import">
+      <div style={{ display: "grid", gap: 16 }}>
+        {/* Case count */}
+        {caseCount && (
+          <div style={{ padding: 12, background: "#f8fafc", borderRadius: 8, border: "1px solid #e2e8f0" }}>
+            <strong>Aktuell in DB:</strong> {caseCount.total} Fälle
+            {caseCount.by_station && Object.keys(caseCount.by_station).length > 0 && (
+              <span style={{ marginLeft: 12, color: "#64748b" }}>
+                ({Object.entries(caseCount.by_station).map(([k, v]) => `${k}: ${v}`).join(", ")})
+              </span>
+            )}
+          </div>
+        )}
+
+        {/* Upload form */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <div>
+            <label style={{ display: "block", fontSize: 12, fontWeight: 700, marginBottom: 4, color: "#334155" }}>Datei (.csv / .xlsx)</label>
+            <input type="file" accept=".csv,.xlsx,.xls" onChange={(e) => setFile(e.target.files?.[0] ?? null)} style={{ padding: 8, border: "1px solid #ccc", borderRadius: 8, width: "100%", boxSizing: "border-box" }} />
+          </div>
+          <div>
+            <label style={{ display: "block", fontSize: 12, fontWeight: 700, marginBottom: 4, color: "#334155" }}>Station (optional, überschreibt Spalte)</label>
+            <input placeholder="z.B. A1" value={stationFilter} onChange={(e) => setStationFilter(e.target.value)} style={{ padding: 8, border: "1px solid #ccc", borderRadius: 8, width: "100%", boxSizing: "border-box" }} />
+          </div>
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
+            <input type="checkbox" checked={overwrite} onChange={(e) => setOverwrite(e.target.checked)} />
+            Bestehende Fälle überschreiben
+          </label>
+          <button disabled={!canWrite || !file || uploading} onClick={handleUpload} style={{ padding: "8px 16px", borderRadius: 8, border: "1px solid #3b82f6", background: "#3b82f6", color: "#fff", fontWeight: 700, cursor: canWrite && file ? "pointer" : "not-allowed", opacity: canWrite && file ? 1 : 0.5 }}>
+            {uploading ? "Importiert..." : "📥 Importieren"}
+          </button>
+          <a href="/api/admin/csv/sample" download="sample_cases.csv" style={{ fontSize: 13, color: "#3b82f6" }}>
+            Beispiel-CSV herunterladen
+          </a>
+        </div>
+
+        {/* Result */}
+        {result && (
+          <div style={{ padding: 12, borderRadius: 8, border: "1px solid #e2e8f0", background: result.success ? "#f0fdf4" : "#fef2f2" }}>
+            <div><strong>Ergebnis:</strong> {result.success ? "✓ Erfolgreich" : "⚠ Fehler"}</div>
+            <div style={{ fontSize: 13, marginTop: 4 }}>
+              Gesamt: {result.total_rows} · Importiert: {result.imported_rows} · Übersprungen: {result.skipped_rows ?? 0} · Fehler: {result.failed_rows}
+            </div>
+            {result.errors?.length > 0 && (
+              <details style={{ marginTop: 8 }}>
+                <summary style={{ cursor: "pointer", fontSize: 13, color: "#b42318" }}>Fehlerdetails ({result.errors.length})</summary>
+                <div style={{ maxHeight: 200, overflow: "auto", fontSize: 12, marginTop: 4 }}>
+                  {result.errors.map((e: any, i: number) => (
+                    <div key={i} style={{ padding: "4px 0", borderBottom: "1px solid #f2f2f2" }}>
+                      Zeile {e.row}: {e.error} {e.case_id ? `(${e.case_id})` : ""}
+                    </div>
+                  ))}
+                </div>
+              </details>
+            )}
+          </div>
+        )}
+
+        {/* Danger zone */}
+        <div style={{ borderTop: "1px solid #fecaca", paddingTop: 12 }}>
+          <button onClick={handleDeleteAll} disabled={!canWrite} style={{ padding: "6px 12px", borderRadius: 8, border: "1px solid #fecaca", background: "#fff1f2", color: "#b42318", fontWeight: 700, cursor: canWrite ? "pointer" : "not-allowed", fontSize: 12 }}>
+            ⚠ Alle Fälle löschen
+          </button>
+        </div>
+      </div>
+    </SectionCard>
+  );
+}
+
+// ============================================================
+// ShiftReasons Tab
+// ============================================================
+function ShiftReasonsTab({ reasons, auth, authHeaders, canWrite, onRefresh, onError }: {
+  reasons: ShiftReasonAdmin[]; auth: AuthState; authHeaders: (a: AuthState) => HeadersInit;
+  canWrite: boolean; onRefresh: () => void; onError: (msg: string) => void;
+}) {
+  const [newCode, setNewCode] = useState("");
+  const [newLabel, setNewLabel] = useState("");
+  const [newDesc, setNewDesc] = useState("");
+
+  async function addReason() {
+    if (!newCode.trim() || !newLabel.trim()) return;
+    try {
+      await apiJson("/api/admin/shift_reasons", {
+        method: "POST", headers: authHeaders(auth),
+        body: JSON.stringify({ code: newCode.trim(), label: newLabel.trim(), description: newDesc.trim() || null, sort_order: reasons.length }),
+      });
+      setNewCode(""); setNewLabel(""); setNewDesc("");
+      onRefresh();
+    } catch (e: any) { onError(e?.message ?? String(e)); }
+  }
+
+  async function toggleActive(id: number, active: boolean) {
+    try {
+      await apiJson(`/api/admin/shift_reasons/${id}`, {
+        method: "PUT", headers: authHeaders(auth),
+        body: JSON.stringify({ is_active: !active }),
+      });
+      onRefresh();
+    } catch (e: any) { onError(e?.message ?? String(e)); }
+  }
+
+  async function deleteReason(id: number) {
+    if (!window.confirm("Schiebe-Grund löschen?")) return;
+    try {
+      await apiJson(`/api/admin/shift_reasons/${id}`, { method: "DELETE", headers: authHeaders(auth) });
+      onRefresh();
+    } catch (e: any) { onError(e?.message ?? String(e)); }
+  }
+
+  return (
+    <SectionCard title="Schiebe-Gründe verwalten">
+      <div style={{ fontSize: 13, color: "#64748b", marginBottom: 12 }}>
+        Hier können Sie die Gründe konfigurieren, die beim "Nochmal erinnern" eines Alerts zur Auswahl stehen.
+      </div>
+
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, marginBottom: 16 }}>
+        <thead>
+          <tr>
+            {["Code", "Label", "Beschreibung", "Aktiv", "Aktionen"].map(h => (
+              <th key={h} style={{ textAlign: "left", borderBottom: "2px solid #e2e8f0", padding: "8px 6px", color: "#64748b" }}>{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {reasons.map((r) => (
+            <tr key={r.id}>
+              <td style={{ padding: "8px 6px", borderBottom: "1px solid #f2f2f2" }}><code>{r.code}</code></td>
+              <td style={{ padding: "8px 6px", borderBottom: "1px solid #f2f2f2" }}>{r.label}</td>
+              <td style={{ padding: "8px 6px", borderBottom: "1px solid #f2f2f2", color: "#64748b" }}>{r.description ?? "—"}</td>
+              <td style={{ padding: "8px 6px", borderBottom: "1px solid #f2f2f2" }}>
+                <button onClick={() => toggleActive(r.id, r.is_active)} disabled={!canWrite} style={{ background: "none", border: "none", cursor: canWrite ? "pointer" : "default", fontSize: 14 }}>
+                  {r.is_active ? "✅" : "❌"}
+                </button>
+              </td>
+              <td style={{ padding: "8px 6px", borderBottom: "1px solid #f2f2f2" }}>
+                <button onClick={() => deleteReason(r.id)} disabled={!canWrite} style={{ padding: "4px 8px", borderRadius: 6, border: "1px solid #fecaca", background: "#fff1f2", color: "#b42318", fontSize: 11, cursor: canWrite ? "pointer" : "not-allowed" }}>Löschen</button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      {canWrite && (
+        <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 700, display: "block" }}>Code</label>
+            <input value={newCode} onChange={(e) => setNewCode(e.target.value)} placeholder="d" style={{ padding: 6, border: "1px solid #ccc", borderRadius: 6, width: 60 }} />
+          </div>
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 700, display: "block" }}>Label</label>
+            <input value={newLabel} onChange={(e) => setNewLabel(e.target.value)} placeholder="Neuer Grund" style={{ padding: 6, border: "1px solid #ccc", borderRadius: 6, width: 180 }} />
+          </div>
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 700, display: "block" }}>Beschreibung</label>
+            <input value={newDesc} onChange={(e) => setNewDesc(e.target.value)} placeholder="Optional" style={{ padding: 6, border: "1px solid #ccc", borderRadius: 6, width: 200 }} />
+          </div>
+          <button onClick={addReason} style={{ padding: "6px 14px", borderRadius: 6, border: "1px solid #3b82f6", background: "#3b82f6", color: "#fff", fontWeight: 700, cursor: "pointer" }}>+ Hinzufügen</button>
+        </div>
+      )}
+    </SectionCard>
+  );
+}
+
+// ============================================================
+// Users Tab
+// ============================================================
+function UsersTab({ users, roles, auth, authHeaders, canWrite, onRefresh, onError }: {
+  users: AdminUser[]; roles: AdminRole[]; auth: AuthState; authHeaders: (a: AuthState) => HeadersInit;
+  canWrite: boolean; onRefresh: () => void; onError: (msg: string) => void;
+}) {
+  const [createUserId, setCreateUserId] = useState("");
+  const [createDisplayName, setCreateDisplayName] = useState("");
+  const [createInitialRole, setCreateInitialRole] = useState("viewer");
+
+  async function createUser() {
+    if (!createUserId.trim()) return;
+    try {
+      await apiJson("/api/admin/users", {
+        method: "POST", headers: authHeaders(auth),
+        body: JSON.stringify({ user_id: createUserId.trim(), display_name: createDisplayName.trim() || null, is_active: true, roles: createInitialRole ? [{ role_id: createInitialRole, station_id: "*" }] : [] }),
+      });
+      setCreateUserId(""); setCreateDisplayName("");
+      onRefresh();
+    } catch (e: any) { onError(e?.message ?? String(e)); }
+  }
+
+  async function deleteUser(uid: string) {
+    if (!window.confirm(`Benutzer "${uid}" löschen?`)) return;
+    try {
+      await apiJson(`/api/admin/users/${uid}`, { method: "DELETE", headers: authHeaders(auth) });
+      onRefresh();
+    } catch (e: any) { onError(e?.message ?? String(e)); }
+  }
+
+  return (
+    <SectionCard title="Benutzerverwaltung">
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, marginBottom: 16 }}>
+        <thead>
+          <tr>
+            {["User-ID", "Name", "Aktiv", "Rollen", "Aktionen"].map(h => (
+              <th key={h} style={{ textAlign: "left", borderBottom: "2px solid #e2e8f0", padding: "8px 6px", color: "#64748b" }}>{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {users.map((u) => (
+            <tr key={u.user_id}>
+              <td style={{ padding: "8px 6px", borderBottom: "1px solid #f2f2f2", fontWeight: 700 }}>{u.user_id}</td>
+              <td style={{ padding: "8px 6px", borderBottom: "1px solid #f2f2f2" }}>{u.display_name ?? "—"}</td>
+              <td style={{ padding: "8px 6px", borderBottom: "1px solid #f2f2f2" }}>{u.is_active ? "✅" : "❌"}</td>
+              <td style={{ padding: "8px 6px", borderBottom: "1px solid #f2f2f2", fontSize: 12 }}>
+                {u.roles.map(r => `${r.role_id}@${r.station_id}`).join(", ") || "—"}
+              </td>
+              <td style={{ padding: "8px 6px", borderBottom: "1px solid #f2f2f2" }}>
+                <button onClick={() => deleteUser(u.user_id)} disabled={!canWrite || u.user_id === auth.userId} style={{ padding: "4px 8px", borderRadius: 6, border: "1px solid #fecaca", background: "#fff1f2", color: "#b42318", fontSize: 11, cursor: canWrite ? "pointer" : "not-allowed" }}>Löschen</button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      {canWrite && (
+        <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+          <div><label style={{ fontSize: 11, fontWeight: 700, display: "block" }}>User-ID</label><input value={createUserId} onChange={(e) => setCreateUserId(e.target.value)} style={{ padding: 6, border: "1px solid #ccc", borderRadius: 6, width: 120 }} /></div>
+          <div><label style={{ fontSize: 11, fontWeight: 700, display: "block" }}>Name</label><input value={createDisplayName} onChange={(e) => setCreateDisplayName(e.target.value)} style={{ padding: 6, border: "1px solid #ccc", borderRadius: 6, width: 150 }} /></div>
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 700, display: "block" }}>Rolle</label>
+            <select value={createInitialRole} onChange={(e) => setCreateInitialRole(e.target.value)} style={{ padding: 6, border: "1px solid #ccc", borderRadius: 6 }}>
+              {roles.map(r => <option key={r.role_id} value={r.role_id}>{r.role_id}</option>)}
+            </select>
+          </div>
+          <button onClick={createUser} style={{ padding: "6px 14px", borderRadius: 6, border: "1px solid #3b82f6", background: "#3b82f6", color: "#fff", fontWeight: 700, cursor: "pointer" }}>+ Erstellen</button>
+        </div>
+      )}
+    </SectionCard>
+  );
+}
+
+// ============================================================
+// Roles Tab
+// ============================================================
+function RolesTab({ roles, permissions, auth, authHeaders, canWrite, onRefresh, onError }: {
+  roles: AdminRole[]; permissions: AdminPermission[]; auth: AuthState; authHeaders: (a: AuthState) => HeadersInit;
+  canWrite: boolean; onRefresh: () => void; onError: (msg: string) => void;
+}) {
+  return (
+    <SectionCard title="Rollen & Berechtigungen">
+      <div style={{ display: "grid", gap: 10 }}>
+        {roles.map(r => (
+          <div key={r.role_id} style={{ padding: 10, border: "1px solid #e2e8f0", borderRadius: 8, background: "#f8fafc" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div>
+                <strong>{r.role_id}</strong>
+                {r.is_system && <span style={{ fontSize: 11, color: "#94a3b8", marginLeft: 8 }}>System</span>}
+              </div>
+              <div style={{ fontSize: 12, color: "#64748b" }}>{r.description}</div>
+            </div>
+            <div style={{ fontSize: 12, marginTop: 4, color: "#475569" }}>
+              Rechte: {r.permissions.join(", ") || "—"}
+            </div>
+          </div>
+        ))}
+      </div>
+    </SectionCard>
+  );
+}
+
+// ============================================================
+// Rules Tab
+// ============================================================
+function RulesTab({ rules, auth, authHeaders, canWrite, onRefresh, onError }: {
+  rules: RuleDef[]; auth: AuthState; authHeaders: (a: AuthState) => HeadersInit;
+  canWrite: boolean; onRefresh: () => void; onError: (msg: string) => void;
+}) {
+  const [selectedRuleId, setSelectedRuleId] = useState<string | null>(null);
+  const [ruleEdit, setRuleEdit] = useState<Partial<RuleDef> & { value?: any } | null>(null);
+  const [ruleValueEdit, setRuleValueEdit] = useState("");
+  const [filterCategory, setFilterCategory] = useState<string>("all");
+
+  const selectedRule = rules.find(r => r.rule_id === selectedRuleId) ?? null;
+  const filteredRules = filterCategory === "all" ? rules : rules.filter(r => r.category === filterCategory);
+  const categories = [...new Set(rules.map(r => r.category))];
+
+  useEffect(() => {
+    if (!selectedRule) { setRuleEdit(null); return; }
+    let val: any = null;
+    try { val = JSON.parse(selectedRule.value_json); } catch {}
+    setRuleEdit({ ...selectedRule, value: val });
+    setRuleValueEdit(selectedRule.value_json ?? "");
+  }, [selectedRuleId, rules]);
+
+  async function saveRule() {
+    if (!ruleEdit?.rule_id) return;
+    let parsed: any;
+    try { parsed = JSON.parse(ruleValueEdit); } catch { onError("Ungültiger JSON-Wert"); return; }
+    try {
+      await apiJson(`/api/admin/rules/${encodeURIComponent(ruleEdit.rule_id)}`, {
+        method: "PUT", headers: authHeaders(auth),
+        body: JSON.stringify({ rule_id: ruleEdit.rule_id, display_name: ruleEdit.display_name ?? null, message: ruleEdit.message ?? "", explanation: ruleEdit.explanation ?? "", category: ruleEdit.category ?? "medical", severity: ruleEdit.severity ?? "WARN", metric: ruleEdit.metric ?? "", operator: ruleEdit.operator ?? "is_true", value: parsed, enabled: ruleEdit.enabled ?? true }),
+      });
+      onRefresh();
+    } catch (e: any) { onError(e?.message ?? String(e)); }
+  }
+
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 12, marginTop: 12 }}>
+      <SectionCard title="Regeln">
+        <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+          <select value={filterCategory} onChange={(e) => setFilterCategory(e.target.value)} style={{ padding: "4px 8px", borderRadius: 6, border: "1px solid #ccc", fontSize: 12 }}>
+            <option value="all">Alle</option>
+            {categories.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </div>
+        <div style={{ maxHeight: 480, overflow: "auto" }}>
+          {filteredRules.map(r => (
+            <div key={r.rule_id} onClick={() => setSelectedRuleId(r.rule_id)} style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid #e2e8f0", cursor: "pointer", background: selectedRuleId === r.rule_id ? "#eef6ff" : "#fff", marginBottom: 6 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                <code style={{ fontSize: 11 }}>{r.rule_id}</code>
+                <span style={{ fontSize: 11, color: r.enabled ? "#15803d" : "#b91c1c" }}>{r.enabled ? "✓" : "✗"}</span>
+              </div>
+              <div style={{ fontSize: 12, color: "#475569" }}>{r.display_name ?? r.message}</div>
+              <div style={{ fontSize: 11, color: "#94a3b8" }}>{r.category} · {r.severity}</div>
+            </div>
+          ))}
+        </div>
+      </SectionCard>
+
+      <SectionCard title="Regel-Editor">
+        {!ruleEdit ? (
+          <div style={{ color: "#64748b" }}>Wähle links eine Regel aus.</div>
+        ) : (
+          <div style={{ display: "grid", gap: 10 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <div><label style={{ fontSize: 11, fontWeight: 700, display: "block" }}>rule_id</label><input value={ruleEdit.rule_id ?? ""} disabled style={{ padding: 6, border: "1px solid #ccc", borderRadius: 6, width: "100%", boxSizing: "border-box" }} /></div>
+              <div><label style={{ fontSize: 11, fontWeight: 700, display: "block" }}>Aktiviert</label><label style={{ display: "flex", gap: 8, alignItems: "center" }}><input type="checkbox" checked={!!ruleEdit.enabled} onChange={(e) => setRuleEdit({ ...ruleEdit, enabled: e.target.checked })} disabled={!canWrite} /><span style={{ color: ruleEdit.enabled ? "#15803d" : "#b91c1c", fontWeight: 700 }}>{ruleEdit.enabled ? "aktiv" : "deaktiviert"}</span></label></div>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <div><label style={{ fontSize: 11, fontWeight: 700, display: "block" }}>severity</label><select value={ruleEdit.severity ?? "WARN"} onChange={(e) => setRuleEdit({ ...ruleEdit, severity: e.target.value as any })} disabled={!canWrite} style={{ padding: 6, border: "1px solid #ccc", borderRadius: 6, width: "100%", boxSizing: "border-box" }}><option value="WARN">WARN</option><option value="CRITICAL">CRITICAL</option><option value="OK">OK</option></select></div>
+              <div><label style={{ fontSize: 11, fontWeight: 700, display: "block" }}>operator</label><select value={ruleEdit.operator ?? "is_true"} onChange={(e) => setRuleEdit({ ...ruleEdit, operator: e.target.value })} disabled={!canWrite} style={{ padding: 6, border: "1px solid #ccc", borderRadius: 6, width: "100%", boxSizing: "border-box" }}><option value="is_true">is_true</option><option value="is_false">is_false</option><option value="is_null">is_null</option><option value=">">&gt;</option><option value=">=">&gt;=</option></select></div>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <div><label style={{ fontSize: 11, fontWeight: 700, display: "block" }}>metric</label><input value={ruleEdit.metric ?? ""} onChange={(e) => setRuleEdit({ ...ruleEdit, metric: e.target.value })} disabled={!canWrite} style={{ padding: 6, border: "1px solid #ccc", borderRadius: 6, width: "100%", boxSizing: "border-box" }} /></div>
+              <div><label style={{ fontSize: 11, fontWeight: 700, display: "block" }}>value (JSON)</label><input value={ruleValueEdit} onChange={(e) => setRuleValueEdit(e.target.value)} disabled={!canWrite} style={{ padding: 6, border: "1px solid #ccc", borderRadius: 6, width: "100%", boxSizing: "border-box", fontFamily: "monospace" }} /></div>
+            </div>
+            <div><label style={{ fontSize: 11, fontWeight: 700, display: "block" }}>message</label><input value={ruleEdit.message ?? ""} onChange={(e) => setRuleEdit({ ...ruleEdit, message: e.target.value })} disabled={!canWrite} style={{ padding: 6, border: "1px solid #ccc", borderRadius: 6, width: "100%", boxSizing: "border-box" }} /></div>
+            <div><label style={{ fontSize: 11, fontWeight: 700, display: "block" }}>explanation</label><textarea value={ruleEdit.explanation ?? ""} onChange={(e) => setRuleEdit({ ...ruleEdit, explanation: e.target.value })} disabled={!canWrite} rows={3} style={{ padding: 6, border: "1px solid #ccc", borderRadius: 6, width: "100%", boxSizing: "border-box" }} /></div>
+            <button onClick={saveRule} disabled={!canWrite} style={{ padding: "8px 16px", borderRadius: 8, border: "1px solid #3b82f6", background: "#3b82f6", color: "#fff", fontWeight: 700, cursor: canWrite ? "pointer" : "not-allowed", justifySelf: "start" }}>Speichern</button>
+          </div>
+        )}
+      </SectionCard>
     </div>
   );
 }

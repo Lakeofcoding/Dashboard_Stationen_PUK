@@ -1,89 +1,87 @@
 """Datenbank-Anbindung.
 
-Für den Prototyp wird SQLite genutzt.
+Unterstützt SQLite (Standard/Entwicklung) und PostgreSQL (Produktion).
+
+Konfiguration über Umgebungsvariable DATABASE_URL:
+  - Nicht gesetzt / leer: SQLite (data/app.db)
+  - postgresql://...: PostgreSQL
 
 Wichtig (MVP-Realität):
   - Wir verwenden *keine* vollwertigen Migrationen (z.B. Alembic).
   - Stattdessen prüft `init_db()` beim Start, ob neue Spalten/Tabellen fehlen,
     und ergänzt diese minimal per `ALTER TABLE ... ADD COLUMN ...`.
-
-Das ist nicht "best practice" für Produktion, reicht aber für den Prototyp.
 """
 
+import os
 from pathlib import Path
 
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
-DATA_DIR = Path(__file__).resolve().parents[1] / "data"
-DATA_DIR.mkdir(exist_ok=True)
-DB_URL = f"sqlite:///{(DATA_DIR / 'app.db').as_posix()}"
+# --- Database URL Resolution ---
+_DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
-engine = create_engine(
-    DB_URL,
-    connect_args={"check_same_thread": False},
-    pool_pre_ping=True,
-)
+if _DATABASE_URL:
+    DB_URL = _DATABASE_URL
+    _IS_SQLITE = False
+else:
+    DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+    DATA_DIR.mkdir(exist_ok=True)
+    DB_URL = f"sqlite:///{(DATA_DIR / 'app.db').as_posix()}"
+    _IS_SQLITE = True
 
+# --- Engine Configuration ---
+_engine_kwargs = {"pool_pre_ping": True}
+
+if _IS_SQLITE:
+    _engine_kwargs["connect_args"] = {"check_same_thread": False}
+else:
+    _engine_kwargs["pool_size"] = int(os.getenv("DB_POOL_SIZE", "5"))
+    _engine_kwargs["max_overflow"] = int(os.getenv("DB_MAX_OVERFLOW", "10"))
+
+engine = create_engine(DB_URL, **_engine_kwargs)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# Klasse: Base – strukturiert Daten/Logik (z.B. Modelle, Services).
+
 class Base(DeclarativeBase):
     pass
 
-# Funktion: init_db – kapselt eine wiederverwendbare Backend-Operation.
+
 def init_db() -> None:
-    with engine.connect() as conn:
-        conn.execute(text("PRAGMA journal_mode=WAL;"))
-        conn.execute(text("PRAGMA synchronous=NORMAL;"))
-        conn.execute(text("PRAGMA busy_timeout=5000;"))
-        conn.commit()
+    if _IS_SQLITE:
+        with engine.connect() as conn:
+            conn.execute(text("PRAGMA journal_mode=WAL;"))
+            conn.execute(text("PRAGMA synchronous=NORMAL;"))
+            conn.execute(text("PRAGMA busy_timeout=5000;"))
+            conn.commit()
 
-    # 1) Tabellen anlegen (falls noch nicht vorhanden)
     Base.metadata.create_all(bind=engine)
-
-    # 2) Mini-Migration: fehlende Spalten ergänzen.
-    #    Das ist bewusst sehr simpel gehalten.
     _ensure_schema()
 
 
-# Funktion: _ensure_schema – kapselt eine wiederverwendbare Backend-Operation.
 def _ensure_schema() -> None:
-    """Ergänzt fehlende Spalten für bestehende DB-Dateien.
-
-    Hintergrund:
-      - `create_all()` fügt keine neuen Spalten zu bestehenden Tabellen hinzu.
-      - Für den Prototyp wollen wir trotzdem ohne manuelles Löschen der DB
-        weiterentwickeln können.
-    """
-
+    """Ergänzt fehlende Spalten für bestehende DB-Dateien."""
     insp = inspect(engine)
 
-# Funktion: cols – kapselt eine wiederverwendbare Backend-Operation.
     def cols(table: str) -> set[str]:
         if table not in insp.get_table_names():
             return set()
         return {c["name"] for c in insp.get_columns(table)}
 
+    def safe_add(conn, table: str, column: str, col_type: str = "TEXT"):
+        if table not in insp.get_table_names():
+            return
+        if column not in cols(table):
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
+
     with engine.begin() as conn:
-        # --- Tabelle ack: neue Spalten seit Version 0.3.x
-        ack_cols = cols("ack")
-        if "condition_hash" not in ack_cols:
-            conn.execute(text("ALTER TABLE ack ADD COLUMN condition_hash TEXT"))
-        if "business_date" not in ack_cols:
-            conn.execute(text("ALTER TABLE ack ADD COLUMN business_date TEXT"))
-        if "version" not in ack_cols:
-            conn.execute(text("ALTER TABLE ack ADD COLUMN version INTEGER"))
-        if "action" not in ack_cols:
-            conn.execute(text("ALTER TABLE ack ADD COLUMN action TEXT"))
-        if "shift_code" not in ack_cols:
-            conn.execute(text("ALTER TABLE ack ADD COLUMN shift_code TEXT"))
-
-        # day_state wird von SQLAlchemy automatisch angelegt, wenn sie fehlt.
-
-        # --- Tabelle security_event: neue Spalten für User-Agent / Details
-        sec_cols = cols("security_event")
-        if "user_agent" not in sec_cols:
-            conn.execute(text("ALTER TABLE security_event ADD COLUMN user_agent TEXT"))
-        if "details" not in sec_cols:
-            conn.execute(text("ALTER TABLE security_event ADD COLUMN details TEXT"))
+        safe_add(conn, "ack", "condition_hash")
+        safe_add(conn, "ack", "business_date")
+        safe_add(conn, "ack", "version", "INTEGER")
+        safe_add(conn, "ack", "action")
+        safe_add(conn, "ack", "shift_code")
+        safe_add(conn, "security_event", "user_agent")
+        safe_add(conn, "security_event", "details")
+        safe_add(conn, "case_data", "imported_at")
+        safe_add(conn, "case_data", "imported_by")
+        safe_add(conn, "case_data", "source")

@@ -2,11 +2,8 @@
  * Datei: frontend/src/Toast.tsx
  *
  * Zweck:
- * - Enthält UI-/Client-Logik dieser Anwendung.
- * - Kommentare wurden ergänzt, um Einstieg und Wartung zu erleichtern.
- *
- * Hinweis:
- * - Kommentare erklären Struktur/Intention; die fachliche Wahrheit kommt aus Backend/API-Verträgen.
+ * - Toast-Benachrichtigungen (Info, Warnung, Kritisch).
+ * - Auto-close nach 6 Sekunden.
  */
 
 import { useEffect } from "react";
@@ -25,28 +22,9 @@ export function Toast({
   onClose: () => void;
   actionLabel?: string;
   onAction?: () => void;
-}) 
- {{onAction && actionLabel && (
-  <button
-    onClick={onAction}
-    style={{
-      background: "rgba(255,255,255,0.2)",
-      color: "white",
-      border: "1px solid rgba(255,255,255,0.35)",
-      borderRadius: 6,
-      padding: "6px 10px",
-      cursor: "pointer",
-      fontSize: 12,
-      whiteSpace: "nowrap",
-    }}
-  >
-    {actionLabel}
-  </button>
-)}
-
-// React Effect: synchronisiert State mit externen Abhängigkeiten (z.B. API, Auth, Selektion).
+}) {
   useEffect(() => {
-    const t = window.setTimeout(onClose, 6000); // auto-close
+    const t = window.setTimeout(onClose, 6000);
     return () => window.clearTimeout(t);
   }, [onClose]);
 
@@ -76,6 +54,23 @@ export function Toast({
           {kind === "critical" ? "KRITISCH" : kind === "warn" ? "WARNUNG" : "INFO"}
         </div>
         <div style={{ flex: 1 }}>{message}</div>
+        {onAction && actionLabel && (
+          <button
+            onClick={onAction}
+            style={{
+              background: "rgba(255,255,255,0.2)",
+              color: "white",
+              border: "1px solid rgba(255,255,255,0.35)",
+              borderRadius: 6,
+              padding: "6px 10px",
+              cursor: "pointer",
+              fontSize: 12,
+              whiteSpace: "nowrap",
+            }}
+          >
+            {actionLabel}
+          </button>
+        )}
         <button
           onClick={onClose}
           style={{
