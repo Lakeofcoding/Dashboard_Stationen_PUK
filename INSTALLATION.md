@@ -123,20 +123,17 @@ docker-compose ps
 
 ```bash
 # Datenbank-Schema initialisieren (automatisch beim ersten Start)
-# Demo-User und Admin-Rollen werden automatisch angelegt
-
-# Optional: Dummy-Daten importieren
-docker-compose exec backend python scripts/import_dummy_data.py
+# Demo-User, Admin-Rollen und Demo-Fälle werden automatisch angelegt
 ```
 
 #### Schritt 5: Zugriff testen
 
 ```bash
 # Frontend: http://<server-ip>:8080
-# Backend API: http://<server-ip>:8000/api/health
+# Backend API: http://<server-ip>:8000/health
 
 # Health-Check
-curl http://localhost:8000/api/health
+curl http://localhost:8000/health
 ```
 
 ### Option 2: Manuelle Installation
@@ -422,11 +419,8 @@ Produktiv-Konfiguration:
 ### Automatische Backups
 
 ```bash
-# Cron-Job für tägliche Backups
-0 2 * * * /opt/puk-dashboard/backend/scripts/backup.py --retention-days 30
-
-# Oder in docker-compose:
-docker-compose exec backend python scripts/backup.py
+# Cron-Job für tägliche Backups (SQLite)
+0 2 * * * cp /opt/puk-dashboard/backend/data/app.db /opt/backups/app_$(date +\%Y\%m\%d).db
 ```
 
 ### Manuelles Backup
@@ -472,7 +466,7 @@ gunzip < backups/backup_20260213.sql.gz | psql -U dashboard_user -d puk_dashboar
 
 ```bash
 # Wöchentliche Optimierung (SQLite)
-docker-compose exec backend python -c "from app.db_enhanced import *; engine = create_db_engine(); optimize_database(engine)"
+docker-compose exec backend python -c "from app.db import SessionLocal; db=SessionLocal(); db.execute('VACUUM'); db.execute('ANALYZE'); db.close()"
 
 # PostgreSQL VACUUM (automatisch, aber kann manuell getriggert werden)
 docker-compose exec postgres psql -U dashboard_user -d puk_dashboard -c "VACUUM ANALYZE;"
@@ -503,7 +497,7 @@ sudo netstat -tlnp | grep 8000
 
 ```bash
 # Backend-Erreichbarkeit testen
-curl http://localhost:8000/api/health
+curl http://localhost:8000/health
 
 # Nginx-Konfiguration prüfen
 docker-compose exec frontend nginx -t
@@ -558,7 +552,7 @@ Für technische Fragen und Support:
 
 - **Dokumentation**: Siehe README.md und API-Dokumentation unter `/api/docs`
 - **Logs**: Siehe `logs/` Verzeichnis
-- **Health-Check**: `http://<server>/api/health`
+- **Health-Check**: `http://<server>/health`
 
 ---
 

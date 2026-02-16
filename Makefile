@@ -1,7 +1,7 @@
 # Makefile für PUK Dashboard
 # Vereinfacht häufige Entwicklungs- und Deployment-Aufgaben
 
-.PHONY: help install dev build up down logs clean test backup restore health
+.PHONY: help install dev build up down logs clean test health
 
 # Farben für Output
 GREEN  := $(shell tput -Txterm setaf 2)
@@ -106,27 +106,9 @@ format: ## Code-Formatierung
 	@echo "${GREEN}Formatiere Frontend-Code...${RESET}"
 	cd frontend && npm run lint --fix || true
 
-backup: ## Erstellt ein Datenbank-Backup
-	@echo "${GREEN}Erstelle Backup...${RESET}"
-	docker-compose exec backend python scripts/backup.py
-	@echo "${GREEN}✓ Backup erstellt in backups/${RESET}"
-
-restore: ## Stellt Backup wieder her (BACKUP_FILE=<datei> angeben)
-	@echo "${YELLOW}Stelle Backup wieder her: $(BACKUP_FILE)${RESET}"
-	@if [ -z "$(BACKUP_FILE)" ]; then \
-		echo "${YELLOW}Fehler: Bitte BACKUP_FILE angeben${RESET}"; \
-		echo "Beispiel: make restore BACKUP_FILE=backups/backup_20260213.db"; \
-		exit 1; \
-	fi
-	docker-compose exec backend cp $(BACKUP_FILE) data/app.db
-	@echo "${GREEN}✓ Backup wiederhergestellt${RESET}"
-
 health: ## Prüft Health-Status
 	@echo "${GREEN}Prüfe Health-Status...${RESET}"
-	@curl -s http://localhost:8000/api/health | python -m json.tool || echo "${YELLOW}Backend nicht erreichbar${RESET}"
-
-health-detailed: ## Zeigt detaillierte Health-Informationen
-	@curl -s http://localhost:8000/api/health/detailed | python -m json.tool
+	@curl -s http://localhost:8000/health | python -m json.tool || echo "${YELLOW}Backend nicht erreichbar${RESET}"
 
 db-shell: ## Öffnet Datenbank-Shell
 	@echo "${GREEN}Öffne Datenbank-Shell...${RESET}"

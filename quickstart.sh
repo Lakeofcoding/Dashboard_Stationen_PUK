@@ -148,7 +148,7 @@ wait_for_services() {
     count=0
     
     while [ $count -lt $max_wait ]; do
-        if curl -s http://localhost:8000/api/health > /dev/null 2>&1; then
+        if curl -s http://localhost:8000/health > /dev/null 2>&1; then
             echo -e "${GREEN}✓ Backend bereit${NC}"
             break
         fi
@@ -164,21 +164,10 @@ wait_for_services() {
     fi
 }
 
-# Funktion: Dummy-Daten importieren?
+# Funktion: Dummy-Daten Info
 ask_import_dummy_data() {
     echo ""
-    echo -e "${YELLOW}Dummy-Daten für Tests importieren? (y/N)${NC}"
-    read -r response
-    
-    if [[ "$response" =~ ^[Yy]$ ]]; then
-        echo -e "${YELLOW}Generiere und importiere Dummy-Daten...${NC}"
-        docker-compose exec -T backend python -c "
-from app.csv_import import generate_sample_csv
-from pathlib import Path
-csv_path = generate_sample_csv(Path('data/dummy_data.csv'), num_rows=100)
-print(f'Dummy-Daten generiert: {csv_path}')
-" || echo -e "${YELLOW}Hinweis: Dummy-Daten-Generator noch nicht implementiert${NC}"
-    fi
+    echo -e "${GREEN}Demo-Daten werden automatisch beim Start angelegt.${NC}"
 }
 
 # Funktion: Abschluss-Informationen

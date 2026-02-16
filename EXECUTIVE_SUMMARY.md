@@ -251,7 +251,6 @@ Die folgenden Verbesserungen bringen sofortigen Mehrwert:
 | **INSTALLATION.md** | Detaillierte Anleitung | IT-Team |
 | **SECURITY.md** | Sicherheits-Best-Practices | IT-Security |
 | **CHANGELOG.md** | Versions-Historie | IT-Team |
-| **IMPROVEMENTS.md** | Technische Details | Entwickler |
 | **Makefile** | Häufige Befehle | IT-Team |
 
 ---
@@ -296,5 +295,4 @@ Das PUK Dashboard ist jetzt **produktionsbereit** und erfüllt alle Anforderunge
 
 ---
 
-*Für technische Details siehe IMPROVEMENTS.md*  
 *Version: 1.0.0 | Datum: 2026-02-13*

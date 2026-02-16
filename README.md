@@ -65,7 +65,7 @@ nano .env  # Passwörter und SECRET_KEY anpassen!
 docker-compose up -d
 
 # 4. Zugriff testen
-curl http://localhost:8000/api/health
+curl http://localhost:8000/health
 # Frontend: http://localhost:8080
 # Backend API: http://localhost:8000
 ```
@@ -124,21 +124,25 @@ npm run dev
 ### Komponenten-Übersicht
 
 #### Backend (`/backend`)
-- **main.py**: Haupt-API mit allen Endpoints
+- **main.py**: App-Setup, Middleware, Startup, Router-Registrierung
+- **app/config.py**: Environment-Variablen, Konstanten
+- **app/schemas.py**: Pydantic Request/Response-Modelle
 - **app/models.py**: SQLAlchemy-Datenmodelle
+- **app/db.py**: Datenbank-Session
+- **app/auth.py**: Authentifizierung (AuthContext)
 - **app/rbac.py**: Role-Based Access Control
 - **app/audit.py**: Audit-Logging
-- **app/auth.py**: Authentifizierung
-- **app/csv_import.py**: CSV/Excel-Import
-- **app/health.py**: Health-Check-Endpoints
-- **app/logging_config.py**: Strukturiertes Logging
-- **app/db_enhanced.py**: Erweiterte DB-Konfiguration
-- **scripts/backup.py**: Automatisches Backup
+- **app/ack_store.py**: Quittierungs-Persistenz
+- **app/day_state.py**: Tagesversion (Business Date)
+- **app/rule_engine.py**: Regel-Evaluation (mit Cache)
+- **app/case_logic.py**: Fall-Laden, Anreicherung, Dummy-Daten
+- **middleware/**: CSRF + Rate-Limiting
+- **routers/**: API-Endpoints (cases, admin, meta, overview, notifications, debug, health)
 
 #### Frontend (`/frontend`)
-- **App.tsx**: Haupt-Komponente
-- **AdminPanel.tsx**: Admin-Interface
-- **api.ts**: API-Client
+- **App.tsx**: Haupt-Komponente (Dashboard + Stationsübersicht)
+- **AdminPanel.tsx**: Admin-Interface (RBAC, Regeln, Notifications)
+- **Toast.tsx**: Toast-Benachrichtigungen
 - **types.ts**: TypeScript-Definitionen
 
 #### Regelwerk (`/rules`)
@@ -266,16 +270,10 @@ Das System unterstützt folgende Basis-Rollen:
 
 ```bash
 # Via Admin-UI: "Daten" → "CSV Importieren"
-# Oder via CLI:
-docker-compose exec backend python -c "
-from app.csv_import import CSVImporter
-from app.db import SessionLocal
-
-importer = CSVImporter()
-with SessionLocal() as db:
-    result = importer.import_from_file('data/import.csv', db)
-    print(result)
-"
+# Oder via API:
+curl -X POST http://localhost:8000/api/admin/csv/upload \
+  -H "X-User-Id: demo" \
+  -F "file=@data/import.csv"
 ```
 
 **CSV-Format:**
@@ -399,7 +397,7 @@ alembic downgrade -1
 4. **Monitoring einrichten**
    ```bash
    # Health-Check
-   curl https://dashboard.klinik.local/api/health
+   curl https://dashboard.klinik.local/health
    
    # Logs überwachen
    docker-compose logs -f --tail=100
@@ -461,24 +459,18 @@ kubectl apply -f k8s/
 ### Backups
 
 ```bash
-# Automatisches Backup (täglich 2 Uhr)
-0 2 * * * /opt/puk-dashboard/backend/scripts/backup.py --retention-days 30
+# SQLite-Datenbank sichern (Datenbank befindet sich in backend/data/app.db)
+cp backend/data/app.db backups/app_$(date +%Y%m%d).db
 
-# Manuelles Backup
-docker-compose exec backend python scripts/backup.py
-
-# Backup mit Verschlüsselung
-docker-compose exec backend python scripts/backup.py --encrypt --encryption-key $(openssl rand -base64 32)
+# Automatisches Backup (Crontab)
+0 2 * * * cp /opt/puk-dashboard/backend/data/app.db /opt/backups/app_$(date +\%Y\%m\%d).db
 ```
 
 ### Monitoring
 
 ```bash
 # Health-Check
-curl http://localhost:8000/api/health
-
-# Detaillierte Health-Info
-curl http://localhost:8000/api/health/detailed
+curl http://localhost:8000/health
 
 # Logs
 docker-compose logs -f
@@ -507,9 +499,10 @@ docker-compose exec backend alembic upgrade head
 ```bash
 # SQLite optimieren
 docker-compose exec backend python -c "
-from app.db_enhanced import create_db_engine, optimize_database
-engine = create_db_engine()
-optimize_database(engine)
+from app.db import SessionLocal
+with SessionLocal() as db:
+    db.execute('VACUUM')
+    db.execute('ANALYZE')
 "
 
 # PostgreSQL
@@ -528,14 +521,15 @@ Die interaktive API-Dokumentation ist verfügbar unter:
 ### Wichtigste Endpoints
 
 ```
-GET  /api/health                      # Health-Check
-GET  /api/health/detailed             # Detaillierte System-Info
-GET  /api/cases                       # Liste aller Fälle
-GET  /api/cases/{case_id}             # Fall-Details
-POST /api/ack                         # Meldung quittieren
-POST /api/shift                       # Meldung schieben
-POST /api/reset                       # Geschäftstag zurücksetzen
-POST /api/import/csv                  # CSV-Import
+GET  /health                           # Health-Check
+GET  /api/cases                        # Liste aller Fälle
+GET  /api/cases/{case_id}              # Fall-Details
+POST /api/ack                          # Meldung quittieren/schieben
+GET  /api/day_state                    # Tagesversion abfragen
+POST /api/reset_today                  # Tagesversion zurücksetzen
+GET  /api/overview                     # Stationsübersicht
+GET  /api/meta/stations                # Stationsliste
+GET  /api/meta/me                      # Eigene Rechte
 GET  /api/admin/users                 # User-Verwaltung (Admin)
 GET  /api/admin/audit                 # Audit-Log (Admin)
 ```
@@ -581,9 +575,10 @@ docker-compose exec postgres pg_isready
 
 # Connection testen
 docker-compose exec backend python -c "
-from app.db_enhanced import check_database_connection, create_db_engine
-engine = create_db_engine()
-print('OK' if check_database_connection(engine) else 'FAILED')
+from app.db import SessionLocal
+with SessionLocal() as db:
+    db.execute('SELECT 1')
+    print('OK')
 "
 ```
 
@@ -606,7 +601,7 @@ print(df.columns)
 
 ```bash
 # Backend erreichbar?
-curl http://localhost:8000/api/health
+curl http://localhost:8000/health
 
 # Nginx-Konfiguration prüfen
 docker-compose exec frontend nginx -t
