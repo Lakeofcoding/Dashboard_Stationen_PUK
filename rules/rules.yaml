@@ -67,6 +67,7 @@ rules:
     explanation: "Bei Austritt muss BSCL Austritt im ±3 Tage Fenster dokumentiert werden."
 
   - id: BSCL_DISCHARGE_MISSING_CRIT_3D
+    category: completeness
     severity: CRITICAL
     metric: bscl_discharge_missing_over_3d_after_discharge
     operator: is_true

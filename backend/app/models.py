@@ -363,6 +363,33 @@ class ShiftReason(Base):
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
 
 
+# -----------------------------------------------------------------------------
+# NotificationRule (E-Mail-Benachrichtigungen)
+# -----------------------------------------------------------------------------
+
+class NotificationRule(Base):
+    """
+    Konfigurierbare Benachrichtigungsregeln.
+
+    Definiert wer, bei welchen Alerts, per E-Mail benachrichtigt wird.
+    SMTP wird erst bei Produktiv-Anbindung konfiguriert – bis dahin
+    werden die Regeln gespeichert und fällige Benachrichtigungen geloggt.
+    """
+
+    __tablename__ = "notification_rule"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String)  # z.B. "Stationsleitung A1"
+    email: Mapped[str] = mapped_column(String)  # Ziel-E-Mail
+    station_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # None = alle Stationen
+    min_severity: Mapped[str] = mapped_column(String, default="CRITICAL")  # WARN oder CRITICAL
+    category: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # None = alle Kategorien
+    delay_minutes: Mapped[int] = mapped_column(Integer, default=60)  # Minuten ohne Ack bevor Mail
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    created_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+
 __all__ = [
     "Ack",
     "AckEvent",
@@ -377,4 +404,5 @@ __all__ = [
     "RuleDefinition",
     "Case",
     "ShiftReason",
+    "NotificationRule",
 ]

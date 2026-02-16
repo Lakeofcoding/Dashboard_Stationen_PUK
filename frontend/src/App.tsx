@@ -92,11 +92,17 @@ function saveAuth(a: AuthState) {
 }
 
 function authHeaders(auth: AuthState): HeadersInit {
-  return {
+  const h: Record<string, string> = {
     "Content-Type": "application/json",
     "X-Station-Id": auth.stationId,
     "X-User-Id": auth.userId,
   };
+  // CSRF-Token aus Cookie lesen und als Header mitsenden
+  const csrf = document.cookie.split("; ").find(c => c.startsWith("csrf_token="));
+  if (csrf) {
+    h["X-CSRF-Token"] = csrf.split("=")[1];
+  }
+  return h;
 }
 
 function isAdminPath(pathname: string): boolean {
@@ -144,7 +150,25 @@ async function apiJson<T>(path: string, init: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
-type ViewMode = "all" | "completeness" | "medical" | "admin";
+type ViewMode = "overview" | "all" | "completeness" | "medical" | "admin";
+
+type StationOverviewItem = {
+  station_id: string;
+  center: string;
+  total_cases: number;
+  open_cases: number;
+  critical_count: number;
+  warn_count: number;
+  ok_count: number;
+  severity: Severity;
+};
+
+async function fetchOverview(auth: AuthState): Promise<StationOverviewItem[]> {
+  return apiJson<StationOverviewItem[]>("/api/overview", {
+    method: "GET",
+    headers: authHeaders(auth),
+  });
+}
 
 async function fetchCases(auth: AuthState, view: ViewMode): Promise<CaseSummary[]> {
   // Backend only accepts "all", "completeness", "medical"; admin is a UI-only mode
@@ -268,9 +292,10 @@ export default function App() {
   const canAdmin =
     permissions.has("admin:read") || permissions.has("admin:write") || permissions.has("audit:read");
 
-  const [viewMode, setViewMode] = useState<ViewMode>("all");
+  const [viewMode, setViewMode] = useState<ViewMode>("overview");
   const [dayState, setDayState] = useState<DayState | null>(null);
   const [cases, setCases] = useState<CaseSummary[]>([]);
+  const [overview, setOverview] = useState<StationOverviewItem[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [selectedCaseId, setSelectedCaseId] = useState<string | null>(null);
   const [detail, setDetail] = useState<CaseDetail | null>(null);
@@ -319,8 +344,9 @@ export default function App() {
     fetchShiftReasons(auth).then(setShiftReasons);
   }, [auth.stationId, auth.userId]);
 
-  // Load cases + day state
+  // Load cases + day state (skip when in overview mode)
   useEffect(() => {
+    if (viewMode === "overview") return;
     let alive = true;
     const load = async () => {
       try {
@@ -354,6 +380,23 @@ export default function App() {
     const id = window.setInterval(load, 10_000);
     return () => { alive = false; window.clearInterval(id); };
   }, [auth, toast, viewMode]);
+
+  // Load overview data
+  useEffect(() => {
+    if (viewMode !== "overview") return;
+    let alive = true;
+    const load = async () => {
+      try {
+        const data = await fetchOverview(auth);
+        if (alive) { setOverview(data); setError(null); }
+      } catch (e: any) {
+        if (alive) setError(e?.message ?? String(e));
+      }
+    };
+    load();
+    const id = window.setInterval(load, 15_000);
+    return () => { alive = false; window.clearInterval(id); };
+  }, [auth, viewMode]);
 
   // Load detail
   useEffect(() => {
@@ -434,8 +477,9 @@ export default function App() {
         <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", justifyContent: "flex-end" }}>
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span style={{ fontSize: 12, color: "#666" }}>Sicht</span>
-            <select value={viewMode} onChange={(e) => setViewMode(e.target.value as ViewMode)} style={{ padding: "6px 10px", borderRadius: 10, border: "1px solid #ccc", background: "#fff", cursor: "pointer" }}>
-              <option value="all">Alle</option>
+            <select value={viewMode} onChange={(e) => { setViewMode(e.target.value as ViewMode); if (e.target.value === "overview") { setSelectedCaseId(null); setDetail(null); } }} style={{ padding: "6px 10px", borderRadius: 10, border: "1px solid #ccc", background: "#fff", cursor: "pointer" }}>
+              <option value="overview">Stations-Übersicht</option>
+              <option value="all">Alle Alerts</option>
               <option value="completeness">Vollständigkeit</option>
               <option value="medical">Medizinisch</option>
               {canAdmin ? <option value="admin">Admin</option> : null}
@@ -475,7 +519,76 @@ export default function App() {
       {metaError ? <div style={{ padding: "10px 16px", color: "#666", background: "#fff", borderBottom: "1px solid #eee" }}>{metaError}</div> : null}
       {error && <div style={{ padding: "10px 16px", color: "#b42318", background: "#fff", borderBottom: "1px solid #eee" }}>Fehler: {error}</div>}
 
-      {/* MAIN: split */}
+      {/* MAIN: split or overview */}
+      {viewMode === "overview" ? (
+        /* STATION OVERVIEW */
+        <div style={{ flex: 1, overflowY: "auto", padding: "2rem" }}>
+          <div style={{ maxWidth: 1200, margin: "0 auto" }}>
+            <h2 style={{ margin: "0 0 1.25rem 0", fontSize: "1.35rem" }}>Stations-Übersicht</h2>
+            {overview.length === 0 ? (
+              <div style={{ color: "#999", padding: 20 }}>Keine Stationen gefunden.</div>
+            ) : (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 16 }}>
+                {overview.map((s) => (
+                  <div
+                    key={s.station_id}
+                    onClick={() => { updateAuth({ stationId: s.station_id }); setViewMode("all"); }}
+                    style={{
+                      padding: 20,
+                      borderRadius: 14,
+                      background: severityColor(s.severity),
+                      border: `2px solid ${severityBorderColor(s.severity)}`,
+                      cursor: "pointer",
+                      transition: "transform 0.15s, box-shadow 0.15s",
+                    }}
+                    onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.transform = "translateY(-2px)"; (e.currentTarget as HTMLElement).style.boxShadow = "0 6px 20px rgba(0,0,0,0.12)"; }}
+                    onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.transform = ""; (e.currentTarget as HTMLElement).style.boxShadow = ""; }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                      <div>
+                        <div style={{ fontSize: "1.3rem", fontWeight: 800 }}>{s.station_id}</div>
+                        <div style={{ fontSize: "0.8rem", color: "#666" }}>{s.center}</div>
+                      </div>
+                      <div style={{
+                        width: 44, height: 44, borderRadius: "50%",
+                        background: s.severity === "CRITICAL" ? "#ef4444" : s.severity === "WARN" ? "#f59e0b" : "#22c55e",
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        color: "#fff", fontWeight: 800, fontSize: 18,
+                      }}>
+                        {s.severity === "CRITICAL" ? "!" : s.severity === "WARN" ? "⚠" : "✓"}
+                      </div>
+                    </div>
+
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, fontSize: "0.85rem" }}>
+                      <div><span style={{ color: "#666" }}>Fälle gesamt:</span> <strong>{s.total_cases}</strong></div>
+                      <div><span style={{ color: "#666" }}>Offen:</span> <strong>{s.open_cases}</strong></div>
+                    </div>
+
+                    <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
+                      {s.critical_count > 0 && (
+                        <span style={{ fontSize: 12, background: "#ef4444", color: "#fff", padding: "3px 10px", borderRadius: 999, fontWeight: 700 }}>
+                          {s.critical_count} kritisch
+                        </span>
+                      )}
+                      {s.warn_count > 0 && (
+                        <span style={{ fontSize: 12, background: "#f59e0b", color: "#fff", padding: "3px 10px", borderRadius: 999, fontWeight: 700 }}>
+                          {s.warn_count} Warnung{s.warn_count > 1 ? "en" : ""}
+                        </span>
+                      )}
+                      {s.critical_count === 0 && s.warn_count === 0 && (
+                        <span style={{ fontSize: 12, background: "#22c55e", color: "#fff", padding: "3px 10px", borderRadius: 999, fontWeight: 700 }}>
+                          Alles OK
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      ) : (
+      /* CASE LIST + DETAIL SPLIT */
       <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
         {/* LEFT: case list */}
         <section style={{ flex: "0 0 380px", borderRight: "1px solid #d1d9e0", overflowY: "auto", backgroundColor: "#fff" }}>
@@ -696,6 +809,7 @@ export default function App() {
           ) : null}
         </aside>
       </div>
+      )}
 
       {/* ADMIN MODAL */}
       {isAdminOpen && (

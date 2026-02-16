@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -32,7 +33,32 @@ from app.rbac import (
 )
 
 from app.db import SessionLocal, init_db
-from app.models import DayState, RuleDefinition, Case, ShiftReason
+from app.models import DayState, RuleDefinition, Case, ShiftReason, NotificationRule
+
+# -----------------------------------------------------------------------------
+# Environment / Security Config
+# -----------------------------------------------------------------------------
+
+_DEBUG = os.getenv("DASHBOARD_DEBUG", "0") in ("1", "true", "True")
+_SECRET_KEY = os.getenv("SECRET_KEY", "")
+_DEMO_MODE = os.getenv("DASHBOARD_ALLOW_DEMO_AUTH", "1") in ("1", "true", "True")
+
+# Startup-Warnung bei unsicherer Konfiguration
+if not _SECRET_KEY or _SECRET_KEY == "change_this_in_production_to_random_string":
+    import warnings
+    warnings.warn(
+        "⚠ SECRET_KEY nicht gesetzt oder Default! "
+        "Für Produktion: SECRET_KEY=<random 64 hex chars> setzen.",
+        stacklevel=1,
+    )
+
+if _DEMO_MODE:
+    import warnings
+    warnings.warn(
+        "⚠ DEMO-MODUS aktiv (DASHBOARD_ALLOW_DEMO_AUTH=1). "
+        "Authentifizierung ist NICHT sicher. Nur für Demo/Pilot!",
+        stacklevel=1,
+    )
 
 # -----------------------------------------------------------------------------
 # Helpers: condition hash
@@ -65,7 +91,18 @@ def compute_condition_hash(
 # App setup
 # -----------------------------------------------------------------------------
 
-app = FastAPI(title="Dashboard Backend (MVP)", version="0.3.0", debug=True)
+app = FastAPI(title="Dashboard Backend (MVP)", version="0.4.0", debug=_DEBUG)
+
+# -----------------------------------------------------------------------------
+# Middleware (CSRF + Rate Limiting)
+# -----------------------------------------------------------------------------
+from middleware.csrf import CSRFMiddleware
+from middleware.rate_limit import RateLimitMiddleware
+
+# Rate Limiting zuerst (äussere Schicht, wird als erstes geprüft)
+app.add_middleware(RateLimitMiddleware, requests_per_minute=120, requests_per_hour=3000)
+# CSRF-Schutz (innere Schicht, nach Rate-Limit)
+app.add_middleware(CSRFMiddleware)
 ack_store = AckStore()
 
 
@@ -312,19 +349,30 @@ def get_day_version(*, station_id: str) -> int:
     - Beim ersten Zugriff an einem Tag wird der Datensatz angelegt (Version 1).
     - Bei "Reset" wird diese Version erhöht.
 
-    Die Version wird verwendet, um Acks am selben Tag invalidieren zu können,
-    ohne alte Datensätze löschen zu müssen.
+    Race-Condition-sicher: wenn zwei Requests gleichzeitig den ersten
+    Tageszugriff machen, fängt der zweite den UNIQUE-Constraint ab
+    und liest stattdessen den bereits angelegten Datensatz.
     """
 
     bdate = today_local().isoformat()
     with SessionLocal() as db:
         row = db.get(DayState, (station_id, bdate))
-        if row is None:
+        if row is not None:
+            return int(row.version)
+        # Erster Zugriff heute — versuche INSERT
+        try:
             row = DayState(station_id=station_id, business_date=bdate, version=1)
             db.add(row)
             db.commit()
             db.refresh(row)
-        return int(row.version)
+            return int(row.version)
+        except Exception:
+            # Concurrent INSERT hat gewonnen → rollback und lesen
+            db.rollback()
+            row = db.get(DayState, (station_id, bdate))
+            if row is not None:
+                return int(row.version)
+            return 1  # Fallback
 
 
 # Funktion: _parse_iso_dt – kapselt eine wiederverwendbare Backend-Operation.
@@ -2551,3 +2599,268 @@ def delete_shift_reason(
         )
         return {"ok": True}
 
+
+
+# =============================================================================
+# Stations-Überblick (alle Stationen auf einen Blick)
+# =============================================================================
+
+class StationOverviewItem(BaseModel):
+    station_id: str
+    center: str
+    total_cases: int
+    open_cases: int  # ohne discharge_date
+    critical_count: int
+    warn_count: int
+    ok_count: int
+    severity: Severity  # schlimmster Status der Station
+
+
+@app.get("/api/overview", response_model=list[StationOverviewItem])
+def station_overview(
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("dashboard:view")),
+):
+    """Liefert Übersicht über ALLE Stationen mit Ampel-Status."""
+    # Alle Stationen aus DB holen
+    with SessionLocal() as db:
+        db_stations = db.query(Case.station_id).distinct().all()
+        station_ids = sorted({s[0] for s in db_stations})
+    if not station_ids:
+        station_ids = sorted({c["station_id"] for c in DUMMY_CASES})
+
+    result = []
+    for sid in station_ids:
+        cases = get_station_cases(sid)
+        total = len(cases)
+        open_cases = sum(1 for c in cases if c.get("discharge_date") is None)
+
+        station_critical = 0
+        station_warn = 0
+        station_ok = 0
+
+        for c in cases:
+            alerts = evaluate_alerts(c)
+            sev, _, cc, wc = summarize_severity(alerts)
+            if sev == "CRITICAL":
+                station_critical += 1
+            elif sev == "WARN":
+                station_warn += 1
+            else:
+                station_ok += 1
+
+        if station_critical > 0:
+            worst = "CRITICAL"
+        elif station_warn > 0:
+            worst = "WARN"
+        else:
+            worst = "OK"
+
+        result.append(StationOverviewItem(
+            station_id=sid,
+            center=STATION_CENTER.get(sid, "UNKNOWN"),
+            total_cases=total,
+            open_cases=open_cases,
+            critical_count=station_critical,
+            warn_count=station_warn,
+            ok_count=station_ok,
+            severity=worst,
+        ))
+
+    return result
+
+
+# =============================================================================
+# Benachrichtigungs-Regeln (E-Mail Alerts)
+# =============================================================================
+
+class NotificationRuleCreate(BaseModel):
+    name: str
+    email: str
+    station_id: Optional[str] = None
+    min_severity: str = "CRITICAL"
+    category: Optional[str] = None
+    delay_minutes: int = 60
+    is_active: bool = True
+
+
+class NotificationRuleUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    station_id: Optional[str] = None
+    min_severity: Optional[str] = None
+    category: Optional[str] = None
+    delay_minutes: Optional[int] = None
+    is_active: Optional[bool] = None
+
+
+@app.get("/api/admin/notifications")
+def list_notification_rules(
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:read")),
+):
+    """Alle Benachrichtigungsregeln auflisten."""
+    with SessionLocal() as db:
+        rules = db.query(NotificationRule).order_by(NotificationRule.id.asc()).all()
+        return {
+            "rules": [
+                {
+                    "id": r.id,
+                    "name": r.name,
+                    "email": r.email,
+                    "station_id": r.station_id,
+                    "min_severity": r.min_severity,
+                    "category": r.category,
+                    "delay_minutes": r.delay_minutes,
+                    "is_active": r.is_active,
+                    "created_at": r.created_at,
+                    "created_by": r.created_by,
+                }
+                for r in rules
+            ]
+        }
+
+
+@app.post("/api/admin/notifications")
+def create_notification_rule(
+    body: NotificationRuleCreate,
+    request: Request,
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:write")),
+):
+    """Neue Benachrichtigungsregel erstellen."""
+    if body.min_severity not in ("WARN", "CRITICAL"):
+        raise HTTPException(status_code=400, detail="min_severity muss WARN oder CRITICAL sein")
+    with SessionLocal() as db:
+        rule = NotificationRule(
+            name=body.name,
+            email=body.email,
+            station_id=body.station_id or None,
+            min_severity=body.min_severity,
+            category=body.category or None,
+            delay_minutes=body.delay_minutes,
+            is_active=body.is_active,
+            created_at=datetime.now(timezone.utc).isoformat(),
+            created_by=ctx.user_id,
+        )
+        db.add(rule)
+        db.commit()
+        db.refresh(rule)
+        log_security_event(
+            db, request=request, actor_user_id=ctx.user_id,
+            actor_station_id=ctx.station_id, action="NOTIFICATION_RULE_CREATE",
+            target_type="notification_rule", target_id=str(rule.id), success=True,
+        )
+        return {"ok": True, "id": rule.id}
+
+
+@app.put("/api/admin/notifications/{rule_id}")
+def update_notification_rule(
+    rule_id: int,
+    body: NotificationRuleUpdate,
+    request: Request,
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:write")),
+):
+    """Benachrichtigungsregel aktualisieren."""
+    with SessionLocal() as db:
+        rule = db.get(NotificationRule, rule_id)
+        if not rule:
+            raise HTTPException(status_code=404, detail="Regel nicht gefunden")
+        if body.name is not None:
+            rule.name = body.name
+        if body.email is not None:
+            rule.email = body.email
+        if body.station_id is not None:
+            rule.station_id = body.station_id or None
+        if body.min_severity is not None:
+            if body.min_severity not in ("WARN", "CRITICAL"):
+                raise HTTPException(status_code=400, detail="min_severity muss WARN oder CRITICAL sein")
+            rule.min_severity = body.min_severity
+        if body.category is not None:
+            rule.category = body.category or None
+        if body.delay_minutes is not None:
+            rule.delay_minutes = body.delay_minutes
+        if body.is_active is not None:
+            rule.is_active = body.is_active
+        db.commit()
+        log_security_event(
+            db, request=request, actor_user_id=ctx.user_id,
+            actor_station_id=ctx.station_id, action="NOTIFICATION_RULE_UPDATE",
+            target_type="notification_rule", target_id=str(rule_id), success=True,
+        )
+        return {"ok": True}
+
+
+@app.delete("/api/admin/notifications/{rule_id}")
+def delete_notification_rule(
+    rule_id: int,
+    request: Request,
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:write")),
+):
+    """Benachrichtigungsregel löschen."""
+    with SessionLocal() as db:
+        rule = db.get(NotificationRule, rule_id)
+        if not rule:
+            raise HTTPException(status_code=404, detail="Regel nicht gefunden")
+        db.delete(rule)
+        db.commit()
+        log_security_event(
+            db, request=request, actor_user_id=ctx.user_id,
+            actor_station_id=ctx.station_id, action="NOTIFICATION_RULE_DELETE",
+            target_type="notification_rule", target_id=str(rule_id), success=True,
+        )
+        return {"ok": True}
+
+
+@app.get("/api/admin/notifications/pending")
+def pending_notifications(
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:read")),
+):
+    """Zeigt an, welche Benachrichtigungen aktuell fällig wären.
+
+    Nutzt die konfigurierten Regeln und prüft unquittierte Alerts.
+    Versendet NOCH NICHTS (kein SMTP konfiguriert) — nur Preview.
+    """
+    with SessionLocal() as db:
+        rules = db.query(NotificationRule).filter(NotificationRule.is_active == True).all()  # noqa
+
+    if not rules:
+        return {"pending": [], "note": "Keine aktiven Benachrichtigungsregeln konfiguriert."}
+
+    # Alle Stationen laden
+    with SessionLocal() as db:
+        db_stations = db.query(Case.station_id).distinct().all()
+        station_ids = sorted({s[0] for s in db_stations})
+
+    pending = []
+    for rule in rules:
+        target_stations = [rule.station_id] if rule.station_id else station_ids
+        for sid in target_stations:
+            cases = get_station_cases(sid)
+            for c in cases:
+                alerts = evaluate_alerts(c)
+                for alert in alerts:
+                    # Filter: severity >= min_severity
+                    if rule.min_severity == "CRITICAL" and alert.severity != "CRITICAL":
+                        continue
+                    # Filter: Kategorie
+                    if rule.category and alert.category != rule.category:
+                        continue
+                    pending.append({
+                        "rule_name": rule.name,
+                        "email": rule.email,
+                        "station_id": sid,
+                        "case_id": c["case_id"],
+                        "alert_rule_id": alert.rule_id,
+                        "severity": alert.severity,
+                        "message": alert.message,
+                    })
+
+    return {
+        "pending": pending,
+        "count": len(pending),
+        "note": "Vorschau — SMTP noch nicht konfiguriert, kein Versand.",
+    }

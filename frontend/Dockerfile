@@ -6,9 +6,9 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Dependencies installieren
+# Dependencies installieren (inkl. devDependencies für Build!)
 COPY package*.json ./
-RUN npm ci --only=production
+RUN npm ci
 
 # Source kopieren und builden
 COPY . .

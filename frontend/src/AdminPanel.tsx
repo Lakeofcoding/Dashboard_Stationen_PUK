@@ -22,6 +22,7 @@ type AdminPermission = { perm_id: string; description: string | null; is_system:
 type RuleDef = { rule_id: string; display_name: string | null; message: string; explanation: string; category: string; severity: "OK" | "WARN" | "CRITICAL"; metric: string; operator: string; value_json: string; enabled: boolean; is_system: boolean; updated_at: string | null; updated_by: string | null };
 type AuditEvent = { event_id: string; ts: string; actor_user_id: string | null; actor_station_id: string | null; action: string; target_type: string | null; target_id: string | null; success: boolean; message: string | null; details: string | null };
 type ShiftReasonAdmin = { id: number; code: string; label: string; description: string | null; is_active: boolean; sort_order: number };
+type NotificationRuleAdmin = { id: number; name: string; email: string; station_id: string | null; min_severity: string; category: string | null; delay_minutes: number; is_active: boolean; created_at: string | null; created_by: string | null };
 
 async function apiJson<T>(path: string, init: RequestInit): Promise<T> {
   const res = await fetch(path, init);
@@ -42,7 +43,7 @@ export function AdminPanel({ auth, authHeaders, me }: Props) {
   const canRead = useMemo(() => new Set(me?.permissions ?? []).has("admin:read"), [me]);
   const canWrite = useMemo(() => new Set(me?.permissions ?? []).has("admin:write"), [me]);
 
-  const [tab, setTab] = useState<"csv" | "shift_reasons" | "users" | "roles" | "rules" | "audit">("csv");
+  const [tab, setTab] = useState<"csv" | "shift_reasons" | "notifications" | "users" | "roles" | "rules" | "audit">("csv");
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
@@ -52,6 +53,7 @@ export function AdminPanel({ auth, authHeaders, me }: Props) {
   const [rules, setRules] = useState<RuleDef[]>([]);
   const [audit, setAudit] = useState<AuditEvent[]>([]);
   const [shiftReasons, setShiftReasons] = useState<ShiftReasonAdmin[]>([]);
+  const [notifications, setNotifications] = useState<NotificationRuleAdmin[]>([]);
 
   async function refreshAll() {
     setError(null);
@@ -62,6 +64,7 @@ export function AdminPanel({ auth, authHeaders, me }: Props) {
     try { const rr = await apiJson<{ rules: RuleDef[] }>("/api/admin/rules", { method: "GET", headers: authHeaders(auth) }); setRules(rr.rules); } catch {}
     try { const a = await apiJson<{ events: AuditEvent[] }>("/api/admin/audit?limit=200", { method: "GET", headers: authHeaders(auth) }); setAudit(a.events); } catch {}
     try { const sr = await apiJson<{ reasons: ShiftReasonAdmin[] }>("/api/admin/shift_reasons", { method: "GET", headers: authHeaders(auth) }); setShiftReasons(sr.reasons); } catch {}
+    try { const nr = await apiJson<{ rules: NotificationRuleAdmin[] }>("/api/admin/notifications", { method: "GET", headers: authHeaders(auth) }); setNotifications(nr.rules); } catch {}
   }
 
   useEffect(() => { refreshAll(); }, [auth.stationId, auth.userId]);
@@ -80,6 +83,7 @@ export function AdminPanel({ auth, authHeaders, me }: Props) {
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
         <button style={tabStyle("csv")} onClick={() => setTab("csv")}>📥 CSV Import</button>
         <button style={tabStyle("shift_reasons")} onClick={() => setTab("shift_reasons")}>🔄 Schiebe-Gründe</button>
+        <button style={tabStyle("notifications")} onClick={() => setTab("notifications")}>📧 Benachrichtigungen</button>
         <button style={tabStyle("users")} onClick={() => setTab("users")}>👤 Benutzer</button>
         <button style={tabStyle("roles")} onClick={() => setTab("roles")}>🔑 Rollen</button>
         <button style={tabStyle("rules")} onClick={() => setTab("rules")}>📏 Regeln</button>
@@ -91,6 +95,9 @@ export function AdminPanel({ auth, authHeaders, me }: Props) {
 
       {/* SHIFT REASONS TAB */}
       {tab === "shift_reasons" && <ShiftReasonsTab reasons={shiftReasons} auth={auth} authHeaders={authHeaders} canWrite={canWrite} onRefresh={refreshAll} onError={setError} />}
+
+      {/* NOTIFICATIONS TAB */}
+      {tab === "notifications" && <NotificationsTab rules={notifications} auth={auth} authHeaders={authHeaders} canWrite={canWrite} onRefresh={refreshAll} onError={setError} />}
 
       {/* USERS TAB */}
       {tab === "users" && <UsersTab users={users} roles={roles} auth={auth} authHeaders={authHeaders} canWrite={canWrite} onRefresh={refreshAll} onError={setError} />}
@@ -546,5 +553,198 @@ function RulesTab({ rules, auth, authHeaders, canWrite, onRefresh, onError }: {
         )}
       </SectionCard>
     </div>
+  );
+}
+
+// ============================================================
+// Notifications Tab
+// ============================================================
+function NotificationsTab({ rules, auth, authHeaders, canWrite, onRefresh, onError }: {
+  rules: NotificationRuleAdmin[]; auth: AuthState; authHeaders: (a: AuthState) => HeadersInit;
+  canWrite: boolean; onRefresh: () => void; onError: (msg: string) => void;
+}) {
+  const [newName, setNewName] = useState("");
+  const [newEmail, setNewEmail] = useState("");
+  const [newStation, setNewStation] = useState("");
+  const [newSeverity, setNewSeverity] = useState("CRITICAL");
+  const [newCategory, setNewCategory] = useState("");
+  const [newDelay, setNewDelay] = useState(60);
+  const [pending, setPending] = useState<any>(null);
+
+  async function addRule() {
+    if (!newName.trim() || !newEmail.trim()) return;
+    try {
+      await apiJson("/api/admin/notifications", {
+        method: "POST", headers: authHeaders(auth),
+        body: JSON.stringify({
+          name: newName.trim(),
+          email: newEmail.trim(),
+          station_id: newStation.trim() || null,
+          min_severity: newSeverity,
+          category: newCategory.trim() || null,
+          delay_minutes: newDelay,
+        }),
+      });
+      setNewName(""); setNewEmail(""); setNewStation(""); setNewCategory("");
+      onRefresh();
+    } catch (e: any) { onError(e?.message ?? String(e)); }
+  }
+
+  async function toggleActive(id: number, active: boolean) {
+    try {
+      await apiJson(`/api/admin/notifications/${id}`, {
+        method: "PUT", headers: authHeaders(auth),
+        body: JSON.stringify({ is_active: !active }),
+      });
+      onRefresh();
+    } catch (e: any) { onError(e?.message ?? String(e)); }
+  }
+
+  async function deleteRule(id: number) {
+    if (!window.confirm("Benachrichtigungsregel löschen?")) return;
+    try {
+      await apiJson(`/api/admin/notifications/${id}`, { method: "DELETE", headers: authHeaders(auth) });
+      onRefresh();
+    } catch (e: any) { onError(e?.message ?? String(e)); }
+  }
+
+  async function loadPending() {
+    try {
+      const data = await apiJson<any>("/api/admin/notifications/pending", { method: "GET", headers: authHeaders(auth) });
+      setPending(data);
+    } catch (e: any) { onError(e?.message ?? String(e)); }
+  }
+
+  return (
+    <SectionCard title="E-Mail-Benachrichtigungen">
+      <div style={{ fontSize: 13, color: "#64748b", marginBottom: 12 }}>
+        Konfigurieren Sie, wer bei welchen Alerts per E-Mail benachrichtigt wird.
+        <br />
+        <strong style={{ color: "#b45309" }}>Hinweis:</strong> SMTP-Server noch nicht konfiguriert — Regeln werden gespeichert, aber aktuell noch kein Versand.
+      </div>
+
+      {/* Existing rules */}
+      {rules.length > 0 && (
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, marginBottom: 16 }}>
+          <thead>
+            <tr>
+              {["Name", "E-Mail", "Station", "Min. Severity", "Kategorie", "Verzögerung", "Aktiv", "Aktionen"].map(h => (
+                <th key={h} style={{ textAlign: "left", borderBottom: "2px solid #e2e8f0", padding: "8px 6px", color: "#64748b" }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rules.map((r) => (
+              <tr key={r.id}>
+                <td style={{ padding: "8px 6px", borderBottom: "1px solid #f2f2f2", fontWeight: 600 }}>{r.name}</td>
+                <td style={{ padding: "8px 6px", borderBottom: "1px solid #f2f2f2" }}>{r.email}</td>
+                <td style={{ padding: "8px 6px", borderBottom: "1px solid #f2f2f2" }}>{r.station_id ?? "Alle"}</td>
+                <td style={{ padding: "8px 6px", borderBottom: "1px solid #f2f2f2" }}>
+                  <span style={{ fontSize: 11, padding: "2px 8px", borderRadius: 999, background: r.min_severity === "CRITICAL" ? "#fee2e2" : "#fef3c7", color: r.min_severity === "CRITICAL" ? "#b91c1c" : "#92400e" }}>
+                    {r.min_severity}
+                  </span>
+                </td>
+                <td style={{ padding: "8px 6px", borderBottom: "1px solid #f2f2f2", color: "#64748b" }}>{r.category ?? "Alle"}</td>
+                <td style={{ padding: "8px 6px", borderBottom: "1px solid #f2f2f2" }}>{r.delay_minutes} min</td>
+                <td style={{ padding: "8px 6px", borderBottom: "1px solid #f2f2f2" }}>
+                  <button onClick={() => toggleActive(r.id, r.is_active)} disabled={!canWrite} style={{ background: "none", border: "none", cursor: canWrite ? "pointer" : "default", fontSize: 14 }}>
+                    {r.is_active ? "✅" : "❌"}
+                  </button>
+                </td>
+                <td style={{ padding: "8px 6px", borderBottom: "1px solid #f2f2f2" }}>
+                  <button onClick={() => deleteRule(r.id)} disabled={!canWrite} style={{ padding: "4px 8px", borderRadius: 6, border: "1px solid #fecaca", background: "#fff1f2", color: "#b42318", fontSize: 11, cursor: canWrite ? "pointer" : "not-allowed" }}>Löschen</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      {rules.length === 0 && (
+        <div style={{ padding: 16, background: "#f8fafc", borderRadius: 8, marginBottom: 16, color: "#64748b", textAlign: "center" }}>
+          Noch keine Benachrichtigungsregeln konfiguriert.
+        </div>
+      )}
+
+      {/* Add new rule */}
+      {canWrite && (
+        <div style={{ borderTop: "1px solid #e2e8f0", paddingTop: 14, marginBottom: 16 }}>
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 10 }}>Neue Regel hinzufügen</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 10 }}>
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 700, display: "block" }}>Name / Empfänger</label>
+              <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="z.B. Stationsleitung A1" style={{ padding: 6, border: "1px solid #ccc", borderRadius: 6, width: "100%", boxSizing: "border-box" }} />
+            </div>
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 700, display: "block" }}>E-Mail-Adresse</label>
+              <input type="email" value={newEmail} onChange={(e) => setNewEmail(e.target.value)} placeholder="name@spital.ch" style={{ padding: 6, border: "1px solid #ccc", borderRadius: 6, width: "100%", boxSizing: "border-box" }} />
+            </div>
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 700, display: "block" }}>Station (leer = alle)</label>
+              <input value={newStation} onChange={(e) => setNewStation(e.target.value)} placeholder="z.B. A1" style={{ padding: 6, border: "1px solid #ccc", borderRadius: 6, width: "100%", boxSizing: "border-box" }} />
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 700, display: "block" }}>Min. Severity</label>
+              <select value={newSeverity} onChange={(e) => setNewSeverity(e.target.value)} style={{ padding: 6, border: "1px solid #ccc", borderRadius: 6 }}>
+                <option value="CRITICAL">Nur CRITICAL</option>
+                <option value="WARN">WARN + CRITICAL</option>
+              </select>
+            </div>
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 700, display: "block" }}>Kategorie (leer = alle)</label>
+              <select value={newCategory} onChange={(e) => setNewCategory(e.target.value)} style={{ padding: 6, border: "1px solid #ccc", borderRadius: 6 }}>
+                <option value="">Alle</option>
+                <option value="completeness">Vollständigkeit</option>
+                <option value="medical">Medizinisch</option>
+              </select>
+            </div>
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 700, display: "block" }}>Verzögerung (Min.)</label>
+              <input type="number" min={0} value={newDelay} onChange={(e) => setNewDelay(Number(e.target.value))} style={{ padding: 6, border: "1px solid #ccc", borderRadius: 6, width: 80 }} />
+            </div>
+            <button onClick={addRule} style={{ padding: "6px 14px", borderRadius: 6, border: "1px solid #3b82f6", background: "#3b82f6", color: "#fff", fontWeight: 700, cursor: "pointer" }}>+ Hinzufügen</button>
+          </div>
+        </div>
+      )}
+
+      {/* Pending preview */}
+      <div style={{ borderTop: "1px solid #e2e8f0", paddingTop: 14 }}>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 8 }}>
+          <button onClick={loadPending} style={{ padding: "6px 12px", borderRadius: 6, border: "1px solid #ccc", background: "#f8fafc", cursor: "pointer", fontSize: 12 }}>
+            Fällige Benachrichtigungen anzeigen (Vorschau)
+          </button>
+          {pending && <span style={{ fontSize: 12, color: "#64748b" }}>{pending.count} fällig · {pending.note}</span>}
+        </div>
+        {pending?.pending?.length > 0 && (
+          <div style={{ maxHeight: 250, overflow: "auto", fontSize: 12 }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr>
+                  {["Regel", "E-Mail", "Station", "Fall", "Alert", "Severity"].map(h => (
+                    <th key={h} style={{ textAlign: "left", borderBottom: "2px solid #e2e8f0", padding: "6px 4px", color: "#64748b" }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {pending.pending.map((p: any, i: number) => (
+                  <tr key={i}>
+                    <td style={{ padding: "6px 4px", borderBottom: "1px solid #f2f2f2" }}>{p.rule_name}</td>
+                    <td style={{ padding: "6px 4px", borderBottom: "1px solid #f2f2f2" }}>{p.email}</td>
+                    <td style={{ padding: "6px 4px", borderBottom: "1px solid #f2f2f2" }}>{p.station_id}</td>
+                    <td style={{ padding: "6px 4px", borderBottom: "1px solid #f2f2f2", fontWeight: 600 }}>{p.case_id}</td>
+                    <td style={{ padding: "6px 4px", borderBottom: "1px solid #f2f2f2" }}>{p.message}</td>
+                    <td style={{ padding: "6px 4px", borderBottom: "1px solid #f2f2f2" }}>
+                      <span style={{ fontSize: 11, padding: "2px 6px", borderRadius: 999, background: p.severity === "CRITICAL" ? "#fee2e2" : "#fef3c7", color: p.severity === "CRITICAL" ? "#b91c1c" : "#92400e" }}>{p.severity}</span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </SectionCard>
   );
 }
