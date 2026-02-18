@@ -335,6 +335,33 @@ class Case(Base):
     # Isolation (JSON-encoded list)
     isolations_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    # --- Aufnahme-Status (Behandlungsplan, Freiwilligkeit) ---
+    is_voluntary: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True, default=True)
+    treatment_plan_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    # --- SDEP ---
+    sdep_complete: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+
+    # --- EKG ---
+    ekg_last_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    ekg_last_reported: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    ekg_entry_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    # --- Clozapin-Monitoring ---
+    clozapin_active: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True, default=False)
+    clozapin_start_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    neutrophils_last_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    neutrophils_last_value: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # z.B. "1.8"
+    troponin_last_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    cbc_last_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # Grosses Blutbild
+
+    # --- Notfall-Massnahmen ---
+    emergency_bem_start_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    emergency_med_start_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    # --- Allergien ---
+    allergies_recorded: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+
     # Metadata
     imported_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     imported_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)

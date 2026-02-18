@@ -19,6 +19,16 @@ class Alert(BaseModel):
     condition_hash: str
 
 
+# --- Kompakte Parameter-Statusleiste pro Fall ---
+class ParameterStatus(BaseModel):
+    """Status eines einzelnen Parameters: OK, WARN, CRITICAL oder N/A."""
+    id: str              # z.B. "honos_entry", "ekg", "clozapin"
+    label: str           # Kurzname fuer Anzeige
+    group: Literal["completeness", "medical"]
+    status: Literal["ok", "warn", "critical", "na"]  # na = nicht relevant
+    detail: Optional[str] = None  # Erklaerungstext
+
+
 class CaseSummary(BaseModel):
     case_id: str
     patient_id: str
@@ -32,6 +42,7 @@ class CaseSummary(BaseModel):
     critical_count: int = 0
     warn_count: int = 0
     acked_at: Optional[str] = None
+    parameter_status: list[ParameterStatus] = Field(default_factory=list)
 
 
 class CaseDetail(CaseSummary):

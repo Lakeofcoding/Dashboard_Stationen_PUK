@@ -10,6 +10,7 @@ from app.day_state import today_local, get_day_version, ack_is_valid_today
 from app.rule_engine import evaluate_alerts, summarize_severity
 from app.case_logic import (
     get_station_cases, get_single_case, enrich_case, get_valid_shift_codes,
+    build_parameter_status,
 )
 from app.ack_store import AckStore
 from app.db import SessionLocal
@@ -112,6 +113,7 @@ def list_cases(
                 critical_count=critical_count,
                 warn_count=warn_count,
                 acked_at=case_level_acked_at.get(c["case_id"]),
+                parameter_status=build_parameter_status(c),
             )
         )
 
@@ -205,6 +207,7 @@ def get_case(
         critical_count=critical_count,
         warn_count=warn_count,
         acked_at=acked_at,
+        parameter_status=build_parameter_status(c),
         honos=c.get("honos_entry_total"),
         bscl=c.get("bscl_total_entry"),
         bfs_complete=not (c.get("_derived") or {}).get("bfs_incomplete", False),

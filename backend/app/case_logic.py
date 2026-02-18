@@ -12,6 +12,103 @@ from app.db import SessionLocal
 from app.models import Case, ShiftReason
 from app.day_state import today_local, _parse_iso_dt, get_day_version
 from app.rule_engine import evaluate_alerts
+from app.schemas import ParameterStatus
+
+
+def build_parameter_status(c: dict) -> list[dict]:
+    """Baut die kompakte Parameterleiste fuer einen angereicherten Fall."""
+    derived = c.get("_derived", {})
+    discharge = c.get("discharge_date")
+    is_active = discharge is None
+    params = []
+
+    # --- Completeness ---
+    honos_e = c.get("honos_entry_total")
+    if honos_e is not None:
+        params.append({"id": "honos_entry", "label": "HoNOS ET", "group": "completeness", "status": "ok", "detail": f"Score: {honos_e}"})
+    elif derived.get("honos_entry_missing_over_3d"):
+        params.append({"id": "honos_entry", "label": "HoNOS ET", "group": "completeness", "status": "critical", "detail": "Fehlt >3d"})
+    else:
+        params.append({"id": "honos_entry", "label": "HoNOS ET", "group": "completeness", "status": "warn", "detail": "Nicht erfasst"})
+
+    if discharge is not None:
+        honos_d = c.get("honos_discharge_total")
+        if honos_d is not None:
+            params.append({"id": "honos_discharge", "label": "HoNOS AT", "group": "completeness", "status": "ok", "detail": f"Score: {honos_d}"})
+        elif derived.get("honos_discharge_missing_over_3d_after_discharge"):
+            params.append({"id": "honos_discharge", "label": "HoNOS AT", "group": "completeness", "status": "critical", "detail": "Fehlt >3d nach AT"})
+        else:
+            params.append({"id": "honos_discharge", "label": "HoNOS AT", "group": "completeness", "status": "warn", "detail": "Nicht erfasst"})
+
+    bscl_e = c.get("bscl_total_entry")
+    if bscl_e is not None:
+        params.append({"id": "bscl_entry", "label": "BSCL ET", "group": "completeness", "status": "ok", "detail": f"Score: {bscl_e}"})
+    elif derived.get("bscl_entry_missing_over_3d"):
+        params.append({"id": "bscl_entry", "label": "BSCL ET", "group": "completeness", "status": "critical", "detail": "Fehlt >3d"})
+    elif is_active:
+        params.append({"id": "bscl_entry", "label": "BSCL ET", "group": "completeness", "status": "warn", "detail": "Nicht erfasst"})
+
+    params.append({"id": "bfs", "label": "BFS", "group": "completeness",
+                    "status": "ok" if not derived.get("bfs_incomplete") else "warn",
+                    "detail": "Vollstaendig" if not derived.get("bfs_incomplete") else "Unvollstaendig"})
+
+    if discharge is not None:
+        sdep = c.get("sdep_complete")
+        if sdep:
+            params.append({"id": "sdep", "label": "SDEP", "group": "completeness", "status": "ok", "detail": "Abgeschlossen"})
+        elif derived.get("sdep_incomplete_at_discharge"):
+            params.append({"id": "sdep", "label": "SDEP", "group": "completeness", "status": "critical", "detail": "Nicht abgeschlossen"})
+        elif not sdep:
+            params.append({"id": "sdep", "label": "SDEP", "group": "completeness", "status": "warn", "detail": "Offen"})
+
+    if not c.get("is_voluntary", True):
+        tp = c.get("treatment_plan_date")
+        if tp:
+            params.append({"id": "treatment_plan", "label": "BehPlan", "group": "completeness", "status": "ok", "detail": "Erstellt"})
+        elif derived.get("treatment_plan_missing_involuntary_72h"):
+            params.append({"id": "treatment_plan", "label": "BehPlan", "group": "completeness", "status": "critical", "detail": "Fehlt (>72h)"})
+        else:
+            params.append({"id": "treatment_plan", "label": "BehPlan", "group": "completeness", "status": "warn", "detail": "Nicht erstellt"})
+
+    # --- Medical ---
+    if derived.get("ekg_not_reported_24h"):
+        params.append({"id": "ekg", "label": "EKG", "group": "medical", "status": "critical", "detail": "Nicht befundet (24h)"})
+    elif derived.get("ekg_entry_missing_7d"):
+        params.append({"id": "ekg", "label": "EKG", "group": "medical", "status": "warn", "detail": "ET-EKG fehlt (>7d)"})
+    elif c.get("ekg_entry_date") or c.get("ekg_last_date"):
+        params.append({"id": "ekg", "label": "EKG", "group": "medical", "status": "ok", "detail": "Dokumentiert"})
+    elif is_active:
+        params.append({"id": "ekg", "label": "EKG", "group": "medical", "status": "na", "detail": None})
+
+    if c.get("clozapin_active"):
+        if derived.get("clozapin_neutrophils_low"):
+            params.append({"id": "clozapin", "label": "Clozapin", "group": "medical", "status": "critical", "detail": "Neutrophile <2 G/l!"})
+        elif derived.get("clozapin_troponin_missing_early"):
+            params.append({"id": "clozapin", "label": "Clozapin", "group": "medical", "status": "warn", "detail": "Troponin fehlt (<5 Wo)"})
+        elif derived.get("clozapin_cbc_missing_early"):
+            params.append({"id": "clozapin", "label": "Clozapin", "group": "medical", "status": "warn", "detail": "BB fehlt (<19 Wo)"})
+        else:
+            params.append({"id": "clozapin", "label": "Clozapin", "group": "medical", "status": "ok", "detail": "Monitoring OK"})
+
+    if derived.get("suicidality_discharge_high"):
+        params.append({"id": "suicidality", "label": "Suizid.", "group": "medical", "status": "critical", "detail": "AT >= 3"})
+    if derived.get("emergency_bem_over_3d"):
+        params.append({"id": "notfall_bem", "label": "NotfBEM", "group": "medical", "status": "critical", "detail": ">3d aktiv"})
+    if derived.get("emergency_med_over_3d"):
+        params.append({"id": "notfall_med", "label": "NotfMed", "group": "medical", "status": "critical", "detail": ">3d aktiv"})
+
+    if is_active:
+        if c.get("allergies_recorded"):
+            params.append({"id": "allergies", "label": "Allerg.", "group": "medical", "status": "ok", "detail": "Erfasst"})
+        elif derived.get("allergies_missing_7d"):
+            params.append({"id": "allergies", "label": "Allerg.", "group": "medical", "status": "warn", "detail": "Fehlt (>7d)"})
+
+    if derived.get("isolation_open_over_48h"):
+        params.append({"id": "isolation", "label": "Iso.", "group": "medical", "status": "critical", "detail": "Offen >48h"})
+    elif derived.get("isolation_multiple"):
+        params.append({"id": "isolation", "label": "Iso.", "group": "medical", "status": "warn", "detail": "Mehrfach"})
+
+    return params
 
 
 # ---------------------------------------------------------------------------
@@ -33,6 +130,15 @@ def make_dummy_cases() -> list[dict]:
             "bscl_total_discharge": None, "bscl_discharge_date": None,
             "bscl_discharge_suicidality": None,
             "bfs_1": 11, "bfs_2": None, "bfs_3": None, "isolations": [],
+            # Nicht-freiwillig, kein Behandlungsplan -> CRITICAL
+            "is_voluntary": False, "treatment_plan_date": None, "sdep_complete": None,
+            "ekg_last_date": None, "ekg_last_reported": None,
+            "ekg_entry_date": None,  # Kein Eintritts-EKG nach 10 Tagen -> WARN
+            "clozapin_active": False, "clozapin_start_date": None,
+            "neutrophils_last_date": None, "neutrophils_last_value": None,
+            "troponin_last_date": None, "cbc_last_date": None,
+            "emergency_bem_start_date": None, "emergency_med_start_date": None,
+            "allergies_recorded": False,  # > 7 Tage, nicht erfasst -> WARN
         },
         {
             "case_id": "4645343", "patient_id": "4534235", "clinic": "EPP",
@@ -46,6 +152,15 @@ def make_dummy_cases() -> list[dict]:
             "bscl_total_discharge": 50, "bscl_discharge_date": _today - timedelta(days=2),
             "bscl_discharge_suicidality": 2,
             "bfs_1": 10, "bfs_2": 12, "bfs_3": 9, "isolations": [],
+            # Austritt vor 2 Tagen, SDEP nicht abgeschlossen -> CRITICAL
+            "is_voluntary": True, "treatment_plan_date": None, "sdep_complete": False,
+            "ekg_last_date": None, "ekg_last_reported": None,
+            "ekg_entry_date": (_today - timedelta(days=11)).isoformat(),
+            "clozapin_active": False, "clozapin_start_date": None,
+            "neutrophils_last_date": None, "neutrophils_last_value": None,
+            "troponin_last_date": None, "cbc_last_date": None,
+            "emergency_bem_start_date": None, "emergency_med_start_date": None,
+            "allergies_recorded": True,
         },
         {
             "case_id": "4645344", "patient_id": "4534236", "clinic": "EPP",
@@ -59,6 +174,15 @@ def make_dummy_cases() -> list[dict]:
             "bscl_total_discharge": None, "bscl_discharge_date": None,
             "bscl_discharge_suicidality": None,
             "bfs_1": None, "bfs_2": None, "bfs_3": None, "isolations": [],
+            "is_voluntary": True, "treatment_plan_date": (_today - timedelta(days=18)).isoformat(),
+            "sdep_complete": False,
+            "ekg_last_date": None, "ekg_last_reported": None,
+            "ekg_entry_date": (_today - timedelta(days=19)).isoformat(),
+            "clozapin_active": False, "clozapin_start_date": None,
+            "neutrophils_last_date": None, "neutrophils_last_value": None,
+            "troponin_last_date": None, "cbc_last_date": None,
+            "emergency_bem_start_date": None, "emergency_med_start_date": None,
+            "allergies_recorded": True,
         },
         {
             "case_id": "4645345", "patient_id": "4534237", "clinic": "EPP",
@@ -75,6 +199,21 @@ def make_dummy_cases() -> list[dict]:
             "isolations": [
                 {"start": (_today - timedelta(days=3)).isoformat() + "T08:00:00Z", "stop": None}
             ],
+            "is_voluntary": True, "treatment_plan_date": (_today - timedelta(days=12)).isoformat(),
+            "sdep_complete": True,
+            # EKG gestern, noch nicht befundet -> CRITICAL
+            "ekg_last_date": (_today - timedelta(days=1)).isoformat(),
+            "ekg_last_reported": False,
+            "ekg_entry_date": (_today - timedelta(days=13)).isoformat(),
+            # Clozapin seit 3 Wochen, Troponin fehlt -> WARN
+            "clozapin_active": True,
+            "clozapin_start_date": (_today - timedelta(weeks=3)).isoformat(),
+            "neutrophils_last_date": (_today - timedelta(days=5)).isoformat(),
+            "neutrophils_last_value": "3.2",
+            "troponin_last_date": None,  # < 5 Wochen, fehlt -> WARN
+            "cbc_last_date": (_today - timedelta(days=5)).isoformat(),
+            "emergency_bem_start_date": None, "emergency_med_start_date": None,
+            "allergies_recorded": True,
         },
         {
             "case_id": "4645346", "patient_id": "4534238", "clinic": "EPP",
@@ -90,6 +229,21 @@ def make_dummy_cases() -> list[dict]:
             "isolations": [
                 {"start": (_today - timedelta(days=4)).isoformat() + "T08:00:00Z", "stop": None}
             ],
+            "is_voluntary": False, "treatment_plan_date": (_today - timedelta(days=6)).isoformat(),
+            "sdep_complete": None,
+            "ekg_last_date": None, "ekg_last_reported": None,
+            "ekg_entry_date": (_today - timedelta(days=7)).isoformat(),
+            # Clozapin seit 10 Wochen, Grosses Blutbild > 7 Tage her -> WARN
+            "clozapin_active": True,
+            "clozapin_start_date": (_today - timedelta(weeks=10)).isoformat(),
+            "neutrophils_last_date": (_today - timedelta(days=1)).isoformat(),
+            "neutrophils_last_value": "1.5",  # < 2 G/l -> CRITICAL
+            "troponin_last_date": None,
+            "cbc_last_date": (_today - timedelta(days=10)).isoformat(),  # > 7 Tage -> WARN
+            # Notfallmedikation seit 5 Tagen -> CRITICAL
+            "emergency_bem_start_date": None,
+            "emergency_med_start_date": (_today - timedelta(days=5)).isoformat(),
+            "allergies_recorded": True,
         },
         {
             "case_id": "4645347", "patient_id": "4534239", "clinic": "EPP",
@@ -108,6 +262,17 @@ def make_dummy_cases() -> list[dict]:
                 {"start": (_today - timedelta(days=8)).isoformat() + "T12:00:00Z",
                  "stop": (_today - timedelta(days=8)).isoformat() + "T15:00:00Z"},
             ],
+            "is_voluntary": True, "treatment_plan_date": (_today - timedelta(days=13)).isoformat(),
+            "sdep_complete": None,
+            "ekg_last_date": None, "ekg_last_reported": None,
+            "ekg_entry_date": (_today - timedelta(days=14)).isoformat(),
+            "clozapin_active": False, "clozapin_start_date": None,
+            "neutrophils_last_date": None, "neutrophils_last_value": None,
+            "troponin_last_date": None, "cbc_last_date": None,
+            # Notfall-BEM seit 5 Tagen -> CRITICAL
+            "emergency_bem_start_date": (_today - timedelta(days=5)).isoformat(),
+            "emergency_med_start_date": None,
+            "allergies_recorded": True,
         },
     ]
 
@@ -192,6 +357,129 @@ def enrich_case(c: dict) -> dict:
     out = dict(c)
     out["center"] = center
     out["clinic"] = clinic
+
+    # --- Neue klinische Metriken (v2) ---
+
+    # Behandlungsplan: nicht-freiwillig + > 72h ohne Plan
+    is_voluntary = c.get("is_voluntary", True)
+    treatment_plan_date = c.get("treatment_plan_date")
+    treatment_plan_missing_involuntary_72h = (
+        not is_voluntary
+        and treatment_plan_date is None
+        and days_since_admission > 3  # >72h
+    )
+
+    # SDEP bei Austritt
+    sdep_complete = c.get("sdep_complete")
+    sdep_incomplete_at_discharge = (
+        discharge_date is not None
+        and days_from_discharge is not None
+        and days_from_discharge <= 3
+        and not sdep_complete
+    )
+
+    # EKG nicht befundet in 24h
+    ekg_last_date = c.get("ekg_last_date")
+    ekg_last_reported = c.get("ekg_last_reported")
+    ekg_not_reported_24h = False
+    if ekg_last_date is not None and discharge_date is None:
+        try:
+            ekg_d = ekg_last_date if isinstance(ekg_last_date, date) else date.fromisoformat(str(ekg_last_date))
+            if (today - ekg_d).days <= 1 and not ekg_last_reported:
+                ekg_not_reported_24h = True
+        except Exception:
+            pass
+
+    # Eintritts-EKG fehlt > 7 Tage
+    ekg_entry_date = c.get("ekg_entry_date")
+    ekg_entry_missing_7d = (
+        discharge_date is None
+        and days_since_admission > 7
+        and ekg_entry_date is None
+    )
+
+    # Clozapin-Monitoring
+    clozapin_active = c.get("clozapin_active", False)
+    clozapin_start_date = c.get("clozapin_start_date")
+    weeks_on_clozapin: float | None = None
+    if clozapin_active and clozapin_start_date is not None:
+        try:
+            csd = clozapin_start_date if isinstance(clozapin_start_date, date) else date.fromisoformat(str(clozapin_start_date))
+            weeks_on_clozapin = (today - csd).days / 7.0
+        except Exception:
+            pass
+
+    # Neutrophile < 2 G/l (letzten 48h)
+    clozapin_neutrophils_low = False
+    if clozapin_active:
+        neut_val = c.get("neutrophils_last_value")
+        neut_date = c.get("neutrophils_last_date")
+        if neut_val is not None and neut_date is not None:
+            try:
+                nd = neut_date if isinstance(neut_date, date) else date.fromisoformat(str(neut_date))
+                if (today - nd).days <= 2 and float(neut_val) < 2.0:
+                    clozapin_neutrophils_low = True
+            except Exception:
+                pass
+
+    # Grosses Blutbild fehlt (< 19 Wochen Clozapin, > 7 Tage seit letztem)
+    clozapin_cbc_missing_early = False
+    if clozapin_active and weeks_on_clozapin is not None and weeks_on_clozapin < 19:
+        cbc_last = c.get("cbc_last_date")
+        if cbc_last is None:
+            clozapin_cbc_missing_early = True
+        else:
+            try:
+                cbd = cbc_last if isinstance(cbc_last, date) else date.fromisoformat(str(cbc_last))
+                if (today - cbd).days > 7:
+                    clozapin_cbc_missing_early = True
+            except Exception:
+                pass
+
+    # Troponin fehlt (< 5 Wochen Clozapin, > 7 Tage seit letztem)
+    clozapin_troponin_missing_early = False
+    if clozapin_active and weeks_on_clozapin is not None and weeks_on_clozapin < 5:
+        trop_last = c.get("troponin_last_date")
+        if trop_last is None:
+            clozapin_troponin_missing_early = True
+        else:
+            try:
+                td = trop_last if isinstance(trop_last, date) else date.fromisoformat(str(trop_last))
+                if (today - td).days > 7:
+                    clozapin_troponin_missing_early = True
+            except Exception:
+                pass
+
+    # Notfall-BEM > 3 Tage
+    emergency_bem_start = c.get("emergency_bem_start_date")
+    emergency_bem_over_3d = False
+    if emergency_bem_start is not None and discharge_date is None:
+        try:
+            ebd = emergency_bem_start if isinstance(emergency_bem_start, date) else date.fromisoformat(str(emergency_bem_start))
+            if (today - ebd).days > 3:
+                emergency_bem_over_3d = True
+        except Exception:
+            pass
+
+    # Notfallmedikation > 3 Tage
+    emergency_med_start = c.get("emergency_med_start_date")
+    emergency_med_over_3d = False
+    if emergency_med_start is not None and discharge_date is None:
+        try:
+            emd = emergency_med_start if isinstance(emergency_med_start, date) else date.fromisoformat(str(emergency_med_start))
+            if (today - emd).days > 3:
+                emergency_med_over_3d = True
+        except Exception:
+            pass
+
+    # Allergien nicht erfasst > 7 Tage
+    allergies_recorded = c.get("allergies_recorded")
+    allergies_missing_7d = (
+        discharge_date is None
+        and days_since_admission > 7
+        and not allergies_recorded
+    )
+
     out["_derived"] = {
         "honos_entry_missing_over_3d": honos_entry_missing_over_3d,
         "bscl_entry_missing_over_3d": bscl_entry_missing_over_3d,
@@ -204,6 +492,17 @@ def enrich_case(c: dict) -> dict:
         "isolation_open_over_48h": isolation_open_over_48h,
         "isolation_multiple": isolation_multiple,
         "bfs_incomplete": bfs_incomplete,
+        # Neue Metriken (v2)
+        "treatment_plan_missing_involuntary_72h": treatment_plan_missing_involuntary_72h,
+        "sdep_incomplete_at_discharge": sdep_incomplete_at_discharge,
+        "ekg_not_reported_24h": ekg_not_reported_24h,
+        "ekg_entry_missing_7d": ekg_entry_missing_7d,
+        "clozapin_neutrophils_low": clozapin_neutrophils_low,
+        "clozapin_cbc_missing_early": clozapin_cbc_missing_early,
+        "clozapin_troponin_missing_early": clozapin_troponin_missing_early,
+        "emergency_bem_over_3d": emergency_bem_over_3d,
+        "emergency_med_over_3d": emergency_med_over_3d,
+        "allergies_missing_7d": allergies_missing_7d,
     }
     return out
 
@@ -240,6 +539,22 @@ def _load_raw_cases_from_db(station_id: str) -> list[dict]:
                 "bfs_2": int(c.bfs_2) if c.bfs_2 and c.bfs_2.isdigit() else c.bfs_2,
                 "bfs_3": int(c.bfs_3) if c.bfs_3 and c.bfs_3.isdigit() else c.bfs_3,
                 "isolations": json.loads(c.isolations_json) if c.isolations_json else [],
+                # Neue Felder (v2)
+                "is_voluntary": c.is_voluntary if c.is_voluntary is not None else True,
+                "treatment_plan_date": c.treatment_plan_date,
+                "sdep_complete": c.sdep_complete,
+                "ekg_last_date": c.ekg_last_date,
+                "ekg_last_reported": c.ekg_last_reported,
+                "ekg_entry_date": c.ekg_entry_date,
+                "clozapin_active": c.clozapin_active or False,
+                "clozapin_start_date": c.clozapin_start_date,
+                "neutrophils_last_date": c.neutrophils_last_date,
+                "neutrophils_last_value": c.neutrophils_last_value,
+                "troponin_last_date": c.troponin_last_date,
+                "cbc_last_date": c.cbc_last_date,
+                "emergency_bem_start_date": c.emergency_bem_start_date,
+                "emergency_med_start_date": c.emergency_med_start_date,
+                "allergies_recorded": c.allergies_recorded,
             }
             result.append(case_dict)
         return result
@@ -353,6 +668,22 @@ def seed_dummy_cases_to_db():
                 bfs_2=str(c.get("bfs_2")) if c.get("bfs_2") is not None else None,
                 bfs_3=str(c.get("bfs_3")) if c.get("bfs_3") is not None else None,
                 isolations_json=json.dumps(c.get("isolations", [])) if c.get("isolations") else None,
+                # Neue Felder (v2)
+                is_voluntary=c.get("is_voluntary", True),
+                treatment_plan_date=c.get("treatment_plan_date"),
+                sdep_complete=c.get("sdep_complete"),
+                ekg_last_date=c.get("ekg_last_date"),
+                ekg_last_reported=c.get("ekg_last_reported"),
+                ekg_entry_date=c.get("ekg_entry_date"),
+                clozapin_active=c.get("clozapin_active", False),
+                clozapin_start_date=c.get("clozapin_start_date"),
+                neutrophils_last_date=c.get("neutrophils_last_date"),
+                neutrophils_last_value=c.get("neutrophils_last_value"),
+                troponin_last_date=c.get("troponin_last_date"),
+                cbc_last_date=c.get("cbc_last_date"),
+                emergency_bem_start_date=c.get("emergency_bem_start_date"),
+                emergency_med_start_date=c.get("emergency_med_start_date"),
+                allergies_recorded=c.get("allergies_recorded"),
                 source="demo",
             )
             db.merge(case)

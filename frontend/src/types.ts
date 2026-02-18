@@ -20,6 +20,14 @@ export interface Alert {
   condition_hash?: string;
 }
 
+export interface ParameterStatus {
+  id: string;
+  label: string;
+  group: "completeness" | "medical";
+  status: "ok" | "warn" | "critical" | "na";
+  detail: string | null;
+}
+
 export interface CaseSummary {
   case_id: string;
   patient_id?: string;
@@ -33,6 +41,7 @@ export interface CaseSummary {
   critical_count?: number;
   warn_count?: number;
   acked_at?: string | null;
+  parameter_status?: ParameterStatus[];
 }
 
 export interface CaseDetail extends CaseSummary {

@@ -19,6 +19,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { CaseSummary, CaseDetail, Severity, DayState } from "./types";
 import { Toast } from "./Toast";
 import { AdminPanel } from "./AdminPanel";
+import ParameterBar from "./ParameterBar";
+import CaseTable from "./CaseTable";
+import MatrixReport from "./MatrixReport";
+import MonitoringPanel from "./MonitoringPanel";
 
 type ToastState =
   | { caseId: string; message: string; kind: "critical" | "warn" | "info" }
@@ -150,7 +154,7 @@ async function apiJson<T>(path: string, init: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
-type ViewMode = "overview" | "all" | "completeness" | "medical" | "admin";
+type ViewMode = "overview" | "cases" | "report" | "monitoring" | "admin";
 
 type StationOverviewItem = {
   station_id: string;
@@ -170,19 +174,16 @@ async function fetchOverview(auth: AuthState): Promise<StationOverviewItem[]> {
   });
 }
 
-async function fetchCases(auth: AuthState, view: ViewMode): Promise<CaseSummary[]> {
-  // Backend only accepts "all", "completeness", "medical"; admin is a UI-only mode
-  const apiView = (view === "admin") ? "all" : view;
-  const qs = new URLSearchParams({ view: apiView }).toString();
+async function fetchCases(auth: AuthState, _view: ViewMode): Promise<CaseSummary[]> {
+  const qs = new URLSearchParams({ view: "all" }).toString();
   return apiJson<CaseSummary[]>(`/api/cases?${qs}`, {
     method: "GET",
     headers: authHeaders(auth),
   });
 }
 
-async function fetchCaseDetail(caseId: string, auth: AuthState, view: ViewMode): Promise<CaseDetail> {
-  const apiView = (view === "admin") ? "all" : view;
-  const qs = new URLSearchParams({ view: apiView }).toString();
+async function fetchCaseDetail(caseId: string, auth: AuthState, _view: ViewMode): Promise<CaseDetail> {
+  const qs = new URLSearchParams({ view: "all" }).toString();
   return apiJson<CaseDetail>(`/api/cases/${encodeURIComponent(caseId)}?${qs}`, {
     method: "GET",
     headers: authHeaders(auth),
@@ -350,7 +351,7 @@ export default function App() {
     let alive = true;
     const load = async () => {
       try {
-        const [data, ds] = await Promise.all([fetchCases(auth, viewMode), fetchDayState(auth)]);
+        const [data, ds] = await Promise.all([fetchCases(auth, "cases"), fetchDayState(auth)]);
         if (!alive) return;
         setCases(data);
         setDayState(ds);
@@ -451,365 +452,217 @@ export default function App() {
   return (
     <main style={{ display: "flex", flexDirection: "column", height: "100vh", width: "100vw", overflow: "hidden", fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial", backgroundColor: "#f4f7f6" }}>
       {/* HEADER */}
-      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "stretch", padding: "0.8rem 1.5rem", backgroundColor: "#fff", borderBottom: "1px solid #d1d9e0", boxShadow: "0 2px 4px rgba(0,0,0,0.05)", zIndex: 100, gap: 16 }}>
-        <div style={{ display: "flex", flexDirection: "column", gap: 10, minWidth: 0 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 14, minWidth: 0 }}>
-            <h1 style={{ margin: 0, fontSize: "1.25rem", color: "#1a1a1a", lineHeight: 1.1 }}>Stations-Dashboard</h1>
-            <div style={{ marginLeft: 8, flexShrink: 0 }}><ClinicLogo title="Klinik-Logo (Dummy)" /></div>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 14, minWidth: 0, flexWrap: "wrap" }}>
-            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span style={{ fontSize: 12, color: "#666", fontWeight: 700 }}>Station</span>
-              <select value={auth.stationId} onChange={(e) => updateAuth({ stationId: e.target.value })} style={{ padding: "6px 10px", borderRadius: 10, border: "1px solid #ccc", background: "#fff", cursor: "pointer" }}>
+      <header style={{ backgroundColor: "#fff", borderBottom: "1px solid #e5e7eb", boxShadow: "0 1px 3px rgba(0,0,0,0.05)", zIndex: 100 }}>
+        {/* Top row: Logo + Controls */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 20px", gap: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+            <h1 style={{ margin: 0, fontSize: "1.15rem", color: "#1a1a1a", fontWeight: 800 }}>PUK Dashboard</h1>
+            <div style={{ flexShrink: 0 }}><ClinicLogo title="Klinik-Logo" /></div>
+            <label style={{ display: "flex", alignItems: "center", gap: 4, marginLeft: 8 }}>
+              <span style={{ fontSize: 11, color: "#6b7280", fontWeight: 600 }}>Station</span>
+              <select value={auth.stationId} onChange={(e) => updateAuth({ stationId: e.target.value })} style={{ padding: "4px 8px", borderRadius: 6, border: "1px solid #d1d5db", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
                 {stations.map((s) => <option key={s} value={s}>{s}</option>)}
               </select>
             </label>
-            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span style={{ fontSize: 12, color: "#666", fontWeight: 700 }}>User</span>
-              <select value={auth.userId} onChange={(e) => updateAuth({ userId: e.target.value })} style={{ padding: "6px 10px", borderRadius: 10, border: "1px solid #ccc", background: "#fff", cursor: "pointer" }}>
-                {metaUsers.map((u) => <option key={u.user_id} value={u.user_id}>{u.user_id} ({(u.roles ?? []).join(",") || "—"})</option>)}
+            <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <span style={{ fontSize: 11, color: "#6b7280", fontWeight: 600 }}>User</span>
+              <select value={auth.userId} onChange={(e) => updateAuth({ userId: e.target.value })} style={{ padding: "4px 8px", borderRadius: 6, border: "1px solid #d1d5db", fontSize: 12, cursor: "pointer" }}>
+                {metaUsers.map((u) => <option key={u.user_id} value={u.user_id}>{u.user_id}</option>)}
               </select>
             </label>
-            {dayState ? <span style={{ color: "#666", fontSize: "0.9rem", whiteSpace: "nowrap" }}>· Tag: {dayState.business_date} · Vers: {dayState.version}</span> : null}
+            {dayState && <span style={{ color: "#9ca3af", fontSize: 11 }}>Tag: {dayState.business_date} · V{dayState.version}</span>}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <button
+              onClick={async () => {
+                if (!canReset) return;
+                if (!window.confirm(`Alle heutigen Quittierungen für Station ${auth.stationId} zurücksetzen?`)) return;
+                try {
+                  const ds = await resetToday(auth);
+                  setDayState(ds);
+                  const data = await fetchCases(auth, viewMode);
+                  setCases(data);
+                  setSelectedCaseId(null); setDetail(null); setDetailError(null); setShiftByAlert({});
+                } catch (e: any) { setError(e?.message ?? String(e)); }
+              }}
+              disabled={!canReset}
+              style={{ padding: "4px 10px", fontSize: 11, borderRadius: 6, border: "1px solid #d1d5db", background: "#fff", cursor: canReset ? "pointer" : "not-allowed", opacity: canReset ? 1 : 0.5 }}
+            >
+              Reset
+            </button>
+            <button onClick={() => setIsAdminOpen(true)} disabled={!canAdmin} style={{ padding: "4px 10px", fontSize: 11, borderRadius: 6, border: "1px solid #d1d5db", background: "#fff", cursor: canAdmin ? "pointer" : "not-allowed", opacity: canAdmin ? 1 : 0.5 }}>
+              ⚙ Admin
+            </button>
+            <div style={{ fontSize: 11, textAlign: "right", color: "#6b7280" }}>
+              <span style={{ fontWeight: 700, color: "#374151" }}>{me?.user_id || auth.userId}</span>
+            </div>
           </div>
         </div>
 
-        <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", justifyContent: "flex-end" }}>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{ fontSize: 12, color: "#666" }}>Sicht</span>
-            <select value={viewMode} onChange={(e) => { setViewMode(e.target.value as ViewMode); if (e.target.value === "overview") { setSelectedCaseId(null); setDetail(null); } }} style={{ padding: "6px 10px", borderRadius: 10, border: "1px solid #ccc", background: "#fff", cursor: "pointer" }}>
-              <option value="overview">Stations-Übersicht</option>
-              <option value="all">Alle Alerts</option>
-              <option value="completeness">Vollständigkeit</option>
-              <option value="medical">Medizinisch</option>
-              {canAdmin ? <option value="admin">Admin</option> : null}
-            </select>
-          </label>
-
-          <button
-            onClick={async () => {
-              if (!canReset) return;
-              if (!window.confirm(`Achtung:\n\nDadurch werden alle heutigen Quittierungen und Erinnerungen für Station ${auth.stationId} zurückgesetzt.\n\nAlle Meldungen erscheinen wieder als offen.\n\nFortfahren?`)) return;
-              try {
-                const ds = await resetToday(auth);
-                setDayState(ds);
-                const data = await fetchCases(auth, viewMode);
-                setCases(data);
-                setSelectedCaseId(null); setDetail(null); setDetailError(null); setShiftByAlert({});
-              } catch (e: any) { setError(e?.message ?? String(e)); }
-            }}
-            disabled={!canReset}
-            style={{ padding: "6px 12px", cursor: canReset ? "pointer" : "not-allowed", borderRadius: 10, border: "1px solid #ccc", background: canReset ? "#fff" : "#f0f0f0", opacity: canReset ? 1 : 0.6 }}
-            title={canReset ? "Reset: alle heutigen Quittierungen verwerfen" : "Keine Berechtigung"}
-          >
-            Reset (heute)
-          </button>
-
-          <div style={{ fontSize: "0.85rem", textAlign: "right", lineHeight: 1.2 }}>
-            <div style={{ fontWeight: 700 }}>{me?.user_id || auth.userId}</div>
-            <div style={{ color: "#666" }}>Rollen: {(me?.roles ?? []).join(", ") || "—"}</div>
-          </div>
-
-          <button onClick={() => setIsAdminOpen(true)} disabled={!canAdmin} style={{ padding: "6px 12px", cursor: canAdmin ? "pointer" : "not-allowed", borderRadius: 10, border: "1px solid #ccc", background: canAdmin ? "#f0f0f0" : "#f6f6f6", opacity: canAdmin ? 1 : 0.6 }} title={canAdmin ? "Admin öffnen" : "Keine Admin-Rechte"}>
-            ⚙ Admin
-          </button>
-        </div>
+        {/* Tab Bar */}
+        <nav style={{ display: "flex", gap: 0, paddingLeft: 20, borderTop: "1px solid #f3f4f6" }}>
+          {([
+            { key: "overview", label: "Übersicht", icon: "📋" },
+            { key: "cases", label: "Fallliste", icon: "🏥" },
+            { key: "report", label: "Tagesbericht", icon: "📊" },
+            { key: "monitoring", label: "Monitoring", icon: "📈" },
+          ] as { key: ViewMode; label: string; icon: string }[]).map((tab) => {
+            const isActive = viewMode === tab.key;
+            return (
+              <button
+                key={tab.key}
+                onClick={() => {
+                  setViewMode(tab.key);
+                  if (tab.key === "overview") { setSelectedCaseId(null); setDetail(null); }
+                }}
+                style={{
+                  padding: "10px 18px",
+                  fontSize: 13,
+                  fontWeight: isActive ? 700 : 500,
+                  color: isActive ? "#1d4ed8" : "#6b7280",
+                  background: "transparent",
+                  border: "none",
+                  borderBottom: isActive ? "2px solid #3b82f6" : "2px solid transparent",
+                  cursor: "pointer",
+                  transition: "all 0.15s",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 5,
+                }}
+              >
+                <span style={{ fontSize: 14 }}>{tab.icon}</span>
+                {tab.label}
+              </button>
+            );
+          })}
+        </nav>
       </header>
 
       {metaError ? <div style={{ padding: "10px 16px", color: "#666", background: "#fff", borderBottom: "1px solid #eee" }}>{metaError}</div> : null}
       {error && <div style={{ padding: "10px 16px", color: "#b42318", background: "#fff", borderBottom: "1px solid #eee" }}>Fehler: {error}</div>}
 
-      {/* MAIN: split or overview */}
-      {viewMode === "overview" ? (
-        /* STATION OVERVIEW */
-        <div style={{ flex: 1, overflowY: "auto", padding: "2rem" }}>
-          <div style={{ maxWidth: 1200, margin: "0 auto" }}>
-            <h2 style={{ margin: "0 0 1.25rem 0", fontSize: "1.35rem" }}>Stations-Übersicht</h2>
-            {overview.length === 0 ? (
-              <div style={{ color: "#999", padding: 20 }}>Keine Stationen gefunden.</div>
-            ) : (
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 16 }}>
-                {overview.map((s) => (
-                  <div
-                    key={s.station_id}
-                    onClick={() => { updateAuth({ stationId: s.station_id }); setViewMode("all"); }}
-                    style={{
-                      padding: 20,
-                      borderRadius: 14,
-                      background: severityColor(s.severity),
-                      border: `2px solid ${severityBorderColor(s.severity)}`,
-                      cursor: "pointer",
-                      transition: "transform 0.15s, box-shadow 0.15s",
-                    }}
-                    onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.transform = "translateY(-2px)"; (e.currentTarget as HTMLElement).style.boxShadow = "0 6px 20px rgba(0,0,0,0.12)"; }}
-                    onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.transform = ""; (e.currentTarget as HTMLElement).style.boxShadow = ""; }}
-                  >
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-                      <div>
-                        <div style={{ fontSize: "1.3rem", fontWeight: 800 }}>{s.station_id}</div>
-                        <div style={{ fontSize: "0.8rem", color: "#666" }}>{s.center}</div>
-                      </div>
-                      <div style={{
-                        width: 44, height: 44, borderRadius: "50%",
-                        background: s.severity === "CRITICAL" ? "#ef4444" : s.severity === "WARN" ? "#f59e0b" : "#22c55e",
-                        display: "flex", alignItems: "center", justifyContent: "center",
-                        color: "#fff", fontWeight: 800, fontSize: 18,
-                      }}>
-                        {s.severity === "CRITICAL" ? "!" : s.severity === "WARN" ? "⚠" : "✓"}
-                      </div>
-                    </div>
+      {/* ═══ MAIN CONTENT ═══ */}
+      <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
 
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, fontSize: "0.85rem" }}>
-                      <div><span style={{ color: "#666" }}>Fälle gesamt:</span> <strong>{s.total_cases}</strong></div>
-                      <div><span style={{ color: "#666" }}>Offen:</span> <strong>{s.open_cases}</strong></div>
-                    </div>
-
-                    <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
-                      {s.critical_count > 0 && (
-                        <span style={{ fontSize: 12, background: "#ef4444", color: "#fff", padding: "3px 10px", borderRadius: 999, fontWeight: 700 }}>
-                          {s.critical_count} kritisch
-                        </span>
-                      )}
-                      {s.warn_count > 0 && (
-                        <span style={{ fontSize: 12, background: "#f59e0b", color: "#fff", padding: "3px 10px", borderRadius: 999, fontWeight: 700 }}>
-                          {s.warn_count} Warnung{s.warn_count > 1 ? "en" : ""}
-                        </span>
-                      )}
-                      {s.critical_count === 0 && s.warn_count === 0 && (
-                        <span style={{ fontSize: 12, background: "#22c55e", color: "#fff", padding: "3px 10px", borderRadius: 999, fontWeight: 700 }}>
-                          Alles OK
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-      ) : (
-      /* CASE LIST + DETAIL SPLIT */
-      <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
-        {/* LEFT: case list */}
-        <section style={{ flex: "0 0 380px", borderRight: "1px solid #d1d9e0", overflowY: "auto", backgroundColor: "#fff" }}>
-          {cases.length === 0 ? (
-            <div style={{ padding: 20, color: "#999" }}>Keine Fälle für diese Station.</div>
-          ) : (
-            cases.map((c) => {
-              const isSelected = selectedCaseId === c.case_id;
-              const critical = (c.critical_count ?? (c.severity === "CRITICAL" ? 1 : 0)) > 0;
-
-              return (
-                <div
-                  key={c.case_id}
-                  onClick={() => setSelectedCaseId(c.case_id)}
-                  style={{
-                    padding: "14px 14px",
-                    borderBottom: "1px solid #eee",
-                    cursor: "pointer",
-                    backgroundColor: isSelected ? "#eef6ff" : severityColor(c.severity),
-                    borderLeft: isSelected
-                      ? "4px solid #007bff"
-                      : `4px solid ${severityBorderColor(c.severity)}`,
-                    transition: "background 0.2s",
-                  }}
-                >
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10 }}>
-                    <div style={{ fontWeight: 700, overflowWrap: "anywhere" }}>{c.case_id}</div>
-                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                      {critical ? (
-                        <span style={{ fontSize: 12, background: "#ff4d4f", color: "white", padding: "2px 8px", borderRadius: 999, whiteSpace: "nowrap" }}>
-                          ‼ {c.critical_count ?? 1}
-                        </span>
-                      ) : null}
-                      {!!(c.warn_count && c.warn_count > 0) ? (
-                        <span style={{ fontSize: 12, color: "#333", whiteSpace: "nowrap" }}>⚠ {c.warn_count}</span>
-                      ) : null}
-                    </div>
-                  </div>
-
-                  <div style={{ fontSize: "0.85rem", color: "#666", marginTop: 4 }}>
-                    Eintritt: {c.admission_date}
-                  </div>
-                  <div style={{ fontSize: "0.85rem", color: c.discharge_date ? "#444" : "#2563eb", marginTop: 2, fontWeight: c.discharge_date ? 400 : 600 }}>
-                    {c.discharge_date ? `Austritt: ${c.discharge_date}` : "Offener Fall"}
-                  </div>
-                  {c.top_alert ? (
-                    <div style={{ fontSize: "0.85rem", color: "#444", marginTop: 6 }}>⚠ {c.top_alert}</div>
-                  ) : null}
-                </div>
-              );
-            })
-          )}
-        </section>
-
-        {/* RIGHT: details */}
-        <aside style={{ flex: 1, overflowY: "auto", padding: "1.5rem 1.75rem", position: "relative" }}>
-          {detailLoading && <div style={{ position: "absolute", top: 16, right: 16, color: "#666" }}>Lädt…</div>}
-
-          {!selectedCaseId ? (
-            <div style={{ display: "flex", justifyContent: "center", alignItems: "center", height: "100%", color: "#999" }}>
-              Wählen Sie einen Fall aus der Liste aus, um Details anzuzeigen.
-            </div>
-          ) : detailError ? (
-            <div style={{ color: "#b42318" }}>Fehler: {detailError}</div>
-          ) : detail ? (
-            <div style={{ maxWidth: 980, margin: "0 auto" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16, marginBottom: "1.25rem" }}>
-                <div style={{ minWidth: 0 }}>
-                  <h2 style={{ margin: 0 }}>Fall: {detail.case_id}</h2>
-                  <p style={{ color: "#666", marginTop: 6 }}>Station: {detail.station_id}</p>
-                </div>
-                {!!(detail as any).break_glass_active ? (
-                  <div style={{ background: "#fff2f0", border: "1px solid #ffccc7", padding: 10, borderRadius: 10, color: "#ff4d4f", fontWeight: 800, whiteSpace: "nowrap" }}>
-                    ⚠️ NOTFALLZUGRIFF AKTIV
-                  </div>
-                ) : null}
-              </div>
-
-              {/* Info Cards */}
-              <div style={{ marginBottom: 18, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
-                <div style={{ padding: 12, borderRadius: 12, background: "#fff", border: "1px solid #eee" }}>
-                  <div style={{ fontSize: 12, color: "#666", marginBottom: 6 }}>Fall</div>
-                  <div><strong>Station:</strong> {detail.station_id}</div>
-                  <div><strong>Eintritt:</strong> {(detail as any).admission_date ?? "—"}</div>
-                  <div style={{ color: detail.discharge_date ? "#333" : "#2563eb", fontWeight: detail.discharge_date ? 400 : 600 }}>
-                    <strong>Austritt:</strong> {detail.discharge_date ?? "Offener Fall"}
-                  </div>
-                </div>
-                <div style={{ padding: 12, borderRadius: 12, background: "#fff", border: "1px solid #eee" }}>
-                  <div style={{ fontSize: 12, color: "#666", marginBottom: 6 }}>Scores</div>
-                  <div><strong>HONOS:</strong> {(detail as any).honos ?? "—"}</div>
-                  <div><strong>BSCL:</strong> {(detail as any).bscl ?? "—"}</div>
-                </div>
-                <div style={{ padding: 12, borderRadius: 12, background: "#fff", border: "1px solid #eee" }}>
-                  <div style={{ fontSize: 12, color: "#666", marginBottom: 6 }}>Vollständigkeit</div>
-                  <div><strong>BFS vollständig:</strong> {(detail as any).bfs_complete ? "Ja" : "Nein"}</div>
-                  <div><strong>Status:</strong> {detail.severity === "OK" ? "✓ Alle Daten erfasst" : detail.severity}</div>
-                </div>
-              </div>
-
-              <h3 style={{ margin: "0 0 10px 0" }}>Alerts</h3>
-
-              {detail.alerts.length === 0 ? (
-                <div style={{ color: "#666", padding: 16, background: "#e8f5e9", borderRadius: 12 }}>
-                  ✓ Keine offenen Alerts.
-                </div>
+        {/* ─── TAB: ÜBERSICHT ─── */}
+        {viewMode === "overview" && (
+          <div style={{ flex: 1, overflowY: "auto", padding: "24px 28px" }}>
+            <div style={{ maxWidth: 1200, margin: "0 auto" }}>
+              <h2 style={{ margin: "0 0 16px 0", fontSize: "1.2rem" }}>Stations-Übersicht</h2>
+              {overview.length === 0 ? (
+                <div style={{ color: "#9ca3af", padding: 20 }}>Keine Stationen gefunden.</div>
               ) : (
-                <div style={{ display: "grid", gap: 12 }}>
-                  {detail.alerts.map((a) => {
-                    const key = `${detail.case_id}::${a.rule_id}`;
-                    const shiftVal = shiftByAlert[key] ?? "";
-
-                    return (
-                      <div
-                        key={a.rule_id}
-                        style={{
-                          padding: 14,
-                          borderRadius: 12,
-                          backgroundColor: severityColor(a.severity),
-                          border: `1px solid ${severityBorderColor(a.severity)}40`,
-                          display: "flex",
-                          justifyContent: "space-between",
-                          alignItems: "center",
-                          gap: 14,
-                        }}
-                      >
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontWeight: 800, marginBottom: 6, overflowWrap: "anywhere" }}>
-                            {(a as any).message ?? a.rule_id}
-                          </div>
-                          {(a as any).explanation ? (
-                            <div style={{ fontSize: "0.85rem", color: "#333", marginTop: 4, overflowWrap: "anywhere" }}>
-                              {(a as any).explanation}
-                            </div>
-                          ) : null}
-                          <div style={{ fontSize: "0.75rem", color: "#888", marginTop: 4 }}>
-                            {a.category === "completeness" ? "📋 Vollständigkeit" : "🏥 Medizinisch"} · {a.severity}
-                          </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 14 }}>
+                  {overview.map((s) => (
+                    <div
+                      key={s.station_id}
+                      onClick={() => { updateAuth({ stationId: s.station_id }); setViewMode("cases"); }}
+                      style={{
+                        padding: 16, borderRadius: 10,
+                        background: severityColor(s.severity),
+                        border: `2px solid ${severityBorderColor(s.severity)}`,
+                        cursor: "pointer", transition: "transform 0.15s, box-shadow 0.15s",
+                      }}
+                      onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.transform = "translateY(-2px)"; (e.currentTarget as HTMLElement).style.boxShadow = "0 4px 16px rgba(0,0,0,0.1)"; }}
+                      onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.transform = ""; (e.currentTarget as HTMLElement).style.boxShadow = ""; }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                        <div>
+                          <div style={{ fontSize: "1.2rem", fontWeight: 800 }}>{s.station_id}</div>
+                          <div style={{ fontSize: 11, color: "#6b7280" }}>{s.center}</div>
                         </div>
-
-                        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
-                          {/* Shift ("Nochmal erinnern") */}
-                          <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                            <span style={{ fontSize: 12, color: "#333" }}>Erinnern</span>
-                            <select
-                              disabled={!canAck}
-                              value={shiftVal}
-                              onChange={(e) => setShift(detail.case_id, a.rule_id, e.target.value)}
-                              style={{ padding: "6px 10px", borderRadius: 10, border: "1px solid #333", background: canAck ? "#fff" : "#eee", cursor: canAck ? "pointer" : "not-allowed", maxWidth: 180 }}
-                              title="Grund für das Erinnern wählen"
-                            >
-                              <option value="">–</option>
-                              {shiftReasons.map((r) => (
-                                <option key={r.code} value={r.code} title={r.description ?? ""}>
-                                  {r.code}: {r.label}
-                                </option>
-                              ))}
-                            </select>
-                          </label>
-
-                          <button
-                            disabled={!canAck || !shiftVal}
-                            onClick={async () => {
-                              if (!canAck || !shiftVal) return;
-                              try {
-                                await shiftRule(detail.case_id, a.rule_id, shiftVal, auth);
-                                setShift(detail.case_id, a.rule_id, "");
-                                const [newList, newDetail] = await Promise.all([fetchCases(auth, viewMode), fetchCaseDetail(detail.case_id, auth, viewMode)]);
-                                setCases(newList); setDetail(newDetail);
-                              } catch (e: any) { setError(e?.message ?? String(e)); }
-                            }}
-                            style={{ padding: "8px 12px", borderRadius: 10, border: "1px solid #333", background: "#fff", cursor: canAck && shiftVal ? "pointer" : "not-allowed", opacity: canAck && shiftVal ? 1 : 0.6 }}
-                            title={canAck ? "Nochmal erinnern" : "Keine Berechtigung"}
-                          >
-                            Nochmal erinnern
-                          </button>
-
-                          {/* Ack: "Behoben" or "Gesehen" */}
-                          <button
-                            disabled={!canAck}
-                            onClick={async () => {
-                              if (!canAck) return;
-                              try {
-                                await ackRule(detail.case_id, a.rule_id, auth);
-                                const [newList, newDetail] = await Promise.all([fetchCases(auth, viewMode), fetchCaseDetail(detail.case_id, auth, viewMode)]);
-                                setCases(newList); setDetail(newDetail);
-                                setToast((t) => {
-                                  if (!t || t.caseId !== detail.case_id) return t;
-                                  const updated = newList.find((x) => x.case_id === detail.case_id);
-                                  if (!updated || (updated.critical_count ?? 0) === 0) return null;
-                                  return t;
-                                });
-                              } catch (e: any) { setError(e?.message ?? String(e)); }
-                            }}
-                            style={{
-                              padding: "8px 14px",
-                              borderRadius: 10,
-                              border: "1px solid #333",
-                              background: canAck ? "#333" : "#999",
-                              color: "white",
-                              fontWeight: 700,
-                              cursor: canAck ? "pointer" : "not-allowed",
-                              opacity: canAck ? 1 : 0.6,
-                            }}
-                            title={canAck
-                              ? (a.category === "completeness" ? "Als behoben markieren" : "Als gesehen markieren")
-                              : "Keine Berechtigung"}
-                          >
-                            {ackLabel(a.category)}
-                          </button>
+                        <div style={{
+                          width: 36, height: 36, borderRadius: "50%",
+                          background: s.severity === "CRITICAL" ? "#ef4444" : s.severity === "WARN" ? "#f59e0b" : "#22c55e",
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                          color: "#fff", fontWeight: 800, fontSize: 15,
+                        }}>
+                          {s.severity === "CRITICAL" ? "!" : s.severity === "WARN" ? "⚠" : "✓"}
                         </div>
                       </div>
-                    );
-                  })}
+                      <div style={{ display: "flex", gap: 12, fontSize: 12, color: "#374151" }}>
+                        <span>Fälle: <strong>{s.total_cases}</strong></span>
+                        <span>Offen: <strong>{s.open_cases}</strong></span>
+                      </div>
+                      <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                        {s.critical_count > 0 && <span style={{ fontSize: 11, background: "#ef4444", color: "#fff", padding: "2px 8px", borderRadius: 999, fontWeight: 700 }}>{s.critical_count} kritisch</span>}
+                        {s.warn_count > 0 && <span style={{ fontSize: 11, background: "#f59e0b", color: "#fff", padding: "2px 8px", borderRadius: 999, fontWeight: 700 }}>{s.warn_count} Warn.</span>}
+                        {s.critical_count === 0 && s.warn_count === 0 && <span style={{ fontSize: 11, background: "#22c55e", color: "#fff", padding: "2px 8px", borderRadius: 999, fontWeight: 700 }}>OK</span>}
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
-          ) : null}
-        </aside>
+          </div>
+        )}
+
+        {/* ─── TAB: FALLLISTE (sortierbare Tabelle + Detail) ─── */}
+        {viewMode === "cases" && (
+          <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
+            {/* Left: sortable table */}
+            <div style={{ flex: selectedCaseId ? "0 0 55%" : 1, overflowY: "auto", borderRight: selectedCaseId ? "1px solid #e5e7eb" : "none" }}>
+              <CaseTable
+                cases={cases}
+                selectedCaseId={selectedCaseId}
+                onSelectCase={setSelectedCaseId}
+              />
+            </div>
+            {/* Right: detail panel */}
+            {selectedCaseId && (
+              <div style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
+                {detailLoading && <div style={{ color: "#9ca3af", fontSize: 12 }}>Lädt…</div>}
+                {detailError && <div style={{ color: "#dc2626" }}>Fehler: {detailError}</div>}
+                {detail && <DetailPanel
+                  detail={detail}
+                  canAck={canAck}
+                  shiftByAlert={shiftByAlert}
+                  shiftReasons={shiftReasons}
+                  onSetShift={setShift}
+                  onAckRule={async (caseId, ruleId) => {
+                    await ackRule(caseId, ruleId, auth);
+                    const [newList, newDetail] = await Promise.all([fetchCases(auth, viewMode), fetchCaseDetail(caseId, auth, viewMode)]);
+                    setCases(newList); setDetail(newDetail);
+                  }}
+                  onShiftRule={async (caseId, ruleId, shiftVal) => {
+                    await shiftRule(caseId, ruleId, shiftVal, auth);
+                    setShift(caseId, ruleId, "");
+                    const [newList, newDetail] = await Promise.all([fetchCases(auth, viewMode), fetchCaseDetail(caseId, auth, viewMode)]);
+                    setCases(newList); setDetail(newDetail);
+                  }}
+                  onError={(msg) => setError(msg)}
+                />}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ─── TAB: TAGESBERICHT (Matrix-Heatmap) ─── */}
+        {viewMode === "report" && (
+          <div style={{ flex: 1, overflowY: "auto", padding: "24px 28px" }}>
+            <div style={{ maxWidth: 1400, margin: "0 auto" }}>
+              <MatrixReport
+                cases={cases}
+                onSelectCase={(id) => { setSelectedCaseId(id); setViewMode("cases"); }}
+                authHeaders={authHeaders(auth) as Record<string, string>}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* ─── TAB: MONITORING (Sparklines + Detail-Charts) ─── */}
+        {viewMode === "monitoring" && (
+          <div style={{ flex: 1, overflowY: "auto", padding: "24px 28px" }}>
+            <div style={{ maxWidth: 1400, margin: "0 auto" }}>
+              <MonitoringPanel
+                cases={cases}
+                selectedCaseId={selectedCaseId}
+                onSelectCase={setSelectedCaseId}
+              />
+            </div>
+          </div>
+        )}
       </div>
-      )}
 
       {/* ADMIN MODAL */}
       {isAdminOpen && (
@@ -830,5 +683,137 @@ export default function App() {
         <Toast kind={toast.kind} message={toast.message} onClose={() => setToast(null)} onAction={() => { setSelectedCaseId(toast.caseId); setToast(null); }} actionLabel="Öffnen" />
       )}
     </main>
+  );
+}
+
+/* ═══════════════════════════════════════════
+   DetailPanel – Extracted from inline JSX
+   ═══════════════════════════════════════════ */
+interface DetailPanelProps {
+  detail: CaseDetail;
+  canAck: boolean;
+  shiftByAlert: Record<string, string>;
+  shiftReasons: ShiftReason[];
+  onSetShift: (caseId: string, ruleId: string, value: string) => void;
+  onAckRule: (caseId: string, ruleId: string) => Promise<void>;
+  onShiftRule: (caseId: string, ruleId: string, shiftVal: string) => Promise<void>;
+  onError: (msg: string) => void;
+}
+
+function DetailPanel({ detail, canAck, shiftByAlert, shiftReasons, onSetShift, onAckRule, onShiftRule, onError }: DetailPanelProps) {
+  return (
+    <div style={{ maxWidth: 980 }}>
+      {/* Header */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16, marginBottom: 16 }}>
+        <div>
+          <h2 style={{ margin: 0, fontSize: "1.15rem" }}>Fall: {detail.case_id}</h2>
+          <p style={{ color: "#6b7280", margin: "4px 0 0", fontSize: 13 }}>Station: {detail.station_id}</p>
+        </div>
+        {!!(detail as any).break_glass_active && (
+          <div style={{ background: "#fef2f2", border: "1px solid #fca5a5", padding: "6px 12px", borderRadius: 8, color: "#dc2626", fontWeight: 800, fontSize: 12 }}>
+            NOTFALLZUGRIFF AKTIV
+          </div>
+        )}
+      </div>
+
+      {/* Info Cards */}
+      <div style={{ marginBottom: 14, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 10 }}>
+        <div style={{ padding: 10, borderRadius: 8, background: "#f9fafb", border: "1px solid #e5e7eb" }}>
+          <div style={{ fontSize: 10, color: "#6b7280", fontWeight: 600, textTransform: "uppercase", marginBottom: 4 }}>Fall</div>
+          <div style={{ fontSize: 12 }}><strong>Eintritt:</strong> {(detail as any).admission_date ?? "—"}</div>
+          <div style={{ fontSize: 12, color: detail.discharge_date ? "#374151" : "#2563eb", fontWeight: detail.discharge_date ? 400 : 600 }}>
+            <strong>Austritt:</strong> {detail.discharge_date ?? "Offener Fall"}
+          </div>
+        </div>
+        <div style={{ padding: 10, borderRadius: 8, background: "#f9fafb", border: "1px solid #e5e7eb" }}>
+          <div style={{ fontSize: 10, color: "#6b7280", fontWeight: 600, textTransform: "uppercase", marginBottom: 4 }}>Scores</div>
+          <div style={{ fontSize: 12 }}><strong>HoNOS:</strong> {(detail as any).honos ?? "—"}</div>
+          <div style={{ fontSize: 12 }}><strong>BSCL:</strong> {(detail as any).bscl ?? "—"}</div>
+        </div>
+        <div style={{ padding: 10, borderRadius: 8, background: "#f9fafb", border: "1px solid #e5e7eb" }}>
+          <div style={{ fontSize: 10, color: "#6b7280", fontWeight: 600, textTransform: "uppercase", marginBottom: 4 }}>Dokumentation</div>
+          <div style={{ fontSize: 12 }}><strong>BFS:</strong> {(detail as any).bfs_complete ? "✓ Vollständig" : "✕ Unvollständig"}</div>
+          <div style={{ fontSize: 12 }}><strong>Status:</strong> {detail.severity === "OK" ? "✓ OK" : detail.severity}</div>
+        </div>
+      </div>
+
+      {/* Parameter Status */}
+      {detail.parameter_status && detail.parameter_status.length > 0 && (
+        <div style={{ marginBottom: 14, padding: 12, borderRadius: 8, background: "#fff", border: "1px solid #e5e7eb" }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "#374151", marginBottom: 6 }}>Parameter-Übersicht</div>
+          <ParameterBar parameters={detail.parameter_status} compact={false} showGroupLabels={true} />
+        </div>
+      )}
+
+      {/* Alerts */}
+      <h3 style={{ margin: "0 0 8px 0", fontSize: "0.95rem" }}>Alerts</h3>
+      {detail.alerts.length === 0 ? (
+        <div style={{ color: "#16a34a", padding: 14, background: "#f0fdf4", borderRadius: 8, fontSize: 13 }}>
+          ✓ Keine offenen Alerts.
+        </div>
+      ) : (
+        <div style={{ display: "grid", gap: 8 }}>
+          {detail.alerts.map((a) => {
+            const key = `${detail.case_id}::${a.rule_id}`;
+            const shiftVal = shiftByAlert[key] ?? "";
+            return (
+              <div
+                key={a.rule_id}
+                style={{
+                  padding: 12, borderRadius: 8,
+                  backgroundColor: severityColor(a.severity),
+                  border: `1px solid ${severityBorderColor(a.severity)}40`,
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 700, fontSize: 13 }}>{(a as any).message ?? a.rule_id}</div>
+                    {(a as any).explanation && (
+                      <div style={{ fontSize: 12, color: "#4b5563", marginTop: 3 }}>{(a as any).explanation}</div>
+                    )}
+                    <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 3 }}>
+                      {a.category === "completeness" ? "📋 Vollständigkeit" : "🏥 Medizinisch"} · {a.severity}
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                    <select
+                      disabled={!canAck}
+                      value={shiftVal}
+                      onChange={(e) => onSetShift(detail.case_id, a.rule_id, e.target.value)}
+                      style={{ padding: "4px 6px", borderRadius: 6, border: "1px solid #d1d5db", fontSize: 11, cursor: canAck ? "pointer" : "not-allowed", maxWidth: 140 }}
+                    >
+                      <option value="">Erinnern…</option>
+                      {shiftReasons.map((r) => (
+                        <option key={r.code} value={r.code}>{r.code}: {r.label}</option>
+                      ))}
+                    </select>
+                    <button
+                      disabled={!canAck || !shiftVal}
+                      onClick={async () => {
+                        try { await onShiftRule(detail.case_id, a.rule_id, shiftVal); }
+                        catch (e: any) { onError(e?.message ?? String(e)); }
+                      }}
+                      style={{ padding: "4px 8px", fontSize: 11, borderRadius: 6, border: "1px solid #d1d5db", background: "#fff", cursor: canAck && shiftVal ? "pointer" : "not-allowed", opacity: canAck && shiftVal ? 1 : 0.5 }}
+                    >
+                      Erinnern
+                    </button>
+                    <button
+                      disabled={!canAck}
+                      onClick={async () => {
+                        try { await onAckRule(detail.case_id, a.rule_id); }
+                        catch (e: any) { onError(e?.message ?? String(e)); }
+                      }}
+                      style={{ padding: "4px 10px", fontSize: 11, borderRadius: 6, border: "none", background: canAck ? "#1f2937" : "#9ca3af", color: "#fff", fontWeight: 700, cursor: canAck ? "pointer" : "not-allowed" }}
+                    >
+                      {ackLabel(a.category)}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
 }
