@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import json
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, Form
 from pydantic import BaseModel
@@ -20,7 +20,7 @@ from app.schemas import (
     AdminPermissionCreate, AdminPermissionUpdate,
     AdminRoleCreate, AdminRoleUpdate, AdminRolePermissions,
     AdminRuleUpsert, BreakGlassActivateReq, BreakGlassRevokeReq,
-    ShiftReasonCreate, ShiftReasonUpdate,
+    ShiftReasonCreate, ShiftReasonUpdate, AdminUserRoleAssignment,
 )
 from app.config import STATION_CENTER
 from app.rule_engine import invalidate_rule_cache, load_rules_yaml
@@ -700,6 +700,188 @@ def break_glass_list(
                 for s in rows
             ]
         }
+
+
+# ============================================================
+# CSV Import / Export
+# ============================================================
+
+_CSV_FIELDS = [
+    "case_id", "station_id", "patient_id", "patient_initials", "clinic", "center",
+    "admission_date", "discharge_date",
+    "honos_entry_total", "honos_entry_date", "honos_discharge_total", "honos_discharge_date", "honos_discharge_suicidality",
+    "bscl_total_entry", "bscl_entry_date", "bscl_total_discharge", "bscl_discharge_date", "bscl_discharge_suicidality",
+    "bfs_1", "bfs_2", "bfs_3",
+    "is_voluntary", "treatment_plan_date", "sdep_complete",
+    "ekg_last_date", "ekg_last_reported", "ekg_entry_date",
+    "clozapin_active", "clozapin_start_date", "neutrophils_last_date", "neutrophils_last_value",
+    "troponin_last_date", "cbc_last_date",
+    "emergency_bem_start_date", "emergency_med_start_date",
+    "allergies_recorded", "isolations_json",
+]
+
+def generate_sample_csv() -> str:
+    """Gibt eine Beispiel-CSV mit Header + 2 Beispielzeilen zurück."""
+    import csv as csv_mod
+    buf = io.StringIO()
+    writer = csv_mod.writer(buf)
+    writer.writerow(_CSV_FIELDS)
+    writer.writerow([
+        "F-2025-0001", "A1", "P001", "MM", "EPP", "ZAPE",
+        "2025-02-01", "",
+        "18", "2025-02-02", "", "", "",
+        "45", "2025-02-02", "", "", "",
+        "A", "B", "",
+        "True", "2025-02-03", "",
+        "2025-02-01", "True", "2025-02-01",
+        "False", "", "", "",
+        "", "",
+        "", "",
+        "True", "",
+    ])
+    writer.writerow([
+        "F-2025-0002", "A1", "P002", "AB", "EPP", "ZAPE",
+        "2025-02-10", "2025-02-18",
+        "22", "2025-02-11", "15", "2025-02-18", "0",
+        "50", "2025-02-11", "38", "2025-02-18", "0",
+        "A", "B", "C",
+        "False", "2025-02-11", "True",
+        "2025-02-10", "True", "2025-02-10",
+        "True", "2025-02-12", "2025-02-15", "3.2",
+        "2025-02-14", "2025-02-15",
+        "", "",
+        "True", "",
+    ])
+    return buf.getvalue()
+
+
+@router.post("/api/admin/csv/upload")
+def csv_upload(
+    request: Request,
+    file: UploadFile = File(...),
+    station_id: str = Form(default=""),
+    overwrite: str = Form(default="false"),
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:write")),
+):
+    """CSV-Upload: Importiert Fälle aus CSV/Excel in die Datenbank."""
+    import csv as csv_mod
+
+    errors = []
+    imported = 0
+    skipped = 0
+    total = 0
+
+    try:
+        raw = file.file.read()
+        # Try UTF-8 first, then latin-1
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = raw.decode("latin-1")
+
+        reader = csv_mod.DictReader(io.StringIO(text))
+        do_overwrite = overwrite.lower() in ("true", "1", "yes")
+
+        with SessionLocal() as db:
+            for row_num, row in enumerate(reader, start=2):
+                total += 1
+                try:
+                    cid = (row.get("case_id") or "").strip()
+                    if not cid:
+                        errors.append({"row": row_num, "error": "case_id fehlt", "case_id": ""})
+                        continue
+
+                    sid = station_id.strip() if station_id.strip() else (row.get("station_id") or "").strip()
+                    if not sid:
+                        errors.append({"row": row_num, "error": "station_id fehlt", "case_id": cid})
+                        continue
+
+                    existing = db.get(Case, cid)
+                    if existing and not do_overwrite:
+                        skipped += 1
+                        continue
+
+                    c = existing or Case(case_id=cid)
+                    c.station_id = sid
+                    c.patient_id = row.get("patient_id") or None
+                    c.patient_initials = row.get("patient_initials") or None
+                    c.clinic = row.get("clinic") or "EPP"
+                    c.center = row.get("center") or STATION_CENTER.get(sid, "UNKNOWN")
+                    c.admission_date = row.get("admission_date") or date.today().isoformat()
+                    c.discharge_date = row.get("discharge_date") or None
+
+                    # Int fields
+                    for fld in ["honos_entry_total", "honos_discharge_total", "honos_discharge_suicidality",
+                                "bscl_total_entry", "bscl_total_discharge", "bscl_discharge_suicidality"]:
+                        val = (row.get(fld) or "").strip()
+                        setattr(c, fld, int(val) if val else None)
+
+                    # Date fields
+                    for fld in ["honos_entry_date", "honos_discharge_date", "bscl_entry_date", "bscl_discharge_date",
+                                "treatment_plan_date", "ekg_last_date", "ekg_entry_date",
+                                "clozapin_start_date", "neutrophils_last_date", "troponin_last_date", "cbc_last_date",
+                                "emergency_bem_start_date", "emergency_med_start_date"]:
+                        val = (row.get(fld) or "").strip()
+                        setattr(c, fld, val if val else None)
+
+                    # String fields
+                    for fld in ["bfs_1", "bfs_2", "bfs_3", "neutrophils_last_value", "isolations_json"]:
+                        val = (row.get(fld) or "").strip()
+                        setattr(c, fld, val if val else None)
+
+                    # Bool fields
+                    for fld in ["is_voluntary", "sdep_complete", "ekg_last_reported", "clozapin_active", "allergies_recorded"]:
+                        val = (row.get(fld) or "").strip().lower()
+                        if val in ("true", "1", "yes", "ja"):
+                            setattr(c, fld, True)
+                        elif val in ("false", "0", "no", "nein"):
+                            setattr(c, fld, False)
+                        else:
+                            setattr(c, fld, None)
+
+                    c.imported_at = datetime.now(timezone.utc).isoformat()
+                    c.imported_by = ctx.user_id
+                    c.source = "csv"
+
+                    if not existing:
+                        db.add(c)
+                    imported += 1
+
+                except Exception as e:
+                    errors.append({"row": row_num, "error": str(e), "case_id": row.get("case_id", "")})
+
+            db.commit()
+
+        # Audit log in separate session
+        with SessionLocal() as db2:
+            log_security_event(
+                db2,
+                request=request,
+                actor_user_id=ctx.user_id,
+                actor_station_id=ctx.station_id,
+                action="CSV_UPLOAD",
+                target_type="case_data",
+                target_id=f"{imported} imported",
+                success=imported > 0,
+                details={"total": total, "imported": imported, "skipped": skipped, "errors": len(errors)},
+            )
+
+    except Exception as e:
+        return {
+            "success": False, "total_rows": total, "imported_rows": imported,
+            "skipped_rows": skipped, "failed_rows": len(errors) + 1,
+            "errors": errors + [{"row": 0, "error": str(e), "case_id": ""}],
+        }
+
+    return {
+        "success": len(errors) == 0,
+        "total_rows": total,
+        "imported_rows": imported,
+        "skipped_rows": skipped,
+        "failed_rows": len(errors),
+        "errors": errors[:50],  # limit error list
+    }
 
 
 @router.get("/api/admin/csv/sample")

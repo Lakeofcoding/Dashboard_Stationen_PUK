@@ -15,18 +15,13 @@
  * - Shift-Gründe dynamisch aus API
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import type { CaseSummary, CaseDetail, Severity, DayState } from "./types";
-import { Toast } from "./Toast";
 import { AdminPanel } from "./AdminPanel";
 import ParameterBar from "./ParameterBar";
 import CaseTable from "./CaseTable";
 import MatrixReport from "./MatrixReport";
 import MonitoringPanel from "./MonitoringPanel";
-
-type ToastState =
-  | { caseId: string; message: string; kind: "critical" | "warn" | "info" }
-  | null;
 
 type AuthState = {
   stationId: string;
@@ -145,8 +140,21 @@ function withCtx(path: string, init: RequestInit): string {
   return url.pathname + "?" + url.searchParams.toString();
 }
 
+class SessionExpiredError extends Error {
+  constructor(msg: string) { super(msg); this.name = "SessionExpiredError"; }
+}
+
 async function apiJson<T>(path: string, init: RequestInit): Promise<T> {
   const res = await fetch(withCtx(path, init), init);
+  if (res.status === 403 || res.status === 401) {
+    const text = await res.text().catch(() => "");
+    // Check if it's a session/auth issue vs permission issue
+    const lower = text.toLowerCase();
+    if (lower.includes("user disabled") || lower.includes("unknown user") || lower.includes("session")) {
+      throw new SessionExpiredError(text || "Sitzung abgelaufen");
+    }
+    throw new Error(text || `Keine Berechtigung (${res.status})`);
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(text || `HTTP ${res.status}`);
@@ -293,6 +301,33 @@ export default function App() {
   const canAdmin =
     permissions.has("admin:read") || permissions.has("admin:write") || permissions.has("audit:read");
 
+  // Session timeout: 30 min inactivity
+  const SESSION_TIMEOUT_MS = 30 * 60 * 1000;
+  const SESSION_WARNING_MS = 28 * 60 * 1000; // warn 2 min before
+  const lastActivityRef = useRef(Date.now());
+  const [sessionExpired, setSessionExpired] = useState(false);
+  const [sessionWarning, setSessionWarning] = useState(false);
+
+  // Track user activity
+  useEffect(() => {
+    const touch = () => { lastActivityRef.current = Date.now(); setSessionWarning(false); };
+    const events = ["mousedown", "keydown", "scroll", "touchstart"];
+    events.forEach(e => window.addEventListener(e, touch, { passive: true }));
+    // Check timeout every 30s
+    const timer = window.setInterval(() => {
+      const idle = Date.now() - lastActivityRef.current;
+      if (idle >= SESSION_TIMEOUT_MS) {
+        setSessionExpired(true);
+      } else if (idle >= SESSION_WARNING_MS) {
+        setSessionWarning(true);
+      }
+    }, 30_000);
+    return () => {
+      events.forEach(e => window.removeEventListener(e, touch));
+      window.clearInterval(timer);
+    };
+  }, []);
+
   const [viewMode, setViewMode] = useState<ViewMode>("overview");
   const [dayState, setDayState] = useState<DayState | null>(null);
   const [cases, setCases] = useState<CaseSummary[]>([]);
@@ -302,10 +337,8 @@ export default function App() {
   const [detail, setDetail] = useState<CaseDetail | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
-  const [toast, setToast] = useState<ToastState>(null);
   const [isAdminOpen, setIsAdminOpen] = useState(false);
   const [shiftByAlert, setShiftByAlert] = useState<Record<string, string>>({});
-  const shownCriticalRef = useRef<Record<string, true>>({});
 
   const setShift = (caseId: string, ruleId: string, value: string) => {
     setShiftByAlert((prev) => ({ ...prev, [`${caseId}::${ruleId}`]: value }));
@@ -324,8 +357,6 @@ export default function App() {
     setDetailError(null);
     setDetailLoading(false);
     setShiftByAlert({});
-    setToast(null);
-    shownCriticalRef.current = {};
   }, [auth.stationId, auth.userId]);
 
   // Load me
@@ -356,22 +387,6 @@ export default function App() {
         setCases(data);
         setDayState(ds);
         setError(null);
-
-        if (!toast) {
-          const firstCritical = data.find(
-            (c) =>
-              (c.critical_count ?? (c.severity === "CRITICAL" ? 1 : 0)) > 0 &&
-              !shownCriticalRef.current[c.case_id]
-          );
-          if (firstCritical) {
-            setToast({
-              kind: "critical",
-              caseId: firstCritical.case_id,
-              message: `${firstCritical.case_id}: ${firstCritical.top_alert ?? "Kritischer Status"}`,
-            });
-            shownCriticalRef.current[firstCritical.case_id] = true;
-          }
-        }
       } catch (e: any) {
         if (!alive) return;
         setError(e?.message ?? String(e));
@@ -380,7 +395,7 @@ export default function App() {
     load();
     const id = window.setInterval(load, 10_000);
     return () => { alive = false; window.clearInterval(id); };
-  }, [auth, toast, viewMode]);
+  }, [auth, viewMode]);
 
   // Load overview data
   useEffect(() => {
@@ -451,6 +466,36 @@ export default function App() {
 
   return (
     <main style={{ display: "flex", flexDirection: "column", height: "100vh", width: "100vw", overflow: "hidden", fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial", backgroundColor: "#f4f7f6" }}>
+      {/* SESSION EXPIRED OVERLAY */}
+      {sessionExpired && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.55)", backdropFilter: "blur(4px)" }}>
+          <div style={{ background: "#fff", borderRadius: 16, padding: "32px 40px", maxWidth: 420, textAlign: "center", boxShadow: "0 20px 60px rgba(0,0,0,0.3)" }}>
+            <div style={{ fontSize: 40, marginBottom: 12 }}>🔒</div>
+            <h2 style={{ margin: "0 0 8px 0", fontSize: 18 }}>Sitzung abgelaufen</h2>
+            <p style={{ color: "#6b7280", fontSize: 14, margin: "0 0 20px 0" }}>
+              Aus Sicherheitsgründen wurde Ihre Sitzung nach 30 Minuten Inaktivität beendet.
+              Patientendaten werden nicht mehr aktualisiert.
+            </p>
+            <button
+              onClick={() => { lastActivityRef.current = Date.now(); setSessionExpired(false); setSessionWarning(false); window.location.reload(); }}
+              style={{ padding: "10px 28px", borderRadius: 8, border: "none", background: "#3b82f6", color: "#fff", fontWeight: 700, fontSize: 14, cursor: "pointer" }}
+            >
+              Neu anmelden
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* SESSION WARNING BANNER */}
+      {sessionWarning && !sessionExpired && (
+        <div style={{ padding: "8px 20px", background: "#fef3c7", borderBottom: "1px solid #fcd34d", display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13, color: "#92400e", zIndex: 200 }}>
+          <span>⏱ Ihre Sitzung läuft in Kürze ab. Bewegen Sie die Maus, um aktiv zu bleiben.</span>
+          <button onClick={() => { lastActivityRef.current = Date.now(); setSessionWarning(false); }} style={{ padding: "4px 12px", borderRadius: 6, border: "1px solid #d97706", background: "#fff", color: "#92400e", fontWeight: 600, fontSize: 12, cursor: "pointer" }}>
+            Sitzung verlängern
+          </button>
+        </div>
+      )}
+
       {/* HEADER */}
       <header style={{ backgroundColor: "#fff", borderBottom: "1px solid #e5e7eb", boxShadow: "0 1px 3px rgba(0,0,0,0.05)", zIndex: 100 }}>
         {/* Top row: Logo + Controls */}
@@ -493,8 +538,27 @@ export default function App() {
             <button onClick={() => setIsAdminOpen(true)} disabled={!canAdmin} style={{ padding: "4px 10px", fontSize: 11, borderRadius: 6, border: "1px solid #d1d5db", background: "#fff", cursor: canAdmin ? "pointer" : "not-allowed", opacity: canAdmin ? 1 : 0.5 }}>
               ⚙ Admin
             </button>
-            <div style={{ fontSize: 11, textAlign: "right", color: "#6b7280" }}>
+            <div style={{ fontSize: 11, textAlign: "right", color: "#6b7280", display: "flex", alignItems: "center", gap: 8 }}>
+              {/* Role badge */}
+              {me && me.roles.length > 0 && (
+                <span style={{ padding: "2px 7px", borderRadius: 999, fontSize: 10, fontWeight: 600, background: "#eff6ff", color: "#1d4ed8", border: "1px solid #bfdbfe" }}>
+                  {me.roles.includes("system_admin") ? "System Admin"
+                    : me.roles.includes("admin") ? "Admin"
+                    : me.roles.includes("shift_lead") ? "Schichtleitung"
+                    : me.roles.includes("clinician") ? "Klinisch"
+                    : me.roles.includes("manager") ? "Management"
+                    : me.roles[0]}
+                </span>
+              )}
+              {/* Break-glass warning */}
+              {me?.break_glass && (
+                <span style={{ padding: "2px 7px", borderRadius: 999, fontSize: 10, fontWeight: 700, background: "#fef2f2", color: "#b91c1c", border: "1px solid #fecaca", animation: "pulse 2s infinite" }}>
+                  🔓 Break-Glass
+                </span>
+              )}
+              {/* User + Station context */}
               <span style={{ fontWeight: 700, color: "#374151" }}>{me?.user_id || auth.userId}</span>
+              <span style={{ color: "#9ca3af" }}>@ {auth.stationId}</span>
             </div>
           </div>
         </div>
@@ -679,9 +743,6 @@ export default function App() {
         </div>
       )}
 
-      {toast && (
-        <Toast kind={toast.kind} message={toast.message} onClose={() => setToast(null)} onAction={() => { setSelectedCaseId(toast.caseId); setToast(null); }} actionLabel="Öffnen" />
-      )}
     </main>
   );
 }

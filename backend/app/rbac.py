@@ -12,14 +12,13 @@ Hinweis:
 
 from __future__ import annotations
 
-from fastapi import HTTPException, Request, Depends  
 import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional, Set
 
-from fastapi import HTTPException, Request
+from fastapi import Depends, HTTPException, Request
 from sqlalchemy import select, delete
 from sqlalchemy.orm import Session
 
@@ -141,13 +140,18 @@ def seed_rbac(db: Session) -> None:
 
 # Funktion: ensure_user_exists – kapselt eine wiederverwendbare Backend-Operation.
 def ensure_user_exists(db: Session, user_id: str) -> User:
+    """Ensures user exists. In demo mode: auto-creates with viewer role.
+    In production (DEMO_MODE=false): rejects unknown users."""
+    from app.config import DEMO_MODE
     u = db.get(User, user_id)
     if u is None:
+        if not DEMO_MODE:
+            raise HTTPException(status_code=403, detail=f"Unknown user: {user_id}. Contact admin.")
+        # Demo-only: auto-create with minimal permissions
         u = User(user_id=user_id, display_name=None, is_active=True, created_at=utc_now_iso())
         db.add(u)
         db.commit()
         db.refresh(u)
-        # default: least privilege (viewer) on all stations
         if db.get(UserRole, (user_id, "viewer", "*")) is None:
             db.add(UserRole(user_id=user_id, role_id="viewer", station_id="*", created_at=utc_now_iso(), created_by="auto"))
             db.commit()
@@ -203,6 +207,24 @@ def resolve_permissions(db: Session, *, user_id: str, station_id: str) -> tuple[
     perms=set(rp)
     return roles, perms, is_break_glass
 
+
+def enforce_station_scope(db: Session, *, user_id: str, station_id: str) -> None:
+    """Validate user has at least one role assignment covering the requested station.
+    Raises 403 if user has no role for this station (prevents horizontal escalation).
+    Wildcard (*) roles cover all stations."""
+    if station_id == "*":
+        return  # global scope (admin endpoints)
+    rows = db.execute(
+        select(UserRole.station_id).where(UserRole.user_id == user_id)
+    ).scalars().all()
+    allowed = set(rows)
+    if "*" in allowed or station_id in allowed:
+        return
+    raise HTTPException(
+        status_code=403,
+        detail=f"Kein Zugriff auf Station {station_id}. Kontaktieren Sie den Admin.",
+    )
+
 # -----------------------------------------------------------------------------
 # Enforcement dependency
 # -----------------------------------------------------------------------------
@@ -210,18 +232,13 @@ def resolve_permissions(db: Session, *, user_id: str, station_id: str) -> tuple[
 # In app/rbac.py
 
 
-# In app/rbac.py
-
-# Funktion: require_permission – kapselt eine wiederverwendbare Backend-Operation.
 def require_permission(permission: str):
-    # Diese Importe müssen HIER stehen, damit sie für _dep verfügbar sind
-    from fastapi import Depends
+    # auth-Import hier (nicht oben), um zirkulaere Imports zu vermeiden
+    # (rbac.py wird von auth.py importiert)
     from app.auth import get_auth_context, AuthContext
 
-# Funktion: _dep – kapselt eine wiederverwendbare Backend-Operation.
     def _dep(ctx: AuthContext = Depends(get_auth_context)):
         if permission not in ctx.permissions:
-            from fastapi import HTTPException # Sicherstellen, dass HTTPException da ist
             raise HTTPException(
                 status_code=403, 
                 detail=f"Missing permission: {permission}"
@@ -247,6 +264,8 @@ def activate_break_glass(
 ) -> BreakGlassSession:
     if duration_minutes < 5 or duration_minutes > 12 * 60:
         raise HTTPException(status_code=400, detail="duration_minutes out of range (5..720)")
+    if not reason or len(reason.strip()) < 10:
+        raise HTTPException(status_code=400, detail="Pflichtbegründung: Mindestens 10 Zeichen erforderlich.")
 
     now = datetime.now(timezone.utc)
     session = BreakGlassSession(

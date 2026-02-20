@@ -17,7 +17,7 @@ from typing import Optional, Set
 from fastapi import Depends, Header, HTTPException, Query
 
 from app.db import SessionLocal
-from app.rbac import ensure_user_exists, resolve_permissions
+from app.rbac import ensure_user_exists, resolve_permissions, enforce_station_scope
 
 
 @dataclass(frozen=True)
@@ -87,6 +87,8 @@ def get_auth_context(
         u = ensure_user_exists(db, user_id)
         if not u.is_active:
             raise HTTPException(status_code=403, detail="User disabled")
+        # Enforce: User must have at least one role covering this station
+        enforce_station_scope(db, user_id=user_id, station_id=station_id)
         roles, perms, is_bg = resolve_permissions(db, user_id=user_id, station_id=station_id)
 
     return AuthContext(user_id=user_id, station_id=station_id, roles=roles, permissions=perms, is_break_glass=is_bg)

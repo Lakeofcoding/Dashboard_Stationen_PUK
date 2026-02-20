@@ -5,7 +5,7 @@ from app.auth import AuthContext, get_auth_context
 from app.rbac import require_permission
 from app.schemas import StationOverviewItem
 from app.config import STATION_CENTER
-from app.case_logic import get_station_cases
+from app.case_logic import get_station_cases, DUMMY_CASES
 from app.rule_engine import evaluate_alerts, summarize_severity
 from app.ack_store import AckStore
 from app.db import SessionLocal

@@ -1,18 +1,19 @@
 """
-Datei: backend/app/audit.py
+Audit-Logging (Security Events).
 
-Zweck:
-- Backend-/Serverlogik dieser Anwendung.
-- Kommentare wurden ergänzt, um Einstieg und Wartung zu erleichtern.
+Schreibt Sicherheits-Events in die SecurityEvent-Tabelle.
+Resilient: Audit-Fehler werden geloggt, aber NIEMALS nach oben propagiert,
+damit die aufrufende Operation nicht durch einen Audit-Fehler crasht.
 
-Hinweis:
-- Sicherheitsrelevante Checks (RBAC/Permissions) werden serverseitig erzwungen.
+Klinischer Kontext: Ein fehlgeschlagener Audit-Eintrag darf nicht dazu fuehren,
+dass ein kritischer klinischer Workflow (z.B. ACK einer Warnung) fehlschlaegt.
 """
 
 
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -22,13 +23,13 @@ from sqlalchemy.orm import Session
 
 from app.models import SecurityEvent
 
+logger = logging.getLogger("puk.audit")
 
-# Funktion: utc_now_iso – kapselt eine wiederverwendbare Backend-Operation.
+
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# Funktion: log_security_event – kapselt eine wiederverwendbare Backend-Operation.
 def log_security_event(
     db: Session,
     *,
@@ -42,25 +43,43 @@ def log_security_event(
     message: str | None = None,
     details: Any | None = None,
 ) -> None:
-    ip = None
-    ua = None
-    if request is not None:
-        ip = request.client.host if request.client else None
-        ua = request.headers.get("User-Agent")
+    """Schreibt ein Security-Event. Faengt eigene Fehler ab (resilient).
 
-    ev = SecurityEvent(
-        event_id=str(uuid.uuid4()),
-        ts=utc_now_iso(),
-        actor_user_id=actor_user_id,
-        actor_station_id=actor_station_id,
-        action=action,
-        target_type=target_type,
-        target_id=target_id,
-        success=bool(success),
-        message=message,
-        ip=ip,
-        user_agent=ua,
-        details=json.dumps(details, ensure_ascii=False) if details is not None else None,
-    )
-    db.add(ev)
-    db.commit()
+    WICHTIG: Diese Funktion darf NIEMALS eine Exception nach oben propagieren.
+    Wenn db.commit() fehlschlaegt, wird ein Rollback durchgefuehrt und der
+    Fehler geloggt, aber die aufrufende Operation bleibt intakt.
+    """
+    try:
+        ip = None
+        ua = None
+        if request is not None:
+            ip = request.client.host if request.client else None
+            ua = request.headers.get("User-Agent")
+
+        ev = SecurityEvent(
+            event_id=str(uuid.uuid4()),
+            ts=utc_now_iso(),
+            actor_user_id=actor_user_id,
+            actor_station_id=actor_station_id,
+            action=action,
+            target_type=target_type,
+            target_id=target_id,
+            success=bool(success),
+            message=message,
+            ip=ip,
+            user_agent=ua,
+            details=json.dumps(details, ensure_ascii=False) if details is not None else None,
+        )
+        db.add(ev)
+        db.commit()
+    except Exception:
+        # Rollback um die Session nicht in einem kaputten Zustand zu lassen
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.error(
+            "Audit-Logging fehlgeschlagen fuer action=%s target=%s/%s",
+            action, target_type, target_id,
+            exc_info=True,
+        )

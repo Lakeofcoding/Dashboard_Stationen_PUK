@@ -70,42 +70,43 @@ class DayStateResponse(BaseModel):
 
 
 # --- Admin models ---
+class AdminUserRoleAssignment(BaseModel):
+    role_id: str
+    station_id: str = "*"
+
 class AdminUserCreate(BaseModel):
     user_id: str
-    full_name: Optional[str] = None
-    email: Optional[str] = None
+    display_name: Optional[str] = None
+    is_active: bool = True
+    roles: Optional[list[AdminUserRoleAssignment]] = None
 
 class AdminUserUpdate(BaseModel):
-    full_name: Optional[str] = None
-    email: Optional[str] = None
+    display_name: Optional[str] = None
     is_active: Optional[bool] = None
 
 class AdminAssignRole(BaseModel):
     role_id: str
     station_id: str = "*"
-    created_by: str = "admin"
 
 class AdminPermissionCreate(BaseModel):
-    permission_id: str
+    perm_id: str
     description: Optional[str] = None
-    category: Optional[str] = None
 
 class AdminPermissionUpdate(BaseModel):
     description: Optional[str] = None
-    category: Optional[str] = None
 
 class AdminRoleCreate(BaseModel):
     role_id: str
     description: Optional[str] = None
-    is_system: bool = False
 
 class AdminRoleUpdate(BaseModel):
     description: Optional[str] = None
 
 class AdminRolePermissions(BaseModel):
-    permission_ids: list[str]
+    permissions: list[str]
 
 class AdminRuleUpsert(BaseModel):
+    rule_id: str
     display_name: Optional[str] = None
     message: Optional[str] = None
     explanation: Optional[str] = None
@@ -113,16 +114,16 @@ class AdminRuleUpsert(BaseModel):
     severity: Optional[str] = None
     metric: Optional[str] = None
     operator: Optional[str] = None
-    value_json: Optional[str] = None
+    value: Any = None
     enabled: Optional[bool] = None
 
 class BreakGlassActivateReq(BaseModel):
     reason: str
-    station_id: str = "*"
+    station_scope: str = "*"
     duration_minutes: int = 60
 
 class BreakGlassRevokeReq(BaseModel):
-    reason: str = ""
+    review_note: str = ""
 
 class ShiftReasonCreate(BaseModel):
     code: str

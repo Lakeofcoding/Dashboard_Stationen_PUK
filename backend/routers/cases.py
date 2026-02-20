@@ -238,7 +238,7 @@ def ack(
     # --- Eingabevalidierung für SHIFT
     if (req.action or "ACK") == "SHIFT":
         # Validate shift code against configured reasons
-        valid_codes = _get_valid_shift_codes()
+        valid_codes = get_valid_shift_codes()
         if req.shift_code not in valid_codes:
             raise HTTPException(status_code=400, detail=f"SHIFT requires a valid shift_code. Valid: {', '.join(valid_codes)}")
 
