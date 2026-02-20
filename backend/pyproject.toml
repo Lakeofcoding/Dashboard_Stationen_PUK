@@ -1,0 +1,26 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--tb=short",
+    "-x",                  # stop on first failure (remove for CI full run)
+]
+markers = [
+    "smoke: Quick smoke tests (every endpoint once)",
+    "rbac: Role-based access control tests",
+    "lifecycle: ACK/SHIFT/Reset lifecycle tests",
+    "admin: Admin CRUD operations",
+    "security: Security headers, CSRF, nonce tests",
+    "rules: Rule engine evaluation tests",
+    "export: Export endpoint tests",
+    "integration: Full integration tests",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning",
+]

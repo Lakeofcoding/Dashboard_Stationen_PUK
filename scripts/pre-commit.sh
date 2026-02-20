@@ -1,123 +1,151 @@
 #!/bin/bash
 # Pre-Commit Hook für PUK Dashboard
-# Verhindert versehentliches Committen sensibler Daten
+# Verhindert: (1) sensible Daten im Repo, (2) kaputten Code
 #
-# Installation:
-# cp scripts/pre-commit.sh .git/hooks/pre-commit
-# chmod +x .git/hooks/pre-commit
+# Installation (Linux/Mac):
+#   cp scripts/pre-commit.sh .git/hooks/pre-commit
+#   chmod +x .git/hooks/pre-commit
+#
+# Installation (Windows, Git Bash):
+#   cp scripts/pre-commit.sh .git/hooks/pre-commit
 
 set -e
 
-echo "🔍 Pre-Commit Checks..."
+echo "Pre-Commit Checks..."
 
-# Farben
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 ERRORS=0
 
-# 1. Check für .env Dateien
-echo -n "  Checking for .env files... "
-if git diff --cached --name-only | grep -E "\.env$" > /dev/null; then
-    echo -e "${RED}FAILED${NC}"
-    echo "    ❌ .env Dateien dürfen nicht committed werden!"
-    echo "    Nur .env.example ist erlaubt."
+# ── Phase 1: Security Checks (keine Daten/Secrets im Repo) ──────────
+
+echo -n "  [1/9] .env files... "
+if git diff --cached --name-only | grep -E "\.env$" > /dev/null 2>&1; then
+    echo -e "${RED}BLOCKED${NC} — .env darf nicht committed werden"
     ERRORS=$((ERRORS + 1))
 else
     echo -e "${GREEN}OK${NC}"
 fi
 
-# 2. Check für Datenbank-Dateien
-echo -n "  Checking for database files... "
-if git diff --cached --name-only | grep -E "\.(db|sqlite|db-shm|db-wal)$" > /dev/null; then
-    echo -e "${RED}FAILED${NC}"
-    echo "    ❌ Datenbank-Dateien dürfen nicht committed werden!"
+echo -n "  [2/9] Database files... "
+if git diff --cached --name-only | grep -E "\.(db|sqlite|db-shm|db-wal)$" > /dev/null 2>&1; then
+    echo -e "${RED}BLOCKED${NC} — DB-Dateien gehoeren nicht ins Repo"
     ERRORS=$((ERRORS + 1))
 else
     echo -e "${GREEN}OK${NC}"
 fi
 
-# 3. Check für Private Keys
-echo -n "  Checking for private keys... "
-if git diff --cached --name-only | grep -E "\.(key|pem|p12)$" > /dev/null; then
-    echo -e "${RED}FAILED${NC}"
-    echo "    ❌ Private Keys dürfen nicht committed werden!"
+echo -n "  [3/9] Private keys... "
+if git diff --cached --name-only | grep -E "\.(key|pem|p12|pfx)$" > /dev/null 2>&1; then
+    echo -e "${RED}BLOCKED${NC}"
     ERRORS=$((ERRORS + 1))
 else
     echo -e "${GREEN}OK${NC}"
 fi
 
-# 4. Check für Secrets in Code
-echo -n "  Checking for hardcoded secrets... "
-if git diff --cached -U0 | grep -iE "(password|secret|api_key|token)\s*=\s*['\"][^'\"]{8,}" > /dev/null; then
-    echo -e "${YELLOW}WARNING${NC}"
-    echo "    ⚠️  Möglicherweise hardcoded Secrets gefunden!"
-    echo "    Bitte manuell prüfen."
-    # Nicht als Error, nur Warnung
+echo -n "  [4/9] Hardcoded secrets... "
+if git diff --cached -U0 2>/dev/null | grep -iE "(password|secret|api_key|token)\s*=\s*['\"][^'\"]{8,}" > /dev/null 2>&1; then
+    echo -e "${YELLOW}WARNING${NC} — bitte manuell pruefen"
 else
     echo -e "${GREEN}OK${NC}"
 fi
 
-# 5. Check für node_modules
-echo -n "  Checking for node_modules... "
-if git diff --cached --name-only | grep "node_modules/" > /dev/null; then
-    echo -e "${RED}FAILED${NC}"
-    echo "    ❌ node_modules/ darf nicht committed werden!"
+echo -n "  [5/9] Build artifacts... "
+if git diff --cached --name-only | grep -E "node_modules/|\.venv/|__pycache__/" > /dev/null 2>&1; then
+    echo -e "${RED}BLOCKED${NC} — Build-Artefakte nicht committen"
     ERRORS=$((ERRORS + 1))
 else
     echo -e "${GREEN}OK${NC}"
 fi
 
-# 6. Check für .venv
-echo -n "  Checking for .venv... "
-if git diff --cached --name-only | grep "\.venv/" > /dev/null; then
-    echo -e "${RED}FAILED${NC}"
-    echo "    ❌ .venv/ darf nicht committed werden!"
-    ERRORS=$((ERRORS + 1))
+# ── Phase 2: Python Compile Check (schnell, <1s) ────────────────────
+
+echo -n "  [6/9] Python syntax... "
+BACKEND_DIR="$(git rev-parse --show-toplevel)/backend"
+if [ -d "$BACKEND_DIR" ]; then
+    SYNTAX_ERRORS=$(find "$BACKEND_DIR" -name "*.py" \
+        -not -path "*__pycache__*" -not -path "*.venv*" \
+        -exec python -c "
+import py_compile, sys
+try:
+    py_compile.compile(sys.argv[1], doraise=True)
+except py_compile.PyCompileError as e:
+    print(f'  {e}', file=sys.stderr)
+    sys.exit(1)
+" {} \; 2>&1 | grep -c "Error" || true)
+    if [ "$SYNTAX_ERRORS" -gt 0 ]; then
+        echo -e "${RED}FAILED${NC} — $SYNTAX_ERRORS Syntax-Fehler"
+        ERRORS=$((ERRORS + 1))
+    else
+        echo -e "${GREEN}OK${NC}"
+    fi
 else
-    echo -e "${GREEN}OK${NC}"
+    echo -e "${YELLOW}SKIP${NC} — backend/ nicht gefunden"
 fi
 
-# 7. Check für __pycache__
-echo -n "  Checking for __pycache__... "
-if git diff --cached --name-only | grep "__pycache__/" > /dev/null; then
-    echo -e "${RED}FAILED${NC}"
-    echo "    ❌ __pycache__/ darf nicht committed werden!"
-    ERRORS=$((ERRORS + 1))
+# ── Phase 3: Smoke Tests (wenn pytest verfuegbar, ~5s) ──────────────
+
+echo -n "  [7/9] Smoke tests... "
+if python -c "import pytest" 2>/dev/null; then
+    cd "$BACKEND_DIR" 2>/dev/null || cd "$(git rev-parse --show-toplevel)/backend"
+    if python -m pytest -m smoke -q --tb=line --no-header -x 2>/dev/null; then
+        echo -e "${GREEN}OK${NC}"
+    else
+        echo -e "${RED}FAILED${NC} — Smoke-Tests fehlgeschlagen"
+        echo "    Tipp: python -m pytest -m smoke -v  fuer Details"
+        ERRORS=$((ERRORS + 1))
+    fi
+    cd - > /dev/null 2>/dev/null || true
 else
-    echo -e "${GREEN}OK${NC}"
+    echo -e "${YELLOW}SKIP${NC} — pytest nicht installiert (pip install pytest httpx)"
 fi
 
-# 8. Check für große Dateien (> 10MB)
-echo -n "  Checking for large files... "
-LARGE_FILES=$(git diff --cached --name-only --diff-filter=ACM | xargs -I {} du -k {} 2>/dev/null | awk '$1 > 10240 {print $2}')
-if [ -n "$LARGE_FILES" ]; then
-    echo -e "${YELLOW}WARNING${NC}"
-    echo "    ⚠️  Große Dateien (>10MB) gefunden:"
-    echo "$LARGE_FILES" | while read file; do
-        size=$(du -h "$file" | cut -f1)
-        echo "      - $file ($size)"
+# ── Phase 4: Frontend Check ─────────────────────────────────────────
+
+echo -n "  [8/9] JSX balance... "
+FRONTEND_DIR="$(git rev-parse --show-toplevel)/frontend/src"
+if [ -d "$FRONTEND_DIR" ]; then
+    JSX_ERRORS=0
+    for f in "$FRONTEND_DIR"/*.tsx; do
+        [ -f "$f" ] || continue
+        BRACES=$(python -c "s=open('$f').read(); print(s.count('{')-s.count('}'))" 2>/dev/null || echo "0")
+        PARENS=$(python -c "s=open('$f').read(); print(s.count('(')-s.count(')'))" 2>/dev/null || echo "0")
+        if [ "$BRACES" != "0" ] || [ "$PARENS" != "0" ]; then
+            echo ""
+            echo "    $(basename $f): braces=$BRACES parens=$PARENS"
+            JSX_ERRORS=$((JSX_ERRORS + 1))
+        fi
     done
-    echo "    Erwägen Sie Git LFS: git lfs track \"$LARGE_FILES\""
-    # Nicht als Error, nur Warnung
+    if [ "$JSX_ERRORS" -gt 0 ]; then
+        echo -e "${RED}FAILED${NC}"
+        ERRORS=$((ERRORS + 1))
+    else
+        echo -e "${GREEN}OK${NC}"
+    fi
+else
+    echo -e "${YELLOW}SKIP${NC}"
+fi
+
+echo -n "  [9/9] Large files (>10MB)... "
+LARGE=$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null | xargs -I {} du -k {} 2>/dev/null | awk '$1 > 10240 {print $2}')
+if [ -n "$LARGE" ]; then
+    echo -e "${YELLOW}WARNING${NC}"
+    echo "$LARGE"
 else
     echo -e "${GREEN}OK${NC}"
 fi
+
+# ── Ergebnis ─────────────────────────────────────────────────────────
 
 echo ""
-
-# Ergebnis
 if [ $ERRORS -gt 0 ]; then
-    echo -e "${RED}❌ Pre-Commit Checks FAILED${NC}"
-    echo ""
-    echo "Bitte beheben Sie die Fehler und versuchen Sie es erneut."
-    echo "Oder überspringen Sie die Checks mit: git commit --no-verify"
-    echo ""
+    echo -e "${RED}COMMIT BLOCKIERT${NC} ($ERRORS Fehler)"
+    echo "  Beheben und erneut committen, oder: git commit --no-verify"
     exit 1
 else
-    echo -e "${GREEN}✅ All Pre-Commit Checks Passed${NC}"
-    echo ""
+    echo -e "${GREEN}Alle Checks bestanden${NC}"
     exit 0
 fi
