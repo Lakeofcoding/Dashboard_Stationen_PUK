@@ -727,7 +727,7 @@ def generate_sample_csv() -> str:
     writer = csv_mod.writer(buf)
     writer.writerow(_CSV_FIELDS)
     writer.writerow([
-        "F-2025-0001", "A1", "P001", "MM", "EPP", "ZAPE",
+        "F-2025-0001", "Station A1", "P001", "MM", "EPP", "ZAPE",
         "2025-02-01", "",
         "18", "2025-02-02", "", "", "",
         "45", "2025-02-02", "", "", "",
@@ -740,7 +740,7 @@ def generate_sample_csv() -> str:
         "True", "",
     ])
     writer.writerow([
-        "F-2025-0002", "A1", "P002", "AB", "EPP", "ZAPE",
+        "F-2025-0002", "Station A1", "P002", "AB", "EPP", "ZAPE",
         "2025-02-10", "2025-02-18",
         "22", "2025-02-11", "15", "2025-02-18", "0",
         "50", "2025-02-11", "38", "2025-02-18", "0",
@@ -1043,3 +1043,43 @@ def delete_shift_reason(
             target_type="shift_reason", target_id=str(reason_id), success=True,
         )
         return {"ok": True}
+
+
+# ───────────────────────────────────────────────────────────────
+# Excel-Daten Reload
+# ───────────────────────────────────────────────────────────────
+
+@router.post("/api/admin/reload-excel")
+def reload_excel_data(
+    request: Request,
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("admin:write")),
+):
+    """Laedt Excel-Demodaten neu (nach Austausch von demo_cases.xlsx).
+
+    Leert den Cache des Excel-Loaders und seeded die DB neu.
+    """
+    from app.excel_loader import reload as excel_reload, get_demo_cases
+    excel_reload()
+    seed_dummy_cases_to_db()
+
+    # Station-Center Map neu laden
+    if hasattr(STATION_CENTER, '_loaded'):
+        STATION_CENTER._loaded = False
+        STATION_CENTER.clear()
+
+    with SessionLocal() as db:
+        log_security_event(
+            db, request=request, actor_user_id=ctx.user_id,
+            actor_station_id=ctx.station_id, action="EXCEL_RELOAD",
+            target_type="data", target_id="demo_cases.xlsx", success=True,
+        )
+
+    cases = get_demo_cases()
+    stations = sorted({c["station_id"] for c in cases})
+
+    return {
+        "ok": True,
+        "cases_loaded": len(cases),
+        "stations": stations,
+    }

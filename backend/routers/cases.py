@@ -12,6 +12,7 @@ from app.case_logic import (
     get_station_cases, get_single_case, enrich_case, get_valid_shift_codes,
     build_parameter_status,
 )
+from app.excel_loader import get_lab_history, get_ekg_history, get_efm_events
 from app.ack_store import AckStore
 from app.db import SessionLocal
 from app.models import DayState, ShiftReason
@@ -382,6 +383,54 @@ def reset_today(
         "business_date": bdate,
         "version": get_day_version(station_id=ctx.station_id),
     }
+
+
+@router.get("/api/cases/{case_id}/lab-history")
+def case_lab_history(
+    case_id: str,
+    ctx: AuthContext = Depends(get_auth_context),
+    _ctx: str = Depends(require_ctx),
+    _perm: None = Depends(require_permission("dashboard:view")),
+):
+    """Clozapin-Laborverlauf: Neutrophile, Spiegel, Troponin, Leber, Metabolik."""
+    raw = get_single_case(case_id)
+    if raw is None:
+        raise HTTPException(status_code=404, detail="Case not found")
+    if raw["station_id"] != ctx.station_id:
+        raise HTTPException(status_code=404, detail="Case not found")
+    return {"case_id": case_id, "lab_history": get_lab_history(case_id)}
+
+
+@router.get("/api/cases/{case_id}/ekg-history")
+def case_ekg_history(
+    case_id: str,
+    ctx: AuthContext = Depends(get_auth_context),
+    _ctx: str = Depends(require_ctx),
+    _perm: None = Depends(require_permission("dashboard:view")),
+):
+    """EKG-Verlauf: QTc, Herzfrequenz, Rhythmus, Befunde."""
+    raw = get_single_case(case_id)
+    if raw is None:
+        raise HTTPException(status_code=404, detail="Case not found")
+    if raw["station_id"] != ctx.station_id:
+        raise HTTPException(status_code=404, detail="Case not found")
+    return {"case_id": case_id, "ekg_history": get_ekg_history(case_id)}
+
+
+@router.get("/api/cases/{case_id}/efm-events")
+def case_efm_events(
+    case_id: str,
+    ctx: AuthContext = Depends(get_auth_context),
+    _ctx: str = Depends(require_ctx),
+    _perm: None = Depends(require_permission("dashboard:view")),
+):
+    """Freiheitsbeschraenkende Massnahmen fuer einen Fall."""
+    raw = get_single_case(case_id)
+    if raw is None:
+        raise HTTPException(status_code=404, detail="Case not found")
+    if raw["station_id"] != ctx.station_id:
+        raise HTTPException(status_code=404, detail="Case not found")
+    return {"case_id": case_id, "efm_events": get_efm_events(case_id)}
 
 
 @router.get("/api/shift_reasons")

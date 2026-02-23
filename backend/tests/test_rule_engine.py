@@ -30,7 +30,7 @@ def _base_case(**overrides) -> dict:
         "case_id": "TEST_001",
         "patient_id": "PAT_001",
         "clinic": "EPP",
-        "station_id": "A1",
+        "station_id": "Station A1",
         "center": "ZAPE",
         "admission_date": today - timedelta(days=5),
         "discharge_date": None,

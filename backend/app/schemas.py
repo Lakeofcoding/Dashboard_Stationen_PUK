@@ -47,7 +47,7 @@ class CaseSummary(BaseModel):
 
 class CaseDetail(CaseSummary):
     honos: Optional[int] = None
-    bscl: Optional[int] = None
+    bscl: Optional[float] = None  # BSCL Durchschnittswert (0.0–4.0)
     bfs_complete: bool = False
     alerts: list[Alert] = Field(default_factory=list)
     rule_states: dict[str, dict[str, Any]] = Field(default_factory=dict)
@@ -56,8 +56,9 @@ class CaseDetail(CaseSummary):
 # --- ACK / Shift ---
 class AckRequest(BaseModel):
     case_id: str
-    rule_id: Optional[str] = None
-    scope: Literal["case", "rule"] = "rule"
+    ack_scope: Literal["case", "rule"] = "rule"
+    scope_id: str = "*"
+    action: Literal["ACK", "SHIFT"] = "ACK"
     shift_code: Optional[str] = None
     reason: Optional[str] = None
 
@@ -140,6 +141,7 @@ class ShiftReasonUpdate(BaseModel):
 class StationOverviewItem(BaseModel):
     station_id: str
     center: str
+    clinic: str = "UNKNOWN"
     total_cases: int = 0
     open_cases: int = 0
     critical_count: int = 0

@@ -80,7 +80,7 @@ function ackLabel(category: string): string {
 
 function loadAuth(): AuthState {
   return {
-    stationId: localStorage.getItem(LS_KEYS.stationId) ?? "A1",
+    stationId: localStorage.getItem(LS_KEYS.stationId) ?? "Station A1",
     userId: localStorage.getItem(LS_KEYS.userId) ?? "demo",
   };
 }
@@ -167,6 +167,7 @@ type ViewMode = "overview" | "cases" | "report" | "monitoring" | "admin";
 type StationOverviewItem = {
   station_id: string;
   center: string;
+  clinic: string;
   total_cases: number;
   open_cases: number;
   critical_count: number;
@@ -288,7 +289,7 @@ export default function App() {
   const [auth, setAuth] = useState<AuthState>(() => loadAuth());
   const [me, setMe] = useState<MetaMe | null>(null);
 
-  const [stations, setStations] = useState<string[]>(["A1", "B0", "B2"]);
+  const [stations, setStations] = useState<string[]>(["Station A1", "Station B0", "Station B2"]);
   const [metaUsers, setMetaUsers] = useState<MetaUser[]>([
     { user_id: "demo", roles: ["admin"] },
   ]);
@@ -332,6 +333,8 @@ export default function App() {
   const [dayState, setDayState] = useState<DayState | null>(null);
   const [cases, setCases] = useState<CaseSummary[]>([]);
   const [overview, setOverview] = useState<StationOverviewItem[]>([]);
+  const [drillClinic, setDrillClinic] = useState<string | null>(null);
+  const [drillCenter, setDrillCenter] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedCaseId, setSelectedCaseId] = useState<string | null>(null);
   const [detail, setDetail] = useState<CaseDetail | null>(null);
@@ -464,6 +467,44 @@ export default function App() {
     return () => { alive = false; };
   }, []);
 
+  // ── Hierarchische Aggregation: Klinik → Zentrum → Station ──
+  const CLINIC_LABELS: Record<string, string> = {
+    APP: "Alterspsychiatrie",
+    EPP: "Erwachsenenpsychiatrie",
+    FPP: "Forensische Psychiatrie",
+    KJPP: "Kinder- und Jugendpsychiatrie",
+  };
+
+  type AggItem = { total: number; open: number; closed: number; critical: number; warn: number; ok: number; severity: Severity };
+  const aggregate = (items: StationOverviewItem[]): AggItem => {
+    const total = items.reduce((s, i) => s + i.total_cases, 0);
+    const open = items.reduce((s, i) => s + i.open_cases, 0);
+    const critical = items.reduce((s, i) => s + i.critical_count, 0);
+    const warn = items.reduce((s, i) => s + i.warn_count, 0);
+    const ok = items.reduce((s, i) => s + i.ok_count, 0);
+    const severity: Severity = critical > 0 ? "CRITICAL" : warn > 0 ? "WARN" : "OK";
+    return { total, open, closed: total - open, critical, warn, ok, severity };
+  };
+
+  const clinicGroups = useMemo(() => {
+    const map: Record<string, StationOverviewItem[]> = {};
+    for (const s of overview) map[s.clinic] = [...(map[s.clinic] || []), s];
+    return Object.entries(map).sort(([a], [b]) => a.localeCompare(b));
+  }, [overview]);
+
+  const centerGroups = useMemo(() => {
+    if (!drillClinic) return [];
+    const items = overview.filter(s => s.clinic === drillClinic);
+    const map: Record<string, StationOverviewItem[]> = {};
+    for (const s of items) map[s.center] = [...(map[s.center] || []), s];
+    return Object.entries(map).sort(([a], [b]) => a.localeCompare(b));
+  }, [overview, drillClinic]);
+
+  const stationItems = useMemo(() => {
+    if (!drillClinic || !drillCenter) return [];
+    return overview.filter(s => s.clinic === drillClinic && s.center === drillCenter);
+  }, [overview, drillClinic, drillCenter]);
+
   return (
     <main style={{ display: "flex", flexDirection: "column", height: "100vh", width: "100vw", overflow: "hidden", fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial", backgroundColor: "#f4f7f6" }}>
       {/* SESSION EXPIRED OVERLAY */}
@@ -577,7 +618,7 @@ export default function App() {
                 key={tab.key}
                 onClick={() => {
                   setViewMode(tab.key);
-                  if (tab.key === "overview") { setSelectedCaseId(null); setDetail(null); }
+                  if (tab.key === "overview") { setSelectedCaseId(null); setDetail(null); setDrillClinic(null); setDrillCenter(null); }
                 }}
                 style={{
                   padding: "10px 18px",
@@ -608,54 +649,188 @@ export default function App() {
       {/* ═══ MAIN CONTENT ═══ */}
       <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
 
-        {/* ─── TAB: ÜBERSICHT ─── */}
+        {/* ─── TAB: ÜBERSICHT (Klinik → Zentrum → Station) ─── */}
         {viewMode === "overview" && (
           <div style={{ flex: 1, overflowY: "auto", padding: "24px 28px" }}>
             <div style={{ maxWidth: 1200, margin: "0 auto" }}>
-              <h2 style={{ margin: "0 0 16px 0", fontSize: "1.2rem" }}>Stations-Übersicht</h2>
-              {overview.length === 0 ? (
-                <div style={{ color: "#9ca3af", padding: 20 }}>Keine Stationen gefunden.</div>
-              ) : (
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 14 }}>
-                  {overview.map((s) => (
-                    <div
-                      key={s.station_id}
-                      onClick={() => { updateAuth({ stationId: s.station_id }); setViewMode("cases"); }}
-                      style={{
-                        padding: 16, borderRadius: 10,
-                        background: severityColor(s.severity),
-                        border: `2px solid ${severityBorderColor(s.severity)}`,
-                        cursor: "pointer", transition: "transform 0.15s, box-shadow 0.15s",
-                      }}
-                      onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.transform = "translateY(-2px)"; (e.currentTarget as HTMLElement).style.boxShadow = "0 4px 16px rgba(0,0,0,0.1)"; }}
-                      onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.transform = ""; (e.currentTarget as HTMLElement).style.boxShadow = ""; }}
+
+              {/* Breadcrumb */}
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 16, fontSize: 13, color: "#6b7280" }}>
+                <span
+                  onClick={() => { setDrillClinic(null); setDrillCenter(null); }}
+                  style={{ cursor: "pointer", fontWeight: !drillClinic ? 700 : 400, color: !drillClinic ? "#1d4ed8" : "#6b7280" }}
+                >
+                  Kliniken
+                </span>
+                {drillClinic && (
+                  <>
+                    <span style={{ color: "#d1d5db" }}>/</span>
+                    <span
+                      onClick={() => setDrillCenter(null)}
+                      style={{ cursor: "pointer", fontWeight: !drillCenter ? 700 : 400, color: !drillCenter ? "#1d4ed8" : "#6b7280" }}
                     >
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-                        <div>
-                          <div style={{ fontSize: "1.2rem", fontWeight: 800 }}>{s.station_id}</div>
-                          <div style={{ fontSize: 11, color: "#6b7280" }}>{s.center}</div>
+                      {drillClinic}
+                    </span>
+                  </>
+                )}
+                {drillCenter && (
+                  <>
+                    <span style={{ color: "#d1d5db" }}>/</span>
+                    <span style={{ fontWeight: 700, color: "#1d4ed8" }}>{drillCenter}</span>
+                  </>
+                )}
+              </div>
+
+              {overview.length === 0 ? (
+                <div style={{ color: "#9ca3af", padding: 20 }}>Lade Übersicht…</div>
+              ) : !drillClinic ? (
+                /* ── LEVEL 1: Kliniken ── */
+                <>
+                  <h2 style={{ margin: "0 0 16px 0", fontSize: "1.2rem" }}>Kliniken</h2>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 16 }}>
+                    {clinicGroups.map(([clinic, items]) => {
+                      const a = aggregate(items);
+                      const centerCount = new Set(items.map(i => i.center)).size;
+                      return (
+                        <div
+                          key={clinic}
+                          onClick={() => setDrillClinic(clinic)}
+                          style={{
+                            padding: 20, borderRadius: 12,
+                            background: severityColor(a.severity),
+                            border: `2px solid ${severityBorderColor(a.severity)}`,
+                            cursor: "pointer", transition: "transform 0.15s, box-shadow 0.15s",
+                          }}
+                          onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.transform = "translateY(-2px)"; (e.currentTarget as HTMLElement).style.boxShadow = "0 4px 16px rgba(0,0,0,0.1)"; }}
+                          onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.transform = ""; (e.currentTarget as HTMLElement).style.boxShadow = ""; }}
+                        >
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
+                            <div>
+                              <div style={{ fontSize: "1.4rem", fontWeight: 800, letterSpacing: "0.5px" }}>{clinic}</div>
+                              <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>{CLINIC_LABELS[clinic] || clinic}</div>
+                            </div>
+                            <div style={{
+                              width: 40, height: 40, borderRadius: "50%",
+                              background: a.severity === "CRITICAL" ? "#ef4444" : a.severity === "WARN" ? "#f59e0b" : "#22c55e",
+                              display: "flex", alignItems: "center", justifyContent: "center",
+                              color: "#fff", fontWeight: 800, fontSize: 16,
+                            }}>
+                              {a.severity === "CRITICAL" ? "!" : a.severity === "WARN" ? "⚠" : "✓"}
+                            </div>
+                          </div>
+                          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px 16px", fontSize: 13, color: "#374151" }}>
+                            <span>Fälle gesamt: <strong>{a.total}</strong></span>
+                            <span>Offen: <strong>{a.open}</strong></span>
+                            <span>Zentren: <strong>{centerCount}</strong></span>
+                            <span>Stationen: <strong>{items.length}</strong></span>
+                          </div>
+                          <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
+                            {a.critical > 0 && <span style={{ fontSize: 11, background: "#ef4444", color: "#fff", padding: "2px 8px", borderRadius: 999, fontWeight: 700 }}>{a.critical} kritisch</span>}
+                            {a.warn > 0 && <span style={{ fontSize: 11, background: "#f59e0b", color: "#fff", padding: "2px 8px", borderRadius: 999, fontWeight: 700 }}>{a.warn} Warn.</span>}
+                            {a.ok > 0 && <span style={{ fontSize: 11, background: "#22c55e", color: "#fff", padding: "2px 8px", borderRadius: 999, fontWeight: 700 }}>{a.ok} OK</span>}
+                          </div>
                         </div>
-                        <div style={{
-                          width: 36, height: 36, borderRadius: "50%",
-                          background: s.severity === "CRITICAL" ? "#ef4444" : s.severity === "WARN" ? "#f59e0b" : "#22c55e",
-                          display: "flex", alignItems: "center", justifyContent: "center",
-                          color: "#fff", fontWeight: 800, fontSize: 15,
-                        }}>
-                          {s.severity === "CRITICAL" ? "!" : s.severity === "WARN" ? "⚠" : "✓"}
+                      );
+                    })}
+                  </div>
+                </>
+              ) : !drillCenter ? (
+                /* ── LEVEL 2: Zentren einer Klinik ── */
+                <>
+                  <h2 style={{ margin: "0 0 16px 0", fontSize: "1.2rem" }}>
+                    Zentren – {drillClinic} <span style={{ fontWeight: 400, fontSize: 14, color: "#6b7280" }}>({CLINIC_LABELS[drillClinic] || ""})</span>
+                  </h2>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 14 }}>
+                    {centerGroups.map(([center, items]) => {
+                      const a = aggregate(items);
+                      return (
+                        <div
+                          key={center}
+                          onClick={() => setDrillCenter(center)}
+                          style={{
+                            padding: 18, borderRadius: 10,
+                            background: severityColor(a.severity),
+                            border: `2px solid ${severityBorderColor(a.severity)}`,
+                            cursor: "pointer", transition: "transform 0.15s, box-shadow 0.15s",
+                          }}
+                          onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.transform = "translateY(-2px)"; (e.currentTarget as HTMLElement).style.boxShadow = "0 4px 16px rgba(0,0,0,0.1)"; }}
+                          onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.transform = ""; (e.currentTarget as HTMLElement).style.boxShadow = ""; }}
+                        >
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                            <div>
+                              <div style={{ fontSize: "1.2rem", fontWeight: 800 }}>{center}</div>
+                              <div style={{ fontSize: 11, color: "#6b7280" }}>{items.length} Station{items.length !== 1 ? "en" : ""}</div>
+                            </div>
+                            <div style={{
+                              width: 36, height: 36, borderRadius: "50%",
+                              background: a.severity === "CRITICAL" ? "#ef4444" : a.severity === "WARN" ? "#f59e0b" : "#22c55e",
+                              display: "flex", alignItems: "center", justifyContent: "center",
+                              color: "#fff", fontWeight: 800, fontSize: 15,
+                            }}>
+                              {a.severity === "CRITICAL" ? "!" : a.severity === "WARN" ? "⚠" : "✓"}
+                            </div>
+                          </div>
+                          <div style={{ display: "flex", gap: 12, fontSize: 12, color: "#374151" }}>
+                            <span>Fälle: <strong>{a.total}</strong></span>
+                            <span>Offen: <strong>{a.open}</strong></span>
+                          </div>
+                          <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                            {a.critical > 0 && <span style={{ fontSize: 11, background: "#ef4444", color: "#fff", padding: "2px 8px", borderRadius: 999, fontWeight: 700 }}>{a.critical} kritisch</span>}
+                            {a.warn > 0 && <span style={{ fontSize: 11, background: "#f59e0b", color: "#fff", padding: "2px 8px", borderRadius: 999, fontWeight: 700 }}>{a.warn} Warn.</span>}
+                            {a.critical === 0 && a.warn === 0 && <span style={{ fontSize: 11, background: "#22c55e", color: "#fff", padding: "2px 8px", borderRadius: 999, fontWeight: 700 }}>OK</span>}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              ) : (
+                /* ── LEVEL 3: Stationen eines Zentrums ── */
+                <>
+                  <h2 style={{ margin: "0 0 16px 0", fontSize: "1.2rem" }}>
+                    Stationen – {drillCenter}
+                  </h2>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 14 }}>
+                    {stationItems.map((s) => (
+                      <div
+                        key={s.station_id}
+                        onClick={() => { updateAuth({ stationId: s.station_id }); setViewMode("cases"); }}
+                        style={{
+                          padding: 16, borderRadius: 10,
+                          background: severityColor(s.severity),
+                          border: `2px solid ${severityBorderColor(s.severity)}`,
+                          cursor: "pointer", transition: "transform 0.15s, box-shadow 0.15s",
+                        }}
+                        onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.transform = "translateY(-2px)"; (e.currentTarget as HTMLElement).style.boxShadow = "0 4px 16px rgba(0,0,0,0.1)"; }}
+                        onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.transform = ""; (e.currentTarget as HTMLElement).style.boxShadow = ""; }}
+                      >
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                          <div>
+                            <div style={{ fontSize: "1.2rem", fontWeight: 800 }}>{s.station_id}</div>
+                            <div style={{ fontSize: 11, color: "#6b7280" }}>{s.center}</div>
+                          </div>
+                          <div style={{
+                            width: 36, height: 36, borderRadius: "50%",
+                            background: s.severity === "CRITICAL" ? "#ef4444" : s.severity === "WARN" ? "#f59e0b" : "#22c55e",
+                            display: "flex", alignItems: "center", justifyContent: "center",
+                            color: "#fff", fontWeight: 800, fontSize: 15,
+                          }}>
+                            {s.severity === "CRITICAL" ? "!" : s.severity === "WARN" ? "⚠" : "✓"}
+                          </div>
+                        </div>
+                        <div style={{ display: "flex", gap: 12, fontSize: 12, color: "#374151" }}>
+                          <span>Fälle: <strong>{s.total_cases}</strong></span>
+                          <span>Offen: <strong>{s.open_cases}</strong></span>
+                        </div>
+                        <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                          {s.critical_count > 0 && <span style={{ fontSize: 11, background: "#ef4444", color: "#fff", padding: "2px 8px", borderRadius: 999, fontWeight: 700 }}>{s.critical_count} kritisch</span>}
+                          {s.warn_count > 0 && <span style={{ fontSize: 11, background: "#f59e0b", color: "#fff", padding: "2px 8px", borderRadius: 999, fontWeight: 700 }}>{s.warn_count} Warn.</span>}
+                          {s.critical_count === 0 && s.warn_count === 0 && <span style={{ fontSize: 11, background: "#22c55e", color: "#fff", padding: "2px 8px", borderRadius: 999, fontWeight: 700 }}>OK</span>}
                         </div>
                       </div>
-                      <div style={{ display: "flex", gap: 12, fontSize: 12, color: "#374151" }}>
-                        <span>Fälle: <strong>{s.total_cases}</strong></span>
-                        <span>Offen: <strong>{s.open_cases}</strong></span>
-                      </div>
-                      <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
-                        {s.critical_count > 0 && <span style={{ fontSize: 11, background: "#ef4444", color: "#fff", padding: "2px 8px", borderRadius: 999, fontWeight: 700 }}>{s.critical_count} kritisch</span>}
-                        {s.warn_count > 0 && <span style={{ fontSize: 11, background: "#f59e0b", color: "#fff", padding: "2px 8px", borderRadius: 999, fontWeight: 700 }}>{s.warn_count} Warn.</span>}
-                        {s.critical_count === 0 && s.warn_count === 0 && <span style={{ fontSize: 11, background: "#22c55e", color: "#fff", padding: "2px 8px", borderRadius: 999, fontWeight: 700 }}>OK</span>}
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                    ))}
+                  </div>
+                </>
               )}
             </div>
           </div>

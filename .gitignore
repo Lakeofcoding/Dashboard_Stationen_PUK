@@ -44,9 +44,3 @@ __installed__
 
 # Docker volumes
 postgres_data/
-
-
-frontend/dist/
-
-
-.venv/

@@ -27,8 +27,15 @@ def station_overview(
     with SessionLocal() as db:
         db_stations = db.query(Case.station_id).distinct().all()
         station_ids = sorted({s[0] for s in db_stations})
+        # Clinic pro Station (haeufigster Wert)
+        station_clinic: dict[str, str] = {}
+        for sid in station_ids:
+            row = db.query(Case.clinic).filter(Case.station_id == sid, Case.clinic.isnot(None)).first()
+            station_clinic[sid] = row[0] if row else "UNKNOWN"
     if not station_ids:
         station_ids = sorted({c["station_id"] for c in DUMMY_CASES})
+        for c in DUMMY_CASES:
+            station_clinic.setdefault(c["station_id"], c.get("clinic", "UNKNOWN"))
 
     result = []
     for sid in station_ids:
@@ -60,6 +67,7 @@ def station_overview(
         result.append(StationOverviewItem(
             station_id=sid,
             center=STATION_CENTER.get(sid, "UNKNOWN"),
+            clinic=station_clinic.get(sid, "UNKNOWN"),
             total_cases=total,
             open_cases=open_cases,
             critical_count=station_critical,

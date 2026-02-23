@@ -28,32 +28,32 @@ class TestPermissionMatrix:
     # --- Viewer (demo) ---
 
     def test_viewer_can_list_cases(self, client, viewer_h):
-        r = client.get("/api/cases?ctx=A1", headers=viewer_h)
+        r = client.get("/api/cases?ctx=Station A1", headers=viewer_h)
         assert r.status_code == 200
 
     def test_viewer_can_view_day_state(self, client, viewer_h):
-        r = client.get("/api/day_state?ctx=A1", headers=viewer_h)
+        r = client.get("/api/day_state?ctx=Station A1", headers=viewer_h)
         assert r.status_code == 200
 
     def test_viewer_cannot_ack(self, client, auth, csrf_token, first_case_id):
         h = auth.viewer()
         r = client.post(
-            "/api/ack?ctx=A1", headers=h,
+            "/api/ack?ctx=Station A1", headers=h,
             json={"case_id": first_case_id, "ack_scope": "case", "scope_id": "*"},
         )
         assert r.status_code == 403
 
     def test_viewer_cannot_reset(self, client, auth, csrf_token):
-        r = client.post("/api/reset_today?ctx=A1", headers=auth.viewer())
+        r = client.post("/api/reset_today?ctx=Station A1", headers=auth.viewer())
         assert r.status_code == 403
 
     def test_viewer_cannot_admin_read(self, client, viewer_h):
-        r = client.get("/api/admin/users?ctx=A1", headers=viewer_h)
+        r = client.get("/api/admin/users?ctx=Station A1", headers=viewer_h)
         assert r.status_code == 403
 
     def test_viewer_cannot_admin_write(self, client, auth):
         r = client.post(
-            "/api/admin/users?ctx=A1", headers=auth.viewer(),
+            "/api/admin/users?ctx=Station A1", headers=auth.viewer(),
             json={"user_id": "test_x", "display_name": "X", "is_active": True, "roles": []},
         )
         assert r.status_code == 403
@@ -61,51 +61,65 @@ class TestPermissionMatrix:
     # --- Clinician (pflege1) ---
 
     def test_clinician_can_list_cases(self, client, clinician_h):
-        r = client.get("/api/cases?ctx=A1", headers=clinician_h)
+        r = client.get("/api/cases?ctx=Station A1", headers=clinician_h)
         assert r.status_code == 200
 
     def test_clinician_can_view_detail(self, client, clinician_h, first_case_id):
-        r = client.get(f"/api/cases/{first_case_id}?ctx=A1", headers=clinician_h)
+        r = client.get(f"/api/cases/{first_case_id}?ctx=Station A1", headers=clinician_h)
         assert r.status_code == 200
 
     def test_clinician_cannot_reset(self, client, auth):
-        r = client.post("/api/reset_today?ctx=A1", headers=auth.clinician())
+        r = client.post("/api/reset_today?ctx=Station A1", headers=auth.clinician())
         assert r.status_code == 403
 
     def test_clinician_cannot_admin(self, client, clinician_h):
-        r = client.get("/api/admin/users?ctx=A1", headers=clinician_h)
+        r = client.get("/api/admin/users?ctx=Station A1", headers=clinician_h)
         assert r.status_code == 403
 
     # --- Admin ---
 
     def test_admin_can_admin_read(self, client, admin_h):
-        r = client.get("/api/admin/users?ctx=A1", headers=admin_h)
+        r = client.get("/api/admin/users?ctx=Station A1", headers=admin_h)
         assert r.status_code == 200
 
     def test_admin_can_view_audit(self, client, admin_h):
-        r = client.get("/api/admin/audit?ctx=A1", headers=admin_h)
+        r = client.get("/api/admin/audit?ctx=Station A1", headers=admin_h)
         assert r.status_code == 200
 
     # --- Manager ---
 
     def test_manager_can_view(self, client, auth):
-        r = client.get("/api/cases?ctx=A1", headers=auth.manager())
+        r = client.get("/api/cases?ctx=Station A1", headers=auth.manager())
         assert r.status_code == 200
 
     def test_manager_cannot_ack(self, client, auth, first_case_id):
-            h = auth("manager_clean", "A1")
-            r = client.post(
-                "/api/ack?ctx=A1", headers=h,
-                json={"case_id": first_case_id, "ack_scope": "case", "scope_id": "*"},
-            )
-            assert r.status_code == 403
+        r = client.post(
+            "/api/ack?ctx=Station A1", headers=auth.manager(),
+            json={"case_id": first_case_id, "ack_scope": "case", "scope_id": "*"},
+        )
+        assert r.status_code == 403
+
     def test_manager_cannot_admin(self, client, auth):
-            # auth.manager() ist "manager1" — der hat evtl. aktive Break-Glass-Session
-            # aus test_break_glass.py. Daher frischen Manager nutzen.
-            h = auth("manager_clean", "A1")
-            r = client.get("/api/admin/users?ctx=A1", headers=h)
-            assert r.status_code == 403
-        
+        # manager1 kann durch Break-Glass-Tests temporaer admin:read haben
+        # (session-scoped Client teilt DB-State). Deshalb: frischen Manager
+        # anlegen und ihm nur die manager-Rolle geben.
+        import secrets
+        fresh_mgr = f"mgr_rbac_{secrets.token_hex(4)}"
+        admin_h = auth.admin()
+        # User anlegen
+        client.post("/api/admin/users?ctx=Station A1", headers=admin_h, json={
+            "user_id": fresh_mgr, "display_name": "Fresh Manager", "is_active": True,
+        })
+        # Manager-Rolle zuweisen
+        client.post(f"/api/admin/users/{fresh_mgr}/roles?ctx=Station A1", headers=admin_h, json={
+            "role_id": "manager", "station_id": "*",
+        })
+        # Jetzt testen: manager ohne Break-Glass darf nicht admin:read
+        mgr_h = auth(fresh_mgr)
+        r = client.get("/api/admin/users?ctx=Station A1", headers=mgr_h)
+        assert r.status_code == 403
+        # Cleanup
+        client.delete(f"/api/admin/users/{fresh_mgr}?ctx=Station A1", headers=admin_h)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -117,18 +131,18 @@ class TestAutoProvisioning:
 
     def test_unknown_user_gets_viewer_role(self, client, auth):
         h = auth.unknown()
-        r = client.get("/api/meta/me?ctx=A1", headers=h)
+        r = client.get("/api/meta/me?ctx=Station A1", headers=h)
         assert r.status_code == 200
         data = r.json()
         assert "viewer" in data["roles"]
         # Darf lesen...
-        r2 = client.get("/api/cases?ctx=A1", headers=h)
+        r2 = client.get("/api/cases?ctx=Station A1", headers=h)
         assert r2.status_code == 200
 
     def test_unknown_user_cannot_ack(self, client, auth, first_case_id):
         h = auth.unknown()
         r = client.post(
-            "/api/ack?ctx=A1", headers=h,
+            "/api/ack?ctx=Station A1", headers=h,
             json={"case_id": first_case_id, "ack_scope": "case", "scope_id": "*"},
         )
         assert r.status_code == 403
@@ -147,7 +161,7 @@ class TestScopeEnforcement:
 
     def test_wildcard_user_can_access_any_station(self, client, admin_h, auth):
         """Admin hat station_id='*' → darf A1, B0, B2."""
-        for station in ("A1", "B0", "B2"):
+        for station in ("Station A1", "Station B0", "Station B2"):
             h = auth.admin(station)
             r = client.get(f"/api/cases?ctx={station}", headers=h)
             assert r.status_code == 200, f"Admin denied on {station}"
@@ -168,19 +182,17 @@ class TestCSRF:
     """CSRF-Middleware muss mutating requests ohne Token ablehnen."""
 
     def test_post_without_csrf_fails(self, fresh_client, first_case_id):
-        """POST ohne CSRF-Token → abgelehnt (403 oder 500 je nach Starlette-Version)."""
-        h = {"X-User-Id": "admin", "X-Station-Id": "A1", "Content-Type": "application/json"}
+        """POST ohne CSRF-Token → 403."""
+        h = {"X-User-Id": "admin", "X-Station-Id": "Station A1", "Content-Type": "application/json"}
         r = fresh_client.post(
-            "/api/ack?ctx=A1", headers=h,
+            "/api/ack?ctx=Station A1", headers=h,
             json={"case_id": first_case_id, "ack_scope": "case", "scope_id": "*"},
         )
-        # Starlette-Bug: BaseHTTPMiddleware kann HTTPException(403) als 500 verschlucken.
-        # Entscheidend: Request wird NICHT akzeptiert (nicht 200).
-        assert r.status_code in (403, 500), f"Expected rejection, got {r.status_code}"
-        assert r.status_code != 200
+        assert r.status_code == 403
+        assert "CSRF" in r.json().get("detail", "")
 
     def test_get_does_not_require_csrf(self, fresh_client):
         """GET-Requests brauchen kein CSRF-Token."""
-        h = {"X-User-Id": "admin", "X-Station-Id": "A1"}
-        r = fresh_client.get("/api/cases?ctx=A1", headers=h)
+        h = {"X-User-Id": "admin", "X-Station-Id": "Station A1"}
+        r = fresh_client.get("/api/cases?ctx=Station A1", headers=h)
         assert r.status_code == 200

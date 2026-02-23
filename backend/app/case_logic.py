@@ -13,6 +13,7 @@ from app.models import Case, ShiftReason
 from app.day_state import today_local, _parse_iso_dt, get_day_version
 from app.rule_engine import evaluate_alerts
 from app.schemas import ParameterStatus
+from app.excel_loader import get_demo_cases
 
 
 def build_parameter_status(c: dict) -> list[dict]:
@@ -116,12 +117,19 @@ def build_parameter_status(c: dict) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def make_dummy_cases() -> list[dict]:
-    """Erstellt Demo-Faelle mit relativen Daten (immer aktuell)."""
+    """Laedt Demo-Faelle aus Excel (backend/data/demo_cases.xlsx).
+    Fallback auf minimale Hardcoded-Daten wenn Excel nicht vorhanden.
+    """
+    cases = get_demo_cases()
+    if cases:
+        return cases
+
+    # Minimaler Fallback wenn keine Excel vorhanden
     _today = date.today()
     return [
         {
-            "case_id": "4645342", "patient_id": "4534234", "clinic": "EPP",
-            "station_id": "A1", "center": "ZAPE",
+            "case_id": "DEMO001", "patient_id": "P001", "clinic": "EPP",
+            "station_id": "Station A1", "center": "ZAPE",
             "admission_date": _today - timedelta(days=10), "discharge_date": None,
             "honos_entry_total": None, "honos_entry_date": None,
             "honos_discharge_total": None, "honos_discharge_date": None,
@@ -129,149 +137,13 @@ def make_dummy_cases() -> list[dict]:
             "bscl_total_entry": None, "bscl_entry_date": None,
             "bscl_total_discharge": None, "bscl_discharge_date": None,
             "bscl_discharge_suicidality": None,
-            "bfs_1": 11, "bfs_2": None, "bfs_3": None, "isolations": [],
-            # Nicht-freiwillig, kein Behandlungsplan -> CRITICAL
-            "is_voluntary": False, "treatment_plan_date": None, "sdep_complete": None,
-            "ekg_last_date": None, "ekg_last_reported": None,
-            "ekg_entry_date": None,  # Kein Eintritts-EKG nach 10 Tagen -> WARN
-            "clozapin_active": False, "clozapin_start_date": None,
-            "neutrophils_last_date": None, "neutrophils_last_value": None,
-            "troponin_last_date": None, "cbc_last_date": None,
-            "emergency_bem_start_date": None, "emergency_med_start_date": None,
-            "allergies_recorded": False,  # > 7 Tage, nicht erfasst -> WARN
-        },
-        {
-            "case_id": "4645343", "patient_id": "4534235", "clinic": "EPP",
-            "station_id": "B0", "center": "ZDAP",
-            "admission_date": _today - timedelta(days=12),
-            "discharge_date": _today - timedelta(days=2),
-            "honos_entry_total": 12, "honos_entry_date": _today - timedelta(days=11),
-            "honos_discharge_total": 20, "honos_discharge_date": _today - timedelta(days=2),
-            "honos_discharge_suicidality": 1,
-            "bscl_total_entry": 40, "bscl_entry_date": _today - timedelta(days=11),
-            "bscl_total_discharge": 50, "bscl_discharge_date": _today - timedelta(days=2),
-            "bscl_discharge_suicidality": 2,
-            "bfs_1": 10, "bfs_2": 12, "bfs_3": 9, "isolations": [],
-            # Austritt vor 2 Tagen, SDEP nicht abgeschlossen -> CRITICAL
-            "is_voluntary": True, "treatment_plan_date": None, "sdep_complete": False,
-            "ekg_last_date": None, "ekg_last_reported": None,
-            "ekg_entry_date": (_today - timedelta(days=11)).isoformat(),
-            "clozapin_active": False, "clozapin_start_date": None,
-            "neutrophils_last_date": None, "neutrophils_last_value": None,
-            "troponin_last_date": None, "cbc_last_date": None,
-            "emergency_bem_start_date": None, "emergency_med_start_date": None,
-            "allergies_recorded": True,
-        },
-        {
-            "case_id": "4645344", "patient_id": "4534236", "clinic": "EPP",
-            "station_id": "B2", "center": "ZDAP",
-            "admission_date": _today - timedelta(days=20),
-            "discharge_date": _today - timedelta(days=5),
-            "honos_entry_total": 18, "honos_entry_date": _today - timedelta(days=19),
-            "honos_discharge_total": None, "honos_discharge_date": None,
-            "honos_discharge_suicidality": None,
-            "bscl_total_entry": 55, "bscl_entry_date": _today - timedelta(days=19),
-            "bscl_total_discharge": None, "bscl_discharge_date": None,
-            "bscl_discharge_suicidality": None,
             "bfs_1": None, "bfs_2": None, "bfs_3": None, "isolations": [],
-            "is_voluntary": True, "treatment_plan_date": (_today - timedelta(days=18)).isoformat(),
-            "sdep_complete": False,
-            "ekg_last_date": None, "ekg_last_reported": None,
-            "ekg_entry_date": (_today - timedelta(days=19)).isoformat(),
+            "is_voluntary": True, "treatment_plan_date": None, "sdep_complete": None,
+            "ekg_last_date": None, "ekg_last_reported": None, "ekg_entry_date": None,
             "clozapin_active": False, "clozapin_start_date": None,
             "neutrophils_last_date": None, "neutrophils_last_value": None,
             "troponin_last_date": None, "cbc_last_date": None,
             "emergency_bem_start_date": None, "emergency_med_start_date": None,
-            "allergies_recorded": True,
-        },
-        {
-            "case_id": "4645345", "patient_id": "4534237", "clinic": "EPP",
-            "station_id": "A1", "center": "ZAPE",
-            "admission_date": _today - timedelta(days=14),
-            "discharge_date": _today - timedelta(days=1),
-            "honos_entry_total": 16, "honos_entry_date": _today - timedelta(days=13),
-            "honos_discharge_total": 15, "honos_discharge_date": _today - timedelta(days=1),
-            "honos_discharge_suicidality": 3,
-            "bscl_total_entry": 48, "bscl_entry_date": _today - timedelta(days=13),
-            "bscl_total_discharge": 47, "bscl_discharge_date": _today - timedelta(days=1),
-            "bscl_discharge_suicidality": 2,
-            "bfs_1": 7, "bfs_2": 8, "bfs_3": 9,
-            "isolations": [
-                {"start": (_today - timedelta(days=3)).isoformat() + "T08:00:00Z", "stop": None}
-            ],
-            "is_voluntary": True, "treatment_plan_date": (_today - timedelta(days=12)).isoformat(),
-            "sdep_complete": True,
-            # EKG gestern, noch nicht befundet -> CRITICAL
-            "ekg_last_date": (_today - timedelta(days=1)).isoformat(),
-            "ekg_last_reported": False,
-            "ekg_entry_date": (_today - timedelta(days=13)).isoformat(),
-            # Clozapin seit 3 Wochen, Troponin fehlt -> WARN
-            "clozapin_active": True,
-            "clozapin_start_date": (_today - timedelta(weeks=3)).isoformat(),
-            "neutrophils_last_date": (_today - timedelta(days=5)).isoformat(),
-            "neutrophils_last_value": "3.2",
-            "troponin_last_date": None,  # < 5 Wochen, fehlt -> WARN
-            "cbc_last_date": (_today - timedelta(days=5)).isoformat(),
-            "emergency_bem_start_date": None, "emergency_med_start_date": None,
-            "allergies_recorded": True,
-        },
-        {
-            "case_id": "4645346", "patient_id": "4534238", "clinic": "EPP",
-            "station_id": "B0", "center": "ZDAP",
-            "admission_date": _today - timedelta(days=8), "discharge_date": None,
-            "honos_entry_total": 22, "honos_entry_date": _today - timedelta(days=7),
-            "honos_discharge_total": None, "honos_discharge_date": None,
-            "honos_discharge_suicidality": None,
-            "bscl_total_entry": 60, "bscl_entry_date": _today - timedelta(days=7),
-            "bscl_total_discharge": None, "bscl_discharge_date": None,
-            "bscl_discharge_suicidality": 3,
-            "bfs_1": 1, "bfs_2": 2, "bfs_3": 3,
-            "isolations": [
-                {"start": (_today - timedelta(days=4)).isoformat() + "T08:00:00Z", "stop": None}
-            ],
-            "is_voluntary": False, "treatment_plan_date": (_today - timedelta(days=6)).isoformat(),
-            "sdep_complete": None,
-            "ekg_last_date": None, "ekg_last_reported": None,
-            "ekg_entry_date": (_today - timedelta(days=7)).isoformat(),
-            # Clozapin seit 10 Wochen, Grosses Blutbild > 7 Tage her -> WARN
-            "clozapin_active": True,
-            "clozapin_start_date": (_today - timedelta(weeks=10)).isoformat(),
-            "neutrophils_last_date": (_today - timedelta(days=1)).isoformat(),
-            "neutrophils_last_value": "1.5",  # < 2 G/l -> CRITICAL
-            "troponin_last_date": None,
-            "cbc_last_date": (_today - timedelta(days=10)).isoformat(),  # > 7 Tage -> WARN
-            # Notfallmedikation seit 5 Tagen -> CRITICAL
-            "emergency_bem_start_date": None,
-            "emergency_med_start_date": (_today - timedelta(days=5)).isoformat(),
-            "allergies_recorded": True,
-        },
-        {
-            "case_id": "4645347", "patient_id": "4534239", "clinic": "EPP",
-            "station_id": "B2", "center": "ZDAP",
-            "admission_date": _today - timedelta(days=15), "discharge_date": None,
-            "honos_entry_total": 10, "honos_entry_date": _today - timedelta(days=14),
-            "honos_discharge_total": None, "honos_discharge_date": None,
-            "honos_discharge_suicidality": None,
-            "bscl_total_entry": 35, "bscl_entry_date": _today - timedelta(days=14),
-            "bscl_total_discharge": None, "bscl_discharge_date": None,
-            "bscl_discharge_suicidality": None,
-            "bfs_1": 4, "bfs_2": 5, "bfs_3": 6,
-            "isolations": [
-                {"start": (_today - timedelta(days=10)).isoformat() + "T10:00:00Z",
-                 "stop": (_today - timedelta(days=10)).isoformat() + "T14:00:00Z"},
-                {"start": (_today - timedelta(days=8)).isoformat() + "T12:00:00Z",
-                 "stop": (_today - timedelta(days=8)).isoformat() + "T15:00:00Z"},
-            ],
-            "is_voluntary": True, "treatment_plan_date": (_today - timedelta(days=13)).isoformat(),
-            "sdep_complete": None,
-            "ekg_last_date": None, "ekg_last_reported": None,
-            "ekg_entry_date": (_today - timedelta(days=14)).isoformat(),
-            "clozapin_active": False, "clozapin_start_date": None,
-            "neutrophils_last_date": None, "neutrophils_last_value": None,
-            "troponin_last_date": None, "cbc_last_date": None,
-            # Notfall-BEM seit 5 Tagen -> CRITICAL
-            "emergency_bem_start_date": (_today - timedelta(days=5)).isoformat(),
-            "emergency_med_start_date": None,
             "allergies_recorded": True,
         },
     ]
@@ -541,19 +413,19 @@ def _load_raw_cases_from_db(station_id: str) -> list[dict]:
                 "isolations": json.loads(c.isolations_json) if c.isolations_json else [],
                 # Neue Felder (v2)
                 "is_voluntary": c.is_voluntary if c.is_voluntary is not None else True,
-                "treatment_plan_date": c.treatment_plan_date,
+                "treatment_plan_date": date.fromisoformat(c.treatment_plan_date) if c.treatment_plan_date else None,
                 "sdep_complete": c.sdep_complete,
-                "ekg_last_date": c.ekg_last_date,
+                "ekg_last_date": date.fromisoformat(c.ekg_last_date) if c.ekg_last_date else None,
                 "ekg_last_reported": c.ekg_last_reported,
-                "ekg_entry_date": c.ekg_entry_date,
+                "ekg_entry_date": date.fromisoformat(c.ekg_entry_date) if c.ekg_entry_date else None,
                 "clozapin_active": c.clozapin_active or False,
-                "clozapin_start_date": c.clozapin_start_date,
-                "neutrophils_last_date": c.neutrophils_last_date,
+                "clozapin_start_date": date.fromisoformat(c.clozapin_start_date) if c.clozapin_start_date else None,
+                "neutrophils_last_date": date.fromisoformat(c.neutrophils_last_date) if c.neutrophils_last_date else None,
                 "neutrophils_last_value": c.neutrophils_last_value,
-                "troponin_last_date": c.troponin_last_date,
-                "cbc_last_date": c.cbc_last_date,
-                "emergency_bem_start_date": c.emergency_bem_start_date,
-                "emergency_med_start_date": c.emergency_med_start_date,
+                "troponin_last_date": date.fromisoformat(c.troponin_last_date) if c.troponin_last_date else None,
+                "cbc_last_date": date.fromisoformat(c.cbc_last_date) if c.cbc_last_date else None,
+                "emergency_bem_start_date": date.fromisoformat(c.emergency_bem_start_date) if c.emergency_bem_start_date else None,
+                "emergency_med_start_date": date.fromisoformat(c.emergency_med_start_date) if c.emergency_med_start_date else None,
                 "allergies_recorded": c.allergies_recorded,
             }
             result.append(case_dict)
@@ -641,6 +513,16 @@ def seed_shift_reasons():
             print("Standard-Schiebegruende angelegt")
 
 
+def _date_to_str(v) -> str | None:
+    """Konvertiert date/datetime zu ISO-String fuer DB-Speicherung."""
+    if v is None:
+        return None
+    if isinstance(v, date):
+        return v.isoformat()
+    s = str(v).strip()
+    return s if s and s.lower() not in ("nat", "nan", "none") else None
+
+
 def seed_dummy_cases_to_db():
     """Demo-Faelle in DB seeden (werden bei jedem Start aufgefrischt)."""
     with SessionLocal() as db:
@@ -652,17 +534,17 @@ def seed_dummy_cases_to_db():
                 patient_id=c.get("patient_id"),
                 clinic=c.get("clinic", "EPP"),
                 center=STATION_CENTER.get(c["station_id"], "UNKNOWN"),
-                admission_date=c["admission_date"].isoformat() if isinstance(c["admission_date"], date) else str(c["admission_date"]),
-                discharge_date=c["discharge_date"].isoformat() if isinstance(c.get("discharge_date"), date) else None,
+                admission_date=_date_to_str(c["admission_date"]) or date.today().isoformat(),
+                discharge_date=_date_to_str(c.get("discharge_date")),
                 honos_entry_total=c.get("honos_entry_total"),
-                honos_entry_date=c.get("honos_entry_date", "").isoformat() if isinstance(c.get("honos_entry_date"), date) else None,
+                honos_entry_date=_date_to_str(c.get("honos_entry_date")),
                 honos_discharge_total=c.get("honos_discharge_total"),
-                honos_discharge_date=c.get("honos_discharge_date", "").isoformat() if isinstance(c.get("honos_discharge_date"), date) else None,
+                honos_discharge_date=_date_to_str(c.get("honos_discharge_date")),
                 honos_discharge_suicidality=c.get("honos_discharge_suicidality"),
                 bscl_total_entry=c.get("bscl_total_entry"),
-                bscl_entry_date=c.get("bscl_entry_date", "").isoformat() if isinstance(c.get("bscl_entry_date"), date) else None,
+                bscl_entry_date=_date_to_str(c.get("bscl_entry_date")),
                 bscl_total_discharge=c.get("bscl_total_discharge"),
-                bscl_discharge_date=c.get("bscl_discharge_date", "").isoformat() if isinstance(c.get("bscl_discharge_date"), date) else None,
+                bscl_discharge_date=_date_to_str(c.get("bscl_discharge_date")),
                 bscl_discharge_suicidality=c.get("bscl_discharge_suicidality"),
                 bfs_1=str(c.get("bfs_1")) if c.get("bfs_1") is not None else None,
                 bfs_2=str(c.get("bfs_2")) if c.get("bfs_2") is not None else None,
@@ -670,19 +552,19 @@ def seed_dummy_cases_to_db():
                 isolations_json=json.dumps(c.get("isolations", [])) if c.get("isolations") else None,
                 # Neue Felder (v2)
                 is_voluntary=c.get("is_voluntary", True),
-                treatment_plan_date=c.get("treatment_plan_date"),
+                treatment_plan_date=_date_to_str(c.get("treatment_plan_date")),
                 sdep_complete=c.get("sdep_complete"),
-                ekg_last_date=c.get("ekg_last_date"),
+                ekg_last_date=_date_to_str(c.get("ekg_last_date")),
                 ekg_last_reported=c.get("ekg_last_reported"),
-                ekg_entry_date=c.get("ekg_entry_date"),
+                ekg_entry_date=_date_to_str(c.get("ekg_entry_date")),
                 clozapin_active=c.get("clozapin_active", False),
-                clozapin_start_date=c.get("clozapin_start_date"),
-                neutrophils_last_date=c.get("neutrophils_last_date"),
-                neutrophils_last_value=c.get("neutrophils_last_value"),
-                troponin_last_date=c.get("troponin_last_date"),
-                cbc_last_date=c.get("cbc_last_date"),
-                emergency_bem_start_date=c.get("emergency_bem_start_date"),
-                emergency_med_start_date=c.get("emergency_med_start_date"),
+                clozapin_start_date=_date_to_str(c.get("clozapin_start_date")),
+                neutrophils_last_date=_date_to_str(c.get("neutrophils_last_date")),
+                neutrophils_last_value=str(c["neutrophils_last_value"]) if c.get("neutrophils_last_value") is not None else None,
+                troponin_last_date=_date_to_str(c.get("troponin_last_date")),
+                cbc_last_date=_date_to_str(c.get("cbc_last_date")),
+                emergency_bem_start_date=_date_to_str(c.get("emergency_bem_start_date")),
+                emergency_med_start_date=_date_to_str(c.get("emergency_med_start_date")),
                 allergies_recorded=c.get("allergies_recorded"),
                 source="demo",
             )

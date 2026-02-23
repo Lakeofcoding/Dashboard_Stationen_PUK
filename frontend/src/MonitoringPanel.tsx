@@ -1,211 +1,117 @@
 /**
- * MonitoringPanel – Klinische Monitoring-Timeline pro Fall.
+ * MonitoringPanel – Klinische Verlaufs-Charts pro Fall.
  *
- * Zeigt Sparklines in der Fallliste und Detail-Charts bei Klick:
- * - EKG-Zeitpunkte (als Marker auf Timeline)
- * - Neutrophile (Linie mit Grenzwert 2 G/l)
- * - Troponin (Linie)
- * - Grosses Blutbild (Zeitpunkte)
+ * Zeigt bei Klick auf einen Fall echte SVG-Linien-Charts:
+ * - Neutrophile (Grenzwert 2.0 / 1.5 G/l)
+ * - QTc-Verlauf (Grenzwert 480 / 500 ms)
+ * - Clozapin-Spiegel (Therapeutischer Bereich)
+ * - Troponin (erste Wochen)
+ * - Leberwerte ALAT/ASAT
  *
- * Da wir aktuell nur den letzten Wert speichern,
- * zeigen wir eine kompakte Statusübersicht mit Timeline-Markern.
- * Bei voller KIS-Anbindung können echte Zeitreihen dargestellt werden.
+ * Daten kommen live aus /api/cases/{id}/lab-history und /ekg-history.
  */
-import React, { useState, useMemo } from "react";
-import type { CaseSummary, ParameterStatus } from "./types";
+import React, { useState, useEffect, useMemo, useCallback } from "react";
+import type { CaseSummary, ParameterStatus, LabMeasurement, EkgMeasurement } from "./types";
 
-/* ───── Monitoring-Parameter, die wir tracken ───── */
-interface MonitoringItem {
-  id: string;
-  label: string;
-  icon: string;
-  getStatus: (params: ParameterStatus[]) => ParameterStatus | undefined;
-  renderDetail: (c: CaseSummary) => React.ReactNode;
+/* ───── API ───── */
+const API = "";
+async function fetchJson<T>(url: string, station: string): Promise<T | null> {
+  try {
+    const r = await fetch(`${API}${url}?ctx=${encodeURIComponent(station)}`, { credentials: "include" });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch { return null; }
 }
-
-const MONITORING_ITEMS: MonitoringItem[] = [
-  {
-    id: "ekg",
-    label: "EKG",
-    icon: "💓",
-    getStatus: (p) => p.find((x) => x.id === "ekg"),
-    renderDetail: (c) => <EkgDetail params={c.parameter_status ?? []} />,
-  },
-  {
-    id: "clozapin",
-    label: "Clozapin-Monitoring",
-    icon: "💊",
-    getStatus: (p) => p.find((x) => x.id === "clozapin"),
-    renderDetail: (c) => <ClozapinDetail params={c.parameter_status ?? []} />,
-  },
-  {
-    id: "suicidality",
-    label: "Suizidalität",
-    icon: "⚠",
-    getStatus: (p) => p.find((x) => x.id === "suicidality"),
-    renderDetail: () => null,
-  },
-  {
-    id: "isolation",
-    label: "Isolation",
-    icon: "🔒",
-    getStatus: (p) => p.find((x) => x.id === "isolation"),
-    renderDetail: () => null,
-  },
-];
 
 /* ───── Farben ───── */
-const STATUS_COLOR: Record<string, string> = {
-  ok: "#22c55e",
-  warn: "#f59e0b",
-  critical: "#ef4444",
-  na: "#d1d5db",
+const C = {
+  ok: "#22c55e", warn: "#f59e0b", critical: "#ef4444", na: "#d1d5db",
+  blue: "#3b82f6", indigo: "#6366f1", teal: "#14b8a6", rose: "#f43f5e",
+  orange: "#f97316",
+  grid: "#e5e7eb", gridLight: "#f3f4f6", text: "#6b7280", textDark: "#374151",
+  bg: "#fff", bgAlt: "#f9fafb",
 };
 
-/* ───── Hauptkomponente ───── */
-interface Props {
-  cases: CaseSummary[];
-  selectedCaseId: string | null;
-  onSelectCase: (caseId: string) => void;
-}
+const MONITORING_IDS = ["ekg", "clozapin", "suicidality", "isolation"];
+
+/* ═══════════════════════════════════════════ */
+/* Main                                        */
+/* ═══════════════════════════════════════════ */
+interface Props { cases: CaseSummary[]; selectedCaseId: string | null; onSelectCase: (id: string) => void; }
 
 export default function MonitoringPanel({ cases, selectedCaseId, onSelectCase }: Props) {
   const [expandedCase, setExpandedCase] = useState<string | null>(null);
+  const [labData, setLabData] = useState<LabMeasurement[]>([]);
+  const [ekgData, setEkgData] = useState<EkgMeasurement[]>([]);
+  const [loading, setLoading] = useState(false);
 
-  /* Nur Fälle mit mindestens einem Monitoring-Parameter */
-  const monitoredCases = useMemo(() => {
-    return cases.filter((c) => {
-      const params = c.parameter_status ?? [];
-      return MONITORING_ITEMS.some((mi) => mi.getStatus(params) !== undefined);
-    });
-  }, [cases]);
+  const monitoredCases = useMemo(() =>
+    cases.filter(c => (c.parameter_status ?? []).some(p => MONITORING_IDS.includes(p.id))),
+    [cases]);
 
-  const selectedCase = useMemo(
-    () => monitoredCases.find((c) => c.case_id === (expandedCase ?? selectedCaseId)),
-    [monitoredCases, expandedCase, selectedCaseId]
-  );
+  const activeCaseId = expandedCase ?? selectedCaseId;
+  const activeCase = useMemo(() => monitoredCases.find(c => c.case_id === activeCaseId), [monitoredCases, activeCaseId]);
+
+  // Stabile Referenz-Werte fuer useEffect (verhindert Re-Fetch bei Polling)
+  const activeStationId = activeCase?.station_id;
+
+  const fetchHistory = useCallback(async (cid: string, station: string) => {
+    setLoading(true);
+    const [lab, ekg] = await Promise.all([
+      fetchJson<{ lab_history: LabMeasurement[] }>(`/api/cases/${cid}/lab-history`, station),
+      fetchJson<{ ekg_history: EkgMeasurement[] }>(`/api/cases/${cid}/ekg-history`, station),
+    ]);
+    setLabData(lab?.lab_history ?? []);
+    setEkgData(ekg?.ekg_history ?? []);
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    if (activeCaseId && activeStationId) fetchHistory(activeCaseId, activeStationId);
+    else { setLabData([]); setEkgData([]); }
+    // Nur re-fetchen wenn sich die *ID* aendert, nicht die Objekt-Referenz
+  }, [activeCaseId, activeStationId, fetchHistory]);
 
   return (
     <div>
       <h3 style={{ margin: "0 0 6px 0", fontSize: "1.1rem" }}>Klinisches Monitoring</h3>
-      <p style={{ margin: "0 0 16px 0", fontSize: 12, color: "#6b7280" }}>
-        Übersicht aktiver Monitoring-Parameter. Klick auf einen Fall für Details.
+      <p style={{ margin: "0 0 16px 0", fontSize: 12, color: C.text }}>
+        Übersicht aktiver Monitoring-Parameter. Klick auf einen Fall für Verlaufs-Charts.
       </p>
 
       {monitoredCases.length === 0 ? (
-        <div style={{ padding: 24, color: "#9ca3af", textAlign: "center", background: "#f9fafb", borderRadius: 8 }}>
+        <div style={{ padding: 24, color: "#9ca3af", textAlign: "center", background: C.bgAlt, borderRadius: 8 }}>
           Keine Fälle mit aktivem Monitoring.
         </div>
       ) : (
         <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
-          {/* Linke Spalte: Fall-Liste mit Sparklines */}
-          <div style={{ flex: "0 0 420px", maxHeight: 500, overflowY: "auto" }}>
-            {monitoredCases.map((c) => {
-              const params = c.parameter_status ?? [];
-              const isExpanded = expandedCase === c.case_id;
-
-              return (
-                <div
-                  key={c.case_id}
-                  onClick={() => { setExpandedCase(isExpanded ? null : c.case_id); onSelectCase(c.case_id); }}
-                  style={{
-                    padding: "10px 12px",
-                    borderRadius: 8,
-                    marginBottom: 6,
-                    background: isExpanded ? "#eff6ff" : "#fff",
-                    border: `1px solid ${isExpanded ? "#93c5fd" : "#e5e7eb"}`,
-                    cursor: "pointer",
-                    transition: "all 0.15s",
-                  }}
-                >
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                    <div>
-                      <span style={{ fontWeight: 700, fontFamily: "monospace", fontSize: 13 }}>{c.case_id}</span>
-                      <span style={{ fontSize: 11, color: "#6b7280", marginLeft: 8 }}>{c.station_id}</span>
-                    </div>
-                    {/* Sparkline-artige Statusleiste */}
-                    <div style={{ display: "flex", gap: 6 }}>
-                      {MONITORING_ITEMS.map((mi) => {
-                        const p = mi.getStatus(params);
-                        if (!p) return null;
-                        return (
-                          <div
-                            key={mi.id}
-                            title={`${mi.label}: ${p.detail ?? "–"}`}
-                            style={{ display: "flex", alignItems: "center", gap: 3 }}
-                          >
-                            <span style={{ fontSize: 12 }}>{mi.icon}</span>
-                            <MiniSparkline status={p.status} />
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  {/* Mini-Zusammenfassung */}
-                  <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
-                    {MONITORING_ITEMS.map((mi) => {
-                      const p = mi.getStatus(params);
-                      if (!p) return null;
-                      return (
-                        <span
-                          key={mi.id}
-                          style={{
-                            fontSize: 10,
-                            padding: "1px 6px",
-                            borderRadius: 3,
-                            fontWeight: 600,
-                            background: `${STATUS_COLOR[p.status]}15`,
-                            color: STATUS_COLOR[p.status],
-                            border: `1px solid ${STATUS_COLOR[p.status]}44`,
-                          }}
-                        >
-                          {mi.label}: {p.detail ?? "–"}
-                        </span>
-                      );
-                    })}
-                  </div>
-                </div>
-              );
-            })}
+          {/* Left: case list */}
+          <div style={{ flex: "0 0 400px", maxHeight: 540, overflowY: "auto" }}>
+            {monitoredCases.map(c => (
+              <CaseRow key={c.case_id} c={c} isActive={activeCaseId === c.case_id}
+                onClick={() => { setExpandedCase(expandedCase === c.case_id ? null : c.case_id); onSelectCase(c.case_id); }} />
+            ))}
           </div>
 
-          {/* Rechte Spalte: Detail-Charts */}
-          <div style={{ flex: 1, minWidth: 300 }}>
-            {selectedCase ? (
-              <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, padding: 16 }}>
-                <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 12 }}>
-                  Fall {selectedCase.case_id} – Monitoring-Details
+          {/* Right: charts */}
+          <div style={{ flex: 1, minWidth: 360 }}>
+            {activeCase ? (
+              <div style={{ background: C.bg, border: "1px solid #e5e7eb", borderRadius: 8, padding: 16 }}>
+                <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 4 }}>
+                  Fall {activeCase.case_id}
+                  <span style={{ fontWeight: 400, fontSize: 12, color: C.text, marginLeft: 8 }}>
+                    {activeCase.station_id} · {activeCase.clinic}
+                  </span>
                 </div>
-
-                {MONITORING_ITEMS.map((mi) => {
-                  const p = mi.getStatus(selectedCase.parameter_status ?? []);
-                  if (!p) return null;
-                  return (
-                    <div key={mi.id} style={{ marginBottom: 16 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
-                        <span style={{ fontSize: 16 }}>{mi.icon}</span>
-                        <span style={{ fontWeight: 600, fontSize: 13 }}>{mi.label}</span>
-                        <StatusBadge status={p.status} detail={p.detail} />
-                      </div>
-                      <div style={{ paddingLeft: 24 }}>
-                        {mi.renderDetail(selectedCase)}
-                        {!mi.renderDetail(selectedCase) && p.detail && (
-                          <div style={{ fontSize: 12, color: "#6b7280" }}>{p.detail}</div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-
-                <div style={{ marginTop: 12, padding: 10, background: "#f1f5f9", borderRadius: 6, fontSize: 11, color: "#64748b" }}>
-                  💡 Bei vollständiger KIS-Anbindung werden hier Zeitreihen-Charts mit
-                  historischen Laborwerten (Neutrophile, Troponin, etc.) dargestellt.
-                </div>
+                {loading ? (
+                  <div style={{ padding: 32, textAlign: "center", color: C.text }}>Lade Verlaufsdaten…</div>
+                ) : (
+                  <ChartPanel lab={labData} ekg={ekgData} params={activeCase.parameter_status ?? []} />
+                )}
               </div>
             ) : (
-              <div style={{ padding: 32, textAlign: "center", color: "#9ca3af", background: "#f9fafb", borderRadius: 8 }}>
-                Wählen Sie einen Fall für Monitoring-Details.
+              <div style={{ padding: 32, textAlign: "center", color: "#9ca3af", background: C.bgAlt, borderRadius: 8 }}>
+                Wählen Sie einen Fall für Verlaufs-Charts.
               </div>
             )}
           </div>
@@ -215,137 +121,258 @@ export default function MonitoringPanel({ cases, selectedCaseId, onSelectCase }:
   );
 }
 
-/* ───── Mini-Sparkline (Status-Indikator als kleine Balken) ───── */
-function MiniSparkline({ status }: { status: string }) {
-  const color = STATUS_COLOR[status] ?? STATUS_COLOR.na;
-  // 3 kleine Balken, der letzte zeigt den aktuellen Status
-  const bars = status === "ok" ? [0.4, 0.6, 0.9] : status === "warn" ? [0.8, 0.6, 0.5] : status === "critical" ? [0.5, 0.7, 0.95] : [0.3, 0.3, 0.3];
-
+/* ═══════════════════════════════════════════ */
+/* Case row                                    */
+/* ═══════════════════════════════════════════ */
+function CaseRow({ c, isActive, onClick }: { c: CaseSummary; isActive: boolean; onClick: () => void }) {
+  const params = c.parameter_status ?? [];
+  const icons: Record<string, string> = { ekg: "💓", clozapin: "💊", suicidality: "⚠", isolation: "🔒" };
   return (
-    <svg width={20} height={14} viewBox="0 0 20 14">
-      {bars.map((h, i) => (
-        <rect
-          key={i}
-          x={i * 7}
-          y={14 - h * 14}
-          width={5}
-          height={h * 14}
-          rx={1}
-          fill={i === bars.length - 1 ? color : `${color}66`}
-        />
-      ))}
-    </svg>
-  );
-}
-
-/* ───── Status-Badge ───── */
-function StatusBadge({ status, detail }: { status: string; detail: string | null }) {
-  const color = STATUS_COLOR[status];
-  const labels: Record<string, string> = {
-    ok: "OK",
-    warn: "Warnung",
-    critical: "Kritisch",
-    na: "–",
-  };
-  return (
-    <span
-      style={{
-        fontSize: 10,
-        fontWeight: 700,
-        padding: "2px 6px",
-        borderRadius: 999,
-        background: `${color}20`,
-        color: color,
-        border: `1px solid ${color}44`,
-      }}
-    >
-      {labels[status]}
-    </span>
-  );
-}
-
-/* ───── EKG-Detail ───── */
-function EkgDetail({ params }: { params: ParameterStatus[] }) {
-  const p = params.find((x) => x.id === "ekg");
-  if (!p) return null;
-
-  return (
-    <div>
-      <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-        <TimelineBar label="Eintritts-EKG" status={p.status === "warn" && p.detail?.includes("ET-EKG") ? "warn" : p.status === "ok" ? "ok" : "na"} />
-        <TimelineBar label="Letzte Befundung" status={p.status === "critical" ? "critical" : p.status === "ok" ? "ok" : "na"} />
-      </div>
-      <div style={{ fontSize: 11, color: "#6b7280", marginTop: 6 }}>
-        {p.detail ?? "Keine Daten verfügbar."}
-      </div>
-    </div>
-  );
-}
-
-/* ───── Clozapin-Detail ───── */
-function ClozapinDetail({ params }: { params: ParameterStatus[] }) {
-  const p = params.find((x) => x.id === "clozapin");
-  if (!p) return null;
-
-  const isCritical = p.status === "critical";
-  const neutrophilAlert = p.detail?.includes("Neutrophile");
-
-  return (
-    <div>
-      {/* Simulated gauge for Neutrophile */}
-      <div style={{ marginBottom: 8 }}>
-        <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 4 }}>Neutrophile (Grenzwert: 2.0 G/l)</div>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <div style={{ flex: 1, height: 8, background: "#f3f4f6", borderRadius: 4, overflow: "hidden", position: "relative" }}>
-            <div style={{
-              position: "absolute", left: 0, top: 0, bottom: 0, borderRadius: 4,
-              width: isCritical && neutrophilAlert ? "30%" : "70%",
-              background: isCritical && neutrophilAlert
-                ? "linear-gradient(90deg, #ef4444, #f87171)"
-                : "linear-gradient(90deg, #22c55e, #4ade80)",
-            }} />
-            {/* Grenzwert-Markierung bei 40% (=2 G/l von 5 G/l Skala) */}
-            <div style={{
-              position: "absolute", left: "40%", top: -2, bottom: -2,
-              width: 2, background: "#dc2626",
-            }} />
-          </div>
-          <span style={{
-            fontSize: 12, fontWeight: 700,
-            color: isCritical && neutrophilAlert ? "#dc2626" : "#16a34a",
-          }}>
-            {isCritical && neutrophilAlert ? "<2.0" : "≥2.0"} G/l
-          </span>
+    <div onClick={onClick} style={{
+      padding: "10px 12px", borderRadius: 8, marginBottom: 6, cursor: "pointer",
+      background: isActive ? "#eff6ff" : C.bg,
+      border: `1px solid ${isActive ? "#93c5fd" : "#e5e7eb"}`, transition: "all 0.15s",
+    }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div>
+          <span style={{ fontWeight: 700, fontFamily: "monospace", fontSize: 13 }}>{c.case_id}</span>
+          <span style={{ fontSize: 11, color: C.text, marginLeft: 8 }}>{c.station_id}</span>
+        </div>
+        <div style={{ display: "flex", gap: 4 }}>
+          {MONITORING_IDS.map(id => {
+            const p = params.find(x => x.id === id);
+            if (!p) return null;
+            const col = p.status === "critical" ? C.critical : p.status === "warn" ? C.warn : p.status === "ok" ? C.ok : C.na;
+            return (
+              <span key={id} title={`${p.label}: ${p.detail ?? "–"}`} style={{
+                fontSize: 10, padding: "1px 5px", borderRadius: 3, fontWeight: 600,
+                background: `${col}18`, color: col, border: `1px solid ${col}44`,
+              }}>{icons[id]} {p.label}</span>
+            );
+          })}
         </div>
       </div>
-
-      {/* Status-Zeilen */}
-      <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-        <TimelineBar
-          label="Grosses Blutbild"
-          status={p.detail?.includes("BB") ? "warn" : "ok"}
-        />
-        <TimelineBar
-          label="Troponin"
-          status={p.detail?.includes("Troponin") ? "warn" : "ok"}
-        />
-      </div>
-      <div style={{ fontSize: 11, color: "#6b7280", marginTop: 6 }}>
-        {p.detail ?? "Monitoring aktuell."}
-      </div>
     </div>
   );
 }
 
-/* ───── Timeline-Bar (einfache visuelle Status-Anzeige) ───── */
-function TimelineBar({ label, status }: { label: string; status: string }) {
-  const color = STATUS_COLOR[status];
+/* ═══════════════════════════════════════════ */
+/* Chart panel                                 */
+/* ═══════════════════════════════════════════ */
+function ChartPanel({ lab, ekg, params }: { lab: LabMeasurement[]; ekg: EkgMeasurement[]; params: ParameterStatus[] }) {
+  const hasClozapin = params.some(p => p.id === "clozapin");
+  const hasLab = lab.length > 1;
+  const hasEkg = ekg.length > 1;
+
+  if (!hasLab && !hasEkg) {
+    return (
+      <div style={{ padding: 20, textAlign: "center", color: C.text, fontSize: 12 }}>
+        Keine Verlaufsdaten für diesen Fall vorhanden.
+        {hasClozapin && " Clozapin aktiv, aber noch keine Labordaten."}
+      </div>
+    );
+  }
+
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-      <span style={{
-        width: 8, height: 8, borderRadius: "50%", background: color, flexShrink: 0,
-      }} />
-      <span style={{ fontSize: 11, color: "#374151" }}>{label}</span>
+    <div style={{ display: "flex", flexDirection: "column", gap: 16, marginTop: 12 }}>
+      {hasLab && <TrendChart title="Neutrophile abs." unit="G/l" data={lab} vKey="neutro" color={C.blue}
+        thresholds={[{ v: 2.0, c: C.warn, l: "2.0 Grenzwert" }, { v: 1.5, c: C.critical, l: "1.5 Kritisch" }]}
+        yRange={[0, 8]} direction="lower-bad" />}
+
+      {hasEkg && <TrendChart title="QTc" unit="ms" data={ekg} vKey="qtc" color={C.indigo}
+        thresholds={[{ v: 480, c: C.warn, l: "480 Warnung" }, { v: 500, c: C.critical, l: "500 Alarm" }]}
+        yRange={[350, 560]} direction="upper-bad" />}
+
+      {hasLab && lab.some(m => m.cloz_spiegel != null) &&
+        <TrendChart title="Clozapin-Spiegel" unit="ng/ml" data={lab} vKey="cloz_spiegel" color={C.teal}
+          thresholds={[{ v: 350, c: C.ok, l: "350 Therap.min" }, { v: 600, c: C.warn, l: "600 Obere Gr." }]}
+          yRange={[0, 1100]} direction="upper-bad" />}
+
+      {hasLab && lab.some(m => m.troponin != null) &&
+        <TrendChart title="Troponin T hs" unit="ng/l" data={lab} vKey="troponin" color={C.rose}
+          thresholds={[{ v: 14, c: C.critical, l: "14 Referenz" }]}
+          yRange={[0, 80]} direction="upper-bad" />}
+
+      {hasLab && lab.some(m => m.alat != null) &&
+        <DualTrendChart title="Leberwerte" data={lab}
+          series={[{ key: "alat", label: "ALAT", color: C.orange }, { key: "asat", label: "ASAT", color: C.teal }]}
+          unit="U/l" thresholds={[{ v: 50, c: C.warn, l: "50 Referenz" }]} yRange={[0, 130]} />}
+
+      {hasEkg && <TrendChart title="Herzfrequenz" unit="bpm" data={ekg} vKey="hr" color={C.ok}
+        thresholds={[{ v: 60, c: C.na, l: "60 Bradyk." }, { v: 100, c: C.warn, l: "100 Tachyk." }]}
+        yRange={[40, 130]} direction="upper-bad" />}
     </div>
   );
+}
+
+/* ═══════════════════════════════════════════ */
+/* SVG Trend Chart                             */
+/* ═══════════════════════════════════════════ */
+const W = 520, H = 160;
+const P = { t: 20, r: 14, b: 28, l: 44 };
+const PW = W - P.l - P.r, PH = H - P.t - P.b;
+
+interface TH { v: number; c: string; l: string; }
+
+function TrendChart({ title, unit, data, vKey, color, thresholds = [], yRange, direction = "upper-bad" }: {
+  title: string; unit: string;
+  data: Record<string, unknown>[]; vKey: string; color: string;
+  thresholds?: TH[]; yRange: [number, number]; direction?: "upper-bad" | "lower-bad";
+}) {
+  const pts = useMemo(() =>
+    data.map(d => ({ dt: d.date as string, v: d[vKey] as number | null }))
+        .filter(p => p.v != null) as { dt: string; v: number }[],
+    [data, vKey]);
+
+  if (pts.length < 2) return null;
+
+  const [lo, hi] = yRange;
+  const rng = hi - lo || 1;
+  const toX = (i: number) => P.l + (i / (pts.length - 1)) * PW;
+  const toY = (v: number) => P.t + PH - ((Math.min(Math.max(v, lo), hi) - lo) / rng) * PH;
+
+  const path = pts.map((p, i) => `${i === 0 ? "M" : "L"}${toX(i).toFixed(1)},${toY(p.v).toFixed(1)}`).join(" ");
+  const nTicks = 4;
+  const ticks = Array.from({ length: nTicks + 1 }, (_, i) => lo + (rng * i) / nTicks);
+
+  const last = pts[pts.length - 1];
+  const lastSt = ptStatus(last.v, thresholds, direction);
+
+  const xLabels = spreadLabels(pts, 5);
+
+  return (
+    <div style={{ background: C.bgAlt, borderRadius: 8, padding: "10px 12px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+        <span style={{ fontSize: 12, fontWeight: 700, color: C.textDark }}>{title}</span>
+        <span style={{
+          fontSize: 11, fontWeight: 700, padding: "1px 6px", borderRadius: 4,
+          color: lastSt === "critical" ? C.critical : lastSt === "warn" ? C.warn : C.ok,
+          background: `${lastSt === "critical" ? C.critical : lastSt === "warn" ? C.warn : C.ok}15`,
+        }}>
+          Aktuell: {last.v} {unit}
+        </span>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ maxWidth: W }}>
+        {/* Axes */}
+        <line x1={P.l} x2={P.l} y1={P.t} y2={H - P.b} stroke={C.grid} />
+        <line x1={P.l} x2={W - P.r} y1={H - P.b} y2={H - P.b} stroke={C.grid} />
+        {/* Grid + Y labels */}
+        {ticks.map((v, i) => <g key={i}>
+          <line x1={P.l} x2={W - P.r} y1={toY(v)} y2={toY(v)} stroke={C.gridLight} />
+          <text x={P.l - 4} y={toY(v) + 3} textAnchor="end" fontSize={9} fill={C.text}>
+            {v % 1 === 0 ? v : v.toFixed(1)}
+          </text>
+        </g>)}
+        {/* Thresholds */}
+        {thresholds.map((t, i) => <g key={`th${i}`}>
+          <line x1={P.l} x2={W - P.r} y1={toY(t.v)} y2={toY(t.v)}
+            stroke={t.c} strokeWidth={1.5} strokeDasharray="6 3" opacity={0.65} />
+          <text x={W - P.r - 2} y={toY(t.v) - 3} textAnchor="end" fontSize={8} fill={t.c} fontWeight={600}>{t.l}</text>
+        </g>)}
+        {/* Line */}
+        <path d={path} fill="none" stroke={color} strokeWidth={2} strokeLinejoin="round" />
+        {/* Points */}
+        {pts.map((p, i) => {
+          const st = ptStatus(p.v, thresholds, direction);
+          const fc = st === "critical" ? C.critical : st === "warn" ? C.warn : color;
+          return <circle key={i} cx={toX(i)} cy={toY(p.v)} r={3} fill={fc} stroke={C.bg} strokeWidth={1.5}>
+            <title>{fmtDate(p.dt)}: {p.v} {unit}</title>
+          </circle>;
+        })}
+        {/* X labels */}
+        {xLabels.map(({ i, l }) => <text key={i} x={toX(i)} y={H - 5} textAnchor="middle" fontSize={8} fill={C.text}>{l}</text>)}
+      </svg>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════ */
+/* Dual Trend Chart (ALAT + ASAT)              */
+/* ═══════════════════════════════════════════ */
+function DualTrendChart({ title, data, series, unit, thresholds = [], yRange }: {
+  title: string; data: Record<string, unknown>[];
+  series: { key: string; label: string; color: string }[];
+  unit: string; thresholds?: TH[]; yRange: [number, number];
+}) {
+  const allSeries = useMemo(() => series.map(s => ({
+    ...s,
+    pts: data.map(d => ({ dt: d.date as string, v: d[s.key] as number | null }))
+             .filter(p => p.v != null) as { dt: string; v: number }[],
+  })), [data, series]);
+
+  if (allSeries.every(s => s.pts.length < 2)) return null;
+
+  const [lo, hi] = yRange;
+  const rng = hi - lo || 1;
+  const ticks = Array.from({ length: 5 }, (_, i) => lo + (rng * i) / 4);
+
+  return (
+    <div style={{ background: C.bgAlt, borderRadius: 8, padding: "10px 12px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+        <span style={{ fontSize: 12, fontWeight: 700, color: C.textDark }}>{title}</span>
+        <div style={{ display: "flex", gap: 10 }}>
+          {series.map(s => <span key={s.key} style={{ fontSize: 10, display: "flex", alignItems: "center", gap: 3 }}>
+            <span style={{ width: 8, height: 3, background: s.color, borderRadius: 1, display: "inline-block" }} />
+            {s.label}
+          </span>)}
+        </div>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ maxWidth: W }}>
+        <line x1={P.l} x2={P.l} y1={P.t} y2={H - P.b} stroke={C.grid} />
+        <line x1={P.l} x2={W - P.r} y1={H - P.b} y2={H - P.b} stroke={C.grid} />
+        {ticks.map((v, i) => <g key={i}>
+          <line x1={P.l} x2={W - P.r} y1={P.t + PH - ((v - lo) / rng) * PH} y2={P.t + PH - ((v - lo) / rng) * PH} stroke={C.gridLight} />
+          <text x={P.l - 4} y={P.t + PH - ((v - lo) / rng) * PH + 3} textAnchor="end" fontSize={9} fill={C.text}>{Math.round(v)}</text>
+        </g>)}
+        {thresholds.map((t, i) => <line key={`th${i}`} x1={P.l} x2={W - P.r}
+          y1={P.t + PH - ((t.v - lo) / rng) * PH} y2={P.t + PH - ((t.v - lo) / rng) * PH}
+          stroke={t.c} strokeWidth={1.5} strokeDasharray="6 3" opacity={0.65} />)}
+        {allSeries.map(s => {
+          if (s.pts.length < 2) return null;
+          const toX = (i: number) => P.l + (i / (s.pts.length - 1)) * PW;
+          const toY = (v: number) => P.t + PH - ((Math.min(Math.max(v, lo), hi) - lo) / rng) * PH;
+          const path = s.pts.map((p, i) => `${i === 0 ? "M" : "L"}${toX(i).toFixed(1)},${toY(p.v).toFixed(1)}`).join(" ");
+          return <g key={s.key}>
+            <path d={path} fill="none" stroke={s.color} strokeWidth={2} strokeLinejoin="round" />
+            {s.pts.map((p, i) => <circle key={i} cx={toX(i)} cy={toY(p.v)} r={2.5} fill={s.color} stroke={C.bg} strokeWidth={1}>
+              <title>{s.label}: {p.v} {unit} ({fmtDate(p.dt)})</title>
+            </circle>)}
+          </g>;
+        })}
+      </svg>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════ */
+/* Helpers                                     */
+/* ═══════════════════════════════════════════ */
+function ptStatus(v: number, ths: TH[], dir: "upper-bad" | "lower-bad"): string {
+  // Sort by severity (critical color first)
+  const sorted = [...ths].sort((a, b) => (a.c === C.critical ? -1 : b.c === C.critical ? 1 : 0));
+  for (const t of sorted) {
+    if (dir === "lower-bad") {
+      if (v <= t.v && t.c === C.critical) return "critical";
+      if (v <= t.v && t.c === C.warn) return "warn";
+    } else {
+      if (v >= t.v && t.c === C.critical) return "critical";
+      if (v >= t.v && t.c === C.warn) return "warn";
+    }
+  }
+  return "ok";
+}
+
+function spreadLabels(pts: { dt: string }[], max: number) {
+  if (pts.length <= max) return pts.map((p, i) => ({ i, l: fmtDate(p.dt) }));
+  const step = Math.ceil(pts.length / max);
+  const r: { i: number; l: string }[] = [];
+  for (let i = 0; i < pts.length; i += step) r.push({ i, l: fmtDate(pts[i].dt) });
+  const last = pts.length - 1;
+  if (!r.some(x => x.i === last)) r.push({ i: last, l: fmtDate(pts[last].dt) });
+  return r;
+}
+
+function fmtDate(iso: string): string {
+  try { const d = new Date(iso); return `${d.getDate()}.${d.getMonth() + 1}.`; }
+  catch { return iso.slice(5, 10); }
 }

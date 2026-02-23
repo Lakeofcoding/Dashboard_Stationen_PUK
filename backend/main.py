@@ -31,9 +31,6 @@ from app.db import SessionLocal, init_db
 from app.rbac import seed_rbac
 from app.rule_engine import seed_rule_definitions
 from app.case_logic import seed_shift_reasons, seed_dummy_cases_to_db
-import os
-_rpm = int(os.getenv("DASHBOARD_RATE_LIMIT_RPM", "120"))
-_rph = int(os.getenv("DASHBOARD_RATE_LIMIT_RPH", "3000"))
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -85,7 +82,7 @@ from middleware.security_headers import SecurityHeadersMiddleware
 # Starlette-Problem: >=3 gestackte BaseHTTPMiddleware koennen
 # HTTPExceptions verschlucken und als 500 zurueckgeben.
 app.add_middleware(SecurityHeadersMiddleware)
-app.add_middleware(RateLimitMiddleware, requests_per_minute=_rpm, requests_per_hour=_rph)
+app.add_middleware(RateLimitMiddleware, requests_per_minute=120, requests_per_hour=3000)
 app.add_middleware(CSRFMiddleware)
 
 # ---------------------------------------------------------------------------

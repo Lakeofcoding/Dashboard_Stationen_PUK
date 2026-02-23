@@ -79,6 +79,10 @@ def csrf_token(client: TestClient) -> str:
 # Auth-Header-Factories
 # ---------------------------------------------------------------------------
 
+# Default-Station fuer Tests (muss in demo_cases.xlsx existieren)
+_DEFAULT_TEST_STATION = "Station A1"
+
+
 class AuthHeaders:
     """Factory fuer authentifizierte + CSRF-geschuetzte Headers."""
 
@@ -89,7 +93,7 @@ class AuthHeaders:
     def __call__(
         self,
         user: str = "demo",
-        station: str = "A1",
+        station: str = _DEFAULT_TEST_STATION,
         *,
         extra: dict[str, str] | None = None,
     ) -> dict[str, str]:
@@ -103,21 +107,21 @@ class AuthHeaders:
             h.update(extra)
         return h
 
-    def admin(self, station: str = "A1") -> dict[str, str]:
+    def admin(self, station: str = _DEFAULT_TEST_STATION) -> dict[str, str]:
         return self("admin", station)
 
-    def clinician(self, station: str = "A1") -> dict[str, str]:
+    def clinician(self, station: str = _DEFAULT_TEST_STATION) -> dict[str, str]:
         return self("pflege1", station)
 
-    def viewer(self, station: str = "A1") -> dict[str, str]:
+    def viewer(self, station: str = _DEFAULT_TEST_STATION) -> dict[str, str]:
         # NICHT "demo" — der hat in main.py zusaetzlich admin-Rolle!
         # "viewer_test" wird in Demo-Mode auto-provisioned als reiner Viewer.
         return self("viewer_test", station)
 
-    def manager(self, station: str = "A1") -> dict[str, str]:
+    def manager(self, station: str = _DEFAULT_TEST_STATION) -> dict[str, str]:
         return self("manager1", station)
 
-    def unknown(self, station: str = "A1") -> dict[str, str]:
+    def unknown(self, station: str = _DEFAULT_TEST_STATION) -> dict[str, str]:
         """Unbekannter User (auto-provisioned als viewer in demo mode)."""
         return self(f"unknown_{secrets.token_hex(4)}", station)
 
@@ -165,7 +169,7 @@ def fresh_client() -> TestClient:
 @pytest.fixture(scope="session")
 def station_cases(client: TestClient, admin_h: dict) -> list[dict[str, Any]]:
     """Alle Faelle auf Station A1 (gecacht fuer die Session)."""
-    r = client.get("/api/cases?ctx=A1", headers=admin_h)
+    r = client.get("/api/cases?ctx=Station A1", headers=admin_h)
     assert r.status_code == 200
     return r.json()
 
@@ -173,14 +177,14 @@ def station_cases(client: TestClient, admin_h: dict) -> list[dict[str, Any]]:
 @pytest.fixture(scope="session")
 def first_case_id(station_cases: list[dict]) -> str:
     """Erste verfuegbare case_id auf A1."""
-    assert len(station_cases) > 0, "Keine Demo-Faelle auf A1"
+    assert len(station_cases) > 0, "Keine Demo-Faelle auf Station A1"
     return station_cases[0]["case_id"]
 
 
 @pytest.fixture(scope="session")
 def all_rule_ids(client: TestClient, admin_h: dict) -> list[str]:
     """Alle aktiven Rule-IDs aus der DB."""
-    r = client.get("/api/meta/rules?ctx=A1", headers=admin_h)
+    r = client.get("/api/meta/rules?ctx=Station A1", headers=admin_h)
     assert r.status_code == 200
     return [rule["rule_id"] for rule in r.json()["rules"]]
 
