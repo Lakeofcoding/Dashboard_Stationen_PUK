@@ -68,7 +68,79 @@ def _ensure_schema() -> None:
             return set()
         return {c["name"] for c in insp.get_columns(table)}
 
+    # Whitelist: nur bekannte Tabellen/Spalten erlaubt (verhindert SQL-Injection-Pattern)
+    _ALLOWED_MIGRATIONS: set[tuple[str, str, str]] = {
+        ("ack", "ack_valid_until", "TEXT"),
+        ("ack", "action", "TEXT"),
+        ("ack", "business_date", "TEXT"),
+        ("ack", "condition_hash", "TEXT"),
+        ("ack", "shift_code", "TEXT"),
+        ("ack", "version", "INTEGER"),
+        ("case_data", "allergies_recorded", "BOOLEAN"),
+        ("case_data", "andere_psychopharmaka", "INTEGER"),
+        ("case_data", "antidepressiva", "INTEGER"),
+        ("case_data", "antiepileptika", "INTEGER"),
+        ("case_data", "aufenthalt_nach_austritt", "TEXT"),
+        ("case_data", "aufenthaltsort_vor_eintritt", "TEXT"),
+        ("case_data", "behandlung_nach_austritt", "TEXT"),
+        ("case_data", "behandlung_typ", "TEXT"),
+        ("case_data", "behandlungsbereich", "TEXT"),
+        ("case_data", "behandlungsgrund", "TEXT"),
+        ("case_data", "beschaeftigung_arbeitslos", "INTEGER"),
+        ("case_data", "beschaeftigung_ausbildung", "INTEGER"),
+        ("case_data", "beschaeftigung_haushalt", "INTEGER"),
+        ("case_data", "beschaeftigung_iv", "INTEGER"),
+        ("case_data", "beschaeftigung_reha", "INTEGER"),
+        ("case_data", "beschaeftigung_teilzeit", "INTEGER"),
+        ("case_data", "beschaeftigung_vollzeit", "INTEGER"),
+        ("case_data", "case_status", "TEXT"),
+        ("case_data", "cbc_last_date", "TEXT"),
+        ("case_data", "clozapin_active", "BOOLEAN"),
+        ("case_data", "clozapin_start_date", "TEXT"),
+        ("case_data", "depotneuroleptika", "INTEGER"),
+        ("case_data", "eintrittsart", "TEXT"),
+        ("case_data", "einweisende_instanz", "TEXT"),
+        ("case_data", "ekg_entry_date", "TEXT"),
+        ("case_data", "ekg_last_date", "TEXT"),
+        ("case_data", "ekg_last_reported", "BOOLEAN"),
+        ("case_data", "emergency_bem_start_date", "TEXT"),
+        ("case_data", "emergency_med_start_date", "TEXT"),
+        ("case_data", "entscheid_austritt", "TEXT"),
+        ("case_data", "fu_bei_eintritt", "TEXT"),
+        ("case_data", "fu_datum", "TEXT"),
+        ("case_data", "fu_einweisende_instanz", "TEXT"),
+        ("case_data", "fu_gueltig_bis", "TEXT"),
+        ("case_data", "fu_nummer", "INTEGER"),
+        ("case_data", "fu_typ", "TEXT"),
+        ("case_data", "hypnotika", "INTEGER"),
+        ("case_data", "imported_at", "TEXT"),
+        ("case_data", "imported_by", "TEXT"),
+        ("case_data", "is_voluntary", "BOOLEAN"),
+        ("case_data", "keine_psychopharmaka", "INTEGER"),
+        ("case_data", "klasse", "TEXT"),
+        ("case_data", "lithium", "INTEGER"),
+        ("case_data", "neuroleptika", "INTEGER"),
+        ("case_data", "neutrophils_last_date", "TEXT"),
+        ("case_data", "neutrophils_last_value", "TEXT"),
+        ("case_data", "psychostimulanzien", "INTEGER"),
+        ("case_data", "responsible_person", "TEXT"),
+        ("case_data", "schulbildung", "TEXT"),
+        ("case_data", "sdep_complete", "BOOLEAN"),
+        ("case_data", "source", "TEXT"),
+        ("case_data", "suchtaversionsmittel", "INTEGER"),
+        ("case_data", "tranquilizer", "INTEGER"),
+        ("case_data", "treatment_plan_date", "TEXT"),
+        ("case_data", "troponin_last_date", "TEXT"),
+        ("case_data", "zivilstand", "TEXT"),
+        ("rule_definition", "ack_roles_json", "TEXT"),
+        ("rule_definition", "restrict_to_responsible", "BOOLEAN"),
+        ("security_event", "details", "TEXT"),
+        ("security_event", "user_agent", "TEXT"),
+    }
+
     def safe_add(conn, table: str, column: str, col_type: str = "TEXT"):
+        if (table, column, col_type) not in _ALLOWED_MIGRATIONS:
+            raise ValueError(f"Migration nicht in Whitelist: {table}.{column} {col_type}")
         if table not in insp.get_table_names():
             return
         if column not in cols(table):
@@ -83,6 +155,9 @@ def _ensure_schema() -> None:
         safe_add(conn, "security_event", "user_agent")
         safe_add(conn, "security_event", "details")
         safe_add(conn, "case_data", "imported_at")
+        # v5.12: Neue Spalten für rollenbasierte ACK-Steuerung
+        safe_add(conn, "rule_definition", "ack_roles_json", "TEXT")
+        safe_add(conn, "rule_definition", "restrict_to_responsible", "BOOLEAN")
         safe_add(conn, "case_data", "imported_by")
         safe_add(conn, "case_data", "source")
         # Neue klinische Felder (v2)

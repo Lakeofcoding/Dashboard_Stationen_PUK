@@ -87,11 +87,24 @@ ROLES: dict[str, dict[str, object]] = {
 }
 
 DEFAULT_USERS: dict[str, dict[str, object]] = {
-    "admin": {"display_name": "Initial Admin", "roles": [("system_admin", "*")]},
+    # Globale Rollen
+    "admin": {"display_name": "System Administrator", "roles": [("system_admin", "*")]},
+    "direktion": {"display_name": "Direktion (Gesamt)", "roles": [("manager", "*")]},
+    # Klinik-Manager (sehen ganze Klinik)
+    "mgr.epp": {"display_name": "Manager EPP", "roles": [("manager", "Station A1")]},
+    "mgr.app": {"display_name": "Manager APP", "roles": [("manager", "Station G0")]},
+    "mgr.fpp": {"display_name": "Manager FPP", "roles": [("manager", "72A For-M")]},
+    "mgr.kjpp": {"display_name": "Manager KJPP", "roles": [("manager", "Stat.1 (ZJP)")]},
+    # Schichtleitungen (Zentrum)
+    "sl.zape": {"display_name": "SL Zentrum ZAPE", "roles": [("shift_lead", "Station A1")]},
+    "sl.zdap": {"display_name": "SL Zentrum ZDAP", "roles": [("shift_lead", "Station A2")]},
+    "sl.zav": {"display_name": "SL Zentrum ZAV", "roles": [("shift_lead", "Station G0")]},
+    # Station-Ärzte (nur eine Station)
+    "arzt.a1": {"display_name": "Arzt Station A1", "roles": [("clinician", "Station A1")]},
+    "arzt.g0": {"display_name": "Arzt Station G0", "roles": [("clinician", "Station G0")]},
+    "arzt.b2": {"display_name": "Arzt Station B2", "roles": [("clinician", "Station B2")]},
+    # Demo (Leser, sieht alles)
     "demo": {"display_name": "Demo User", "roles": [("viewer", "*")]},
-    "pflege1": {"display_name": "Pflege 1", "roles": [("clinician", "*")]},
-    "arzt1": {"display_name": "Arzt 1", "roles": [("clinician", "*")]},
-    "manager1": {"display_name": "Manager 1", "roles": [("manager", "*")]},
 }
 
 # -----------------------------------------------------------------------------
@@ -164,7 +177,7 @@ def _roles_for_station(db: Session, user_id: str, station_id: str) -> Set[str]:
     ).all()
     out=set()
     for rid, st in rows:
-        if st == "*" or st == station_id:
+        if station_id == "*" or st == "*" or st == station_id:
             out.add(rid)
     return out
 
@@ -210,20 +223,104 @@ def resolve_permissions(db: Session, *, user_id: str, station_id: str) -> tuple[
 
 def enforce_station_scope(db: Session, *, user_id: str, station_id: str) -> None:
     """Validate user has at least one role assignment covering the requested station.
-    Raises 403 if user has no role for this station (prevents horizontal escalation).
-    Wildcard (*) roles cover all stations."""
+    
+    Hierarchie-Logik:
+    - Wildcard (*) → Zugriff auf alles
+    - manager-Rolle an Station X → Zugriff auf alle Stationen der gleichen KLINIK
+    - shift_lead an Station X → Zugriff auf alle Stationen des gleichen ZENTRUMS
+    - clinician/viewer an Station X → nur Station X
+    """
     if station_id == "*":
         return  # global scope (admin endpoints)
+
+    from app.config import ROLE_SCOPE
+
     rows = db.execute(
-        select(UserRole.station_id).where(UserRole.user_id == user_id)
+        select(UserRole).where(UserRole.user_id == user_id)
     ).scalars().all()
-    allowed = set(rows)
-    if "*" in allowed or station_id in allowed:
-        return
+
+    for ur in rows:
+        # Wildcard-Rolle deckt alles ab
+        if ur.station_id == "*":
+            return
+        # Exakter Match
+        if ur.station_id == station_id:
+            return
+        # Hierarchie-Check basierend auf Rollen-Scope
+        scope_level = ROLE_SCOPE.get(ur.role_id, "station")
+        if scope_level in ("klinik", "zentrum"):
+            try:
+                from app.excel_loader import get_station_klinik_map, get_station_center_map
+                if scope_level == "klinik":
+                    klinik_map = get_station_klinik_map() or {}
+                    user_clinic = klinik_map.get(ur.station_id)
+                    target_clinic = klinik_map.get(station_id)
+                    if user_clinic and target_clinic and user_clinic == target_clinic:
+                        return
+                elif scope_level == "zentrum":
+                    center_map = get_station_center_map() or {}
+                    user_center = center_map.get(ur.station_id)
+                    target_center = center_map.get(station_id)
+                    if user_center and target_center and user_center == target_center:
+                        return
+            except Exception:
+                pass
+
     raise HTTPException(
         status_code=403,
         detail=f"Kein Zugriff auf Station {station_id}. Kontaktieren Sie den Admin.",
     )
+
+
+def get_user_visible_stations(db: Session, user_id: str) -> set[str] | None:
+    """Berechnet die sichtbaren Stationen für einen User basierend auf RBAC-Hierarchie.
+    
+    Returns None = ALLE Stationen (global scope).
+    Returns set() = spezifische Stationen.
+    """
+    from app.config import ROLE_SCOPE
+
+    rows = db.execute(
+        select(UserRole).where(UserRole.user_id == user_id)
+    ).scalars().all()
+
+    if not rows:
+        return set()  # Keine Rollen → nichts sichtbar
+
+    # Wildcard → global
+    if any(ur.station_id == "*" for ur in rows):
+        return None  # = alles
+
+    try:
+        from app.excel_loader import get_station_klinik_map, get_station_center_map
+        klinik_map = get_station_klinik_map() or {}
+        center_map = get_station_center_map() or {}
+    except Exception:
+        klinik_map, center_map = {}, {}
+
+    all_known = set(klinik_map.keys())
+    visible: set[str] = set()
+
+    for ur in rows:
+        scope_level = ROLE_SCOPE.get(ur.role_id, "station")
+        if scope_level == "global":
+            return None  # alles
+        elif scope_level == "klinik":
+            user_clinic = klinik_map.get(ur.station_id)
+            if user_clinic:
+                visible |= {s for s, k in klinik_map.items() if k == user_clinic}
+            else:
+                visible.add(ur.station_id)
+        elif scope_level == "zentrum":
+            user_center = center_map.get(ur.station_id)
+            if user_center:
+                visible |= {s for s, z in center_map.items() if z == user_center}
+            else:
+                visible.add(ur.station_id)
+        else:
+            visible.add(ur.station_id)
+
+    return visible
 
 # -----------------------------------------------------------------------------
 # Enforcement dependency

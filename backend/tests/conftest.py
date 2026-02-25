@@ -40,21 +40,21 @@ from main import app  # noqa: E402 – nach env setup
 # ---------------------------------------------------------------------------
 
 _CSRF_COOKIE = "csrf_token"
+_CSRF_COOKIE_HOST = "__Host-csrf_token"  # When DASHBOARD_SECURE_COOKIES=1
 _CSRF_HEADER = "X-CSRF-Token"
 
 
 def _extract_csrf(client: TestClient) -> str:
-    """Holt CSRF-Token via GET /health (setzt Cookie)."""
+    """Holt CSRF-Token via GET /api/meta/me (setzt Cookie)."""
     r = client.get("/api/meta/me", headers={"X-User-Id": "demo"})
-    cookie = client.cookies.get(_CSRF_COOKIE)
+    # Check both cookie names
+    cookie = client.cookies.get(_CSRF_COOKIE) or client.cookies.get(_CSRF_COOKIE_HOST)
     if cookie:
         return cookie
     # Fallback: Token aus Set-Cookie Header parsen
     for h in r.headers.get_list("set-cookie"):
-        if _CSRF_COOKIE in h:
+        if "csrf_token" in h:
             return h.split("=")[1].split(";")[0]
-    # Wenn kein Cookie gesetzt: synthetischen Token erzeugen
-    # (CSRF-Middleware setzt nur bei fehlendem Cookie)
     return "test-csrf-token"
 
 
@@ -111,15 +111,24 @@ class AuthHeaders:
         return self("admin", station)
 
     def clinician(self, station: str = _DEFAULT_TEST_STATION) -> dict[str, str]:
-        return self("pflege1", station)
+        return self("arzt.a1", station)
 
     def viewer(self, station: str = _DEFAULT_TEST_STATION) -> dict[str, str]:
-        # NICHT "demo" — der hat in main.py zusaetzlich admin-Rolle!
-        # "viewer_test" wird in Demo-Mode auto-provisioned als reiner Viewer.
-        return self("viewer_test", station)
+        return self("demo", station)
 
     def manager(self, station: str = _DEFAULT_TEST_STATION) -> dict[str, str]:
-        return self("manager1", station)
+        return self("direktion", station)
+
+    def shift_lead(self, station: str = _DEFAULT_TEST_STATION) -> dict[str, str]:
+        return self("sl.zape", station)
+
+    def clinician_g0(self) -> dict[str, str]:
+        """Arzt auf Station G0 (andere Klinik: APP)."""
+        return self("arzt.g0", "Station G0")
+
+    def manager_epp(self) -> dict[str, str]:
+        """Manager EPP (sieht alle EPP-Stationen)."""
+        return self("mgr.epp", "Station A1")
 
     def unknown(self, station: str = _DEFAULT_TEST_STATION) -> dict[str, str]:
         """Unbekannter User (auto-provisioned als viewer in demo mode)."""
@@ -149,6 +158,11 @@ def clinician_h(auth: AuthHeaders) -> dict[str, str]:
 @pytest.fixture(scope="session")
 def viewer_h(auth: AuthHeaders) -> dict[str, str]:
     return auth.viewer()
+
+
+@pytest.fixture(scope="session")
+def shift_lead_h(auth: AuthHeaders) -> dict[str, str]:
+    return auth.shift_lead()
 
 
 # ---------------------------------------------------------------------------

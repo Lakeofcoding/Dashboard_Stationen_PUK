@@ -767,13 +767,21 @@ def csv_upload(
     """CSV-Upload: Importiert Fälle aus CSV/Excel in die Datenbank."""
     import csv as csv_mod
 
+    MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10 MB
+
     errors = []
     imported = 0
     skipped = 0
     total = 0
 
     try:
-        raw = file.file.read()
+        raw = file.file.read(MAX_UPLOAD_SIZE + 1)
+        if len(raw) > MAX_UPLOAD_SIZE:
+            raise HTTPException(status_code=413, detail="Datei zu gross (max. 10 MB)")
+        # Dateiname-Validierung
+        fname = (file.filename or "").strip()
+        if fname and not fname.lower().endswith((".csv", ".txt")):
+            raise HTTPException(status_code=400, detail="Nur CSV-Dateien erlaubt (.csv, .txt)")
         # Try UTF-8 first, then latin-1
         try:
             text = raw.decode("utf-8-sig")

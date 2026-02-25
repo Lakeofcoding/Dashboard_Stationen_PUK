@@ -93,7 +93,7 @@ from routers.health import router as health_router
 from routers.cases import router as cases_router
 from routers.meta import router as meta_router
 from routers.admin import router as admin_router
-from routers.debug import router as debug_router
+from routers.debug import router as debug_router  # noqa: conditional below
 from routers.overview import router as overview_router
 from routers.notifications import router as notifications_router
 from routers.export import router as export_router
@@ -102,7 +102,9 @@ app.include_router(health_router, tags=["health"])
 app.include_router(cases_router, tags=["cases"])
 app.include_router(meta_router, tags=["meta"])
 app.include_router(admin_router, tags=["admin"])
-app.include_router(debug_router, tags=["debug"])
+# Debug-Endpoints NUR im Demo-Modus – in Produktion nicht exponiert
+if DEMO_MODE:
+    app.include_router(debug_router, tags=["debug"])
 app.include_router(overview_router, tags=["overview"])
 app.include_router(notifications_router, tags=["notifications"])
 app.include_router(export_router, tags=["export"])

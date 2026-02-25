@@ -286,6 +286,10 @@ class RuleDefinition(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     is_system: Mapped[bool] = mapped_column(Boolean, default=True)
 
+    # ACK-Steuerung (v5.12)
+    ack_roles_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON: ["clinician", "manager"]
+    restrict_to_responsible: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True, default=False)
+
     updated_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     updated_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 

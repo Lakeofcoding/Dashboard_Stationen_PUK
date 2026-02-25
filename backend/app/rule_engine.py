@@ -92,6 +92,9 @@ def seed_rule_definitions(db) -> None:
             operator=str(r.get("operator") or ""),
             value_json=json.dumps(r.get("value"), ensure_ascii=False),
             enabled=True, is_system=True, updated_at=None, updated_by=None,
+            # ACK-Steuerung (v5.12)
+            ack_roles_json=json.dumps(r["ack_roles"]) if r.get("ack_roles") else None,
+            restrict_to_responsible=bool(r.get("restrict_to_responsible", False)),
         ))
     db.commit()
 

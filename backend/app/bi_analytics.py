@@ -22,7 +22,6 @@ Abhängigkeiten:
 """
 from __future__ import annotations
 from datetime import datetime
-from app.case_logic import enrich_case
 from app.rule_engine import evaluate_alerts
 from app.db import SessionLocal
 from app.models import Ack
@@ -105,16 +104,18 @@ def _q_doc_austritt(c: dict) -> bool:
 # ── Quota-Registry ────────────────────────────────────────────────────
 # ERWEITERUNG: Neue Zeile hier einfügen.
 # Format: (key, label, check_fn, applies_to_open, applies_to_closed)
-COMPLETENESS_QUOTAS: list[tuple[str, str, callable, bool, bool]] = [
-    ("honos",           "HoNOS",              _q_honos,          True,  True),
-    ("bscl",            "BSCL",               _q_bscl,           True,  True),
-    ("bfs",             "BFS Verlauf",         _q_bfs,            True,  False),
-    ("treatment_plan",  "Behandlungsplan",     _q_treatment_plan, True,  False),
-    ("spiges_stamm",    "SpiGes Stammdaten",   _q_spiges_stamm,   True,  True),
-    ("spiges_austritt", "SpiGes Austritt",     _q_spiges_austritt,False, True),
-    ("psychopharmaka",  "Psychopharmaka",      _q_psychopharmaka, True,  True),
-    ("fu",              "FU-Anordnung",        _q_fu,             True,  False),
-    ("doc_austritt",    "Dok Austritt",        _q_doc_austritt,   False, True),
+COMPLETENESS_QUOTAS: list[tuple[str, str, callable, str]] = [
+    # (key, label, check_fn, category)
+    # category: "ongoing" = laufend relevant, "exit" = erst bei Austritt fällig
+    ("honos",           "HoNOS",              _q_honos,          "ongoing"),
+    ("bscl",            "BSCL",               _q_bscl,           "ongoing"),
+    ("bfs",             "BFS Verlauf",         _q_bfs,            "ongoing"),
+    ("treatment_plan",  "Behandlungsplan",     _q_treatment_plan, "ongoing"),
+    ("spiges_stamm",    "SpiGes Stammdaten",   _q_spiges_stamm,   "ongoing"),
+    ("psychopharmaka",  "Psychopharmaka",      _q_psychopharmaka, "ongoing"),
+    ("fu",              "FU-Anordnung",        _q_fu,             "ongoing"),
+    ("spiges_austritt", "SpiGes Austritt",     _q_spiges_austritt,"exit"),
+    ("doc_austritt",    "Dok Austritt",        _q_doc_austritt,   "exit"),
 ]
 
 
@@ -139,15 +140,28 @@ def compute_station_analytics(station_id: str, cases: list[dict], clinic: str) -
 
     # ── 1. Vollständigkeits-Verteilung (pro Fall: hat Alerts?) ────────
     comp_dist = {"complete": 0, "incomplete": 0}
+    # Severity-Verteilung: critical / warn / ok
+    severity_dist = {"critical": 0, "warn": 0, "ok": 0}
     rule_hits: dict[str, dict] = {}
+    langlieger_count = 0  # Offene Fälle ≥ 50 Tage
 
     for c in cases:
-        enriched = enrich_case(c)
-        alerts = evaluate_alerts(enriched)
+        # Cases sind bereits enriched (von get_station_cases)
+        alerts = evaluate_alerts(c)
         if alerts:
             comp_dist["incomplete"] += 1
         else:
             comp_dist["complete"] += 1
+
+        # Severity pro Fall
+        has_crit = any(a.severity == "CRITICAL" for a in alerts)
+        has_warn = any(a.severity == "WARN" for a in alerts)
+        if has_crit:
+            severity_dist["critical"] += 1
+        elif has_warn:
+            severity_dist["warn"] += 1
+        else:
+            severity_dist["ok"] += 1
 
         for a in alerts:
             if a.rule_id not in rule_hits:
@@ -157,6 +171,12 @@ def compute_station_analytics(station_id: str, cases: list[dict], clinic: str) -
                 }
             rule_hits[a.rule_id]["count"] += 1
 
+    # Langlieger: offene Fälle ≥ 50 Tage
+    for c in open_cases:
+        days = (c.get("_derived") or {}).get("days_since_admission", 0)
+        if days >= 50:
+            langlieger_count += 1
+
     # ── 2. Austrittsberichte ──────────────────────────────────────────
     doc_within_time = 0   # offen, < 10 Tage
     doc_overdue = 0       # offen, ≥ 10 Tage
@@ -164,15 +184,15 @@ def compute_station_analytics(station_id: str, cases: list[dict], clinic: str) -
     overdue_by_person: dict[str, int] = {}
 
     for c in closed_cases:
-        enriched = enrich_case(c)
-        derived = enriched.get("_derived", {})
-        cs = enriched.get("case_status", "")
+        # Cases sind bereits enriched (von get_station_cases)
+        derived = c.get("_derived", {})
+        cs = c.get("case_status", "")
 
-        if cs == "Dokumentation abgeschlossen" or enriched.get("doc_completion_date"):
+        if cs == "Dokumentation abgeschlossen" or c.get("doc_completion_date"):
             doc_done += 1
         elif derived.get("doc_completion_overdue"):
             doc_overdue += 1
-            person = enriched.get("responsible_person") or "Unbekannt"
+            person = c.get("responsible_person") or "Unbekannt"
             overdue_by_person[person] = overdue_by_person.get(person, 0) + 1
         elif derived.get("doc_completion_warn") or cs == "Dokumentation offen":
             doc_within_time += 1
@@ -181,15 +201,14 @@ def compute_station_analytics(station_id: str, cases: list[dict], clinic: str) -
 
     # ── 3. Completeness Quotas — auf Einzelfall-Ebene ─────────────────
     quotas = []
-    for key, label, check_fn, for_open, for_closed in COMPLETENESS_QUOTAS:
-        open_total = len(open_cases) if for_open else 0
-        open_filled = sum(1 for c in open_cases if check_fn(c)) if for_open else 0
-        closed_total = len(closed_cases) if for_closed else 0
-        closed_filled = sum(1 for c in closed_cases if check_fn(c)) if for_closed else 0
+    for key, label, check_fn, category in COMPLETENESS_QUOTAS:
+        open_total = len(open_cases)
+        open_filled = sum(1 for c in open_cases if check_fn(c))
+        closed_total = len(closed_cases)
+        closed_filled = sum(1 for c in closed_cases if check_fn(c))
 
         quotas.append({
-            "key": key, "label": label,
-            "applies_open": for_open, "applies_closed": for_closed,
+            "key": key, "label": label, "category": category,
             "open_filled": open_filled, "open_total": open_total,
             "open_pct": round(open_filled / open_total * 100, 1) if open_total > 0 else None,
             "closed_filled": closed_filled, "closed_total": closed_total,
@@ -220,6 +239,8 @@ def compute_station_analytics(station_id: str, cases: list[dict], clinic: str) -
         "open_cases": len(open_cases),
         "closed_cases": len(closed_cases),
         "completeness_dist": comp_dist,
+        "severity_dist": severity_dist,
+        "langlieger_count": langlieger_count,
         "doc_reports": {
             "done": doc_done,
             "within_time": doc_within_time,

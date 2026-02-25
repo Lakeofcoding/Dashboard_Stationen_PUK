@@ -54,13 +54,12 @@ def meta_me(
 ):
     """Rollen, Permissions und Scope des aktuellen Users.
 
-    Scope-Berechnung basiert ausschliesslich auf:
-    - excel_loader (Station→Klinik, Station→Zentrum Mapping)
-    - DB (alle bekannten station_ids als Fallback)
+    Scope-Berechnung basiert auf RBAC-Hierarchie via get_user_visible_stations.
     """
     from app.config import ROLE_SCOPE
+    from app.rbac import get_user_visible_stations
 
-    # Daten aus Excel laden (einzige Quelle für Hierarchie)
+    # Daten aus Excel laden
     try:
         from app.excel_loader import get_station_klinik_map, get_station_center_map
         station_clinic = get_station_klinik_map() or {}
@@ -69,12 +68,21 @@ def meta_me(
         station_clinic = {}
         station_center = {}
 
-    # Wenn Excel leer: Station-IDs zumindest aus DB kennen
     if not station_clinic:
         with SessionLocal() as db:
             db_stations = db.query(Case.station_id).distinct().all()
             for s in db_stations:
                 station_clinic.setdefault(s[0], "UNKNOWN")
+
+    # Sichtbare Stationen via RBAC-Hierarchie
+    with SessionLocal() as db:
+        visible = get_user_visible_stations(db, ctx.user_id)
+
+    if visible is None:
+        # Global scope
+        visible_stations = sorted(station_clinic.keys())
+    else:
+        visible_stations = sorted(visible)
 
     # Höchster Scope-Level über alle Rollen
     scope_priority = {"global": 0, "klinik": 1, "zentrum": 2, "station": 3}
@@ -84,25 +92,24 @@ def meta_me(
         if scope_priority.get(rs, 3) < scope_priority.get(best_scope, 3):
             best_scope = rs
 
-    # Scope-Entity bestimmen
-    sid = ctx.station_id
-    scope_clinic = station_clinic.get(sid)
-    scope_center = station_center.get(sid)
+    # Scope-Entity aus UserRole bestimmen (nicht aus Request-Station)
+    scope_clinic_val = None
+    scope_center_val = None
+    scope_station_val = None
 
-    # Sichtbare Stationen
-    visible_stations: list[str] = []
-    if best_scope == "global":
-        visible_stations = sorted(station_clinic.keys())
-    elif best_scope == "klinik" and scope_clinic:
-        visible_stations = sorted(s for s, k in station_clinic.items() if k == scope_clinic)
-    elif best_scope == "zentrum" and scope_center:
-        visible_stations = sorted(s for s, z in station_center.items() if z == scope_center)
-    elif sid and sid != "*":
-        visible_stations = [sid]
+    with SessionLocal() as db:
+        from app.models import UserRole
+        from sqlalchemy import select
+        user_roles = db.execute(
+            select(UserRole).where(UserRole.user_id == ctx.user_id)
+        ).scalars().all()
 
-    # Letzter Fallback: alle bekannten Stationen (wenn Mapping unvollständig)
-    if not visible_stations and station_clinic:
-        visible_stations = sorted(station_clinic.keys())
+        for ur in user_roles:
+            if ur.station_id != "*":
+                scope_station_val = ur.station_id
+                scope_clinic_val = station_clinic.get(ur.station_id)
+                scope_center_val = station_center.get(ur.station_id)
+                break  # Erste nicht-wildcard Station bestimmt den Scope-Entity
 
     return {
         "user_id": ctx.user_id,
@@ -112,9 +119,9 @@ def meta_me(
         "break_glass": bool(ctx.is_break_glass),
         "scope": {
             "level": best_scope,
-            "clinic": scope_clinic,
-            "center": scope_center,
-            "station": sid if sid != "*" else None,
+            "clinic": scope_clinic_val,
+            "center": scope_center_val,
+            "station": scope_station_val,
             "visible_stations": visible_stations,
         },
     }

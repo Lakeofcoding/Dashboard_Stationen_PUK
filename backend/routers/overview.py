@@ -45,10 +45,18 @@ def overview(
     ctx: AuthContext = Depends(get_auth_context),
     _perm: None = Depends(require_permission("dashboard:view")),
 ):
-    """Liefert Übersicht über ALLE Stationen mit Ampel-Status.
+    """Liefert Übersicht über sichtbare Stationen mit Ampel-Status.
     Datenquelle: ausschliesslich DB. Leere DB → leere Liste.
     """
+    from app.rbac import get_user_visible_stations
+
     station_ids, station_clinic = _get_all_stations_from_db()
+
+    # RBAC-Filter
+    with SessionLocal() as db:
+        visible = get_user_visible_stations(db, ctx.user_id)
+    if visible is not None:
+        station_ids = [s for s in station_ids if s in visible]
 
     if not station_ids:
         return []
@@ -129,7 +137,15 @@ def analytics(
     Alle Metriken auf EINZELFALL-Ebene. Datenquelle: nur DB.
     Berechnung: app.bi_analytics.compute_station_analytics()
     """
+    from app.rbac import get_user_visible_stations
+
     station_ids, station_clinic = _get_all_stations_from_db()
+
+    # RBAC-Filter
+    with SessionLocal() as db:
+        visible = get_user_visible_stations(db, ctx.user_id)
+    if visible is not None:
+        station_ids = [s for s in station_ids if s in visible]
 
     if not station_ids:
         return {"stations": []}

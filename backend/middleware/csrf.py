@@ -50,8 +50,11 @@ class CSRFMiddleware:
         header_name: str = "X-CSRF-Token",
     ):
         self.app = app
-        self.cookie_name = cookie_name
+        # __Host- Prefix: verhindert Subdomain-Attacks (nur mit Secure+Path=/)
+        self.cookie_name = f"__Host-{cookie_name}" if _SECURE_COOKIES else cookie_name
         self.header_name = header_name
+        # Für Header-Lookup: Frontend sendet Token unter dem ursprünglichen Cookie-Namen
+        self._header_name_lower = header_name.lower()
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":

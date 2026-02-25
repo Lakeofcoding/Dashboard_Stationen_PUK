@@ -1,7 +1,8 @@
 """Case-Endpoints: Listing, Detail, ACK, Shift, DayState, Reset."""
 from __future__ import annotations
-from typing import Any, Literal
-from fastapi import APIRouter, Depends, HTTPException, Request
+import re
+from typing import Any, Literal, Optional
+from fastapi import APIRouter, Depends, HTTPException, Request, Query, Path
 from app.auth import AuthContext, get_auth_context, require_ctx
 from app.rbac import require_permission
 from app.schemas import Alert, CaseSummary, CaseDetail, AckRequest
@@ -14,13 +15,96 @@ from app.case_logic import (
 from app.excel_loader import get_lab_history, get_ekg_history, get_efm_events
 from app.ack_store import AckStore
 from app.db import SessionLocal
-from app.models import DayState, ShiftReason
+from app.models import Case, DayState, ShiftReason
 from app.audit import log_security_event
+
+_CASE_ID_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
+
+
+def _validate_case_id(case_id: str) -> str:
+    """Validiert case_id: max 64 Zeichen, nur alphanumerisch + _.-"""
+    if not _CASE_ID_RE.match(case_id):
+        raise HTTPException(status_code=400, detail="Ungültige case_id (max 64 Zeichen, nur A-Z, 0-9, _, ., -)")
+    return case_id
+
 
 ack_store = AckStore()
 
 
 router = APIRouter()
+
+
+@router.get("/api/cases/browse", response_model=list[CaseSummary])
+def browse_cases(
+    clinic: Optional[str] = Query(default=None, description="Filter by clinic (e.g. EPP)"),
+    center: Optional[str] = Query(default=None, description="Filter by center (e.g. ZAPE)"),
+    station: Optional[str] = Query(default=None, description="Filter by station (e.g. Station G0)"),
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("dashboard:view")),
+):
+    """Alle Fälle über mehrere Stationen, gefiltert nach User-Scope.
+
+    Server filtert automatisch auf sichtbare Stationen des Users.
+    Ohne Filter: alle sichtbaren Fälle.
+    """
+    from app.rbac import get_user_visible_stations
+
+    with SessionLocal() as db:
+        # Sichtbare Stationen für diesen User
+        visible = get_user_visible_stations(db, ctx.user_id)
+        q = db.query(Case.station_id).distinct()
+        station_ids = sorted({s[0] for s in q.all()})
+
+    # RBAC-Filter: nur sichtbare Stationen
+    if visible is not None:
+        station_ids = [s for s in station_ids if s in visible]
+
+    all_cases: list[CaseSummary] = []
+    for sid in station_ids:
+        cases = get_station_cases(sid)
+        for c in cases:
+            # Filter anwenden
+            if clinic and c.get("clinic") != clinic:
+                continue
+            if center and c.get("center") != center:
+                continue
+            if station and c.get("station_id") != station:
+                continue
+
+            alerts = evaluate_alerts(c)
+            sev, top_alert, cc, wc = summarize_severity(alerts)
+            comp_alerts = [a for a in alerts if a.category == "completeness"]
+            med_alerts = [a for a in alerts if a.category == "medical"]
+            comp_sev, _, comp_cc, comp_wc = summarize_severity(comp_alerts)
+            med_sev, _, med_cc, med_wc = summarize_severity(med_alerts)
+
+            all_cases.append(CaseSummary(
+                case_id=c["case_id"],
+                patient_id=c["patient_id"],
+                clinic=c.get("clinic", "UNKNOWN"),
+                center=c.get("center", "UNKNOWN"),
+                station_id=c["station_id"],
+                admission_date=c["admission_date"],
+                discharge_date=c.get("discharge_date"),
+                severity=sev,
+                top_alert=top_alert,
+                critical_count=cc,
+                warn_count=wc,
+                completeness_severity=comp_sev,
+                completeness_critical=comp_cc,
+                completeness_warn=comp_wc,
+                medical_severity=med_sev,
+                medical_critical=med_cc,
+                medical_warn=med_wc,
+                case_status=c.get("case_status"),
+                responsible_person=c.get("responsible_person"),
+                acked_at=None,
+                parameter_status=build_parameter_status(c),
+                days_since_admission=(c.get("_derived") or {}).get("days_since_admission", 0),
+                langlieger=build_langlieger_status(c),
+            ))
+
+    return all_cases
 
 
 
@@ -137,6 +221,7 @@ def get_case(
     _perm: None = Depends(require_permission("dashboard:view")),
 ):
 
+    _validate_case_id(case_id)
     raw = get_single_case(case_id)
     if raw is None:
         raise HTTPException(status_code=404, detail="Case not found")
@@ -272,6 +357,7 @@ def ack(
     if req.ack_scope not in ("case", "rule"):
         raise HTTPException(status_code=400, detail="ack_scope must be 'case' or 'rule'")
 
+    _validate_case_id(req.case_id)
     raw = get_single_case(req.case_id)
     if raw is None:
         raise HTTPException(status_code=404, detail="Case not found")
@@ -279,6 +365,46 @@ def ack(
     c = enrich_case(raw)
     if c["station_id"] != ctx.station_id:
         raise HTTPException(status_code=404, detail="Case not found")
+
+    # ── ACK-Rollenprüfung: Case-Scope nur für Shift-Leads+ ──────────
+    if req.ack_scope == "case":
+        allowed_case_ack = {"system_admin", "admin", "manager", "shift_lead"}
+        if not ctx.roles.intersection(allowed_case_ack):
+            raise HTTPException(
+                status_code=403,
+                detail="Fall-Quittierung ist nur für Schichtleitung und höher erlaubt. Bitte einzelne Meldungen quittieren.",
+            )
+
+    # ── ACK-Rollenprüfung: Regel-spezifische Rollenbeschränkung ─────
+    if req.ack_scope == "rule" and req.scope_id != "*":
+        from app.rule_engine import load_rule_definitions
+        rule_defs = load_rule_definitions()
+        rule_def = next((r for r in rule_defs if r.rule_id == req.scope_id), None)
+        if rule_def:
+            # ack_roles_json: JSON-Array z.B. ["clinician", "system_admin"]
+            ack_roles_raw = getattr(rule_def, "ack_roles_json", None)
+            if ack_roles_raw:
+                import json as _json
+                try:
+                    ack_roles = set(_json.loads(ack_roles_raw))
+                except Exception:
+                    ack_roles = set()
+                if ack_roles and not ctx.roles.intersection(ack_roles):
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"Keine Berechtigung, Meldung '{rule_def.message}' zu quittieren. Erlaubt: {', '.join(sorted(ack_roles))}",
+                    )
+            # restrict_to_responsible: nur fallführende Person oder Leitung
+            restrict = getattr(rule_def, "restrict_to_responsible", False)
+            if restrict:
+                responsible = c.get("responsible_person") or ""
+                is_responsible = responsible and responsible == ctx.user_id
+                is_lead = bool(ctx.roles.intersection({"system_admin", "admin", "manager", "shift_lead"}))
+                if not is_responsible and not is_lead:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"Nur fallführende Person ({responsible}) oder Leitung darf diese Meldung quittieren.",
+                    )
 
     # --- Eingabevalidierung für SHIFT
     if (req.action or "ACK") == "SHIFT":
@@ -476,6 +602,7 @@ def case_lab_history(
     _perm: None = Depends(require_permission("dashboard:view")),
 ):
     """Clozapin-Laborverlauf: Neutrophile, Spiegel, Troponin, Leber, Metabolik."""
+    _validate_case_id(case_id)
     raw = get_single_case(case_id)
     if raw is None:
         raise HTTPException(status_code=404, detail="Case not found")
@@ -492,6 +619,7 @@ def case_ekg_history(
     _perm: None = Depends(require_permission("dashboard:view")),
 ):
     """EKG-Verlauf: QTc, Herzfrequenz, Rhythmus, Befunde."""
+    _validate_case_id(case_id)
     raw = get_single_case(case_id)
     if raw is None:
         raise HTTPException(status_code=404, detail="Case not found")
@@ -508,6 +636,7 @@ def case_efm_events(
     _perm: None = Depends(require_permission("dashboard:view")),
 ):
     """Freiheitsbeschraenkende Massnahmen fuer einen Fall."""
+    _validate_case_id(case_id)
     raw = get_single_case(case_id)
     if raw is None:
         raise HTTPException(status_code=404, detail="Case not found")

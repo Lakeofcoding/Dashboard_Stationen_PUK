@@ -107,9 +107,9 @@ function authHeaders(auth: AuthState): HeadersInit {
     "X-User-Id": auth.userId,
   };
   // CSRF-Token aus Cookie lesen und als Header mitsenden
-  const csrf = document.cookie.split("; ").find(c => c.startsWith("csrf_token="));
+  const csrf = document.cookie.split("; ").find(c => c.startsWith("csrf_token=") || c.startsWith("__Host-csrf_token="));
   if (csrf) {
-    h["X-CSRF-Token"] = csrf.split("=")[1];
+    h["X-CSRF-Token"] = csrf.split("=").slice(1).join("=");
   }
   return h;
 }
@@ -195,17 +195,13 @@ type StationOverviewItem = {
 };
 
 async function fetchOverview(auth: AuthState): Promise<StationOverviewItem[]> {
-  return apiJson<StationOverviewItem[]>("/api/overview", {
-    method: "GET",
-    headers: authHeaders(auth),
-  });
+  const h: Record<string, string> = { "Content-Type": "application/json", "X-User-Id": auth.userId, "X-Station-Id": "global" };
+  return apiJson<StationOverviewItem[]>("/api/overview", { method: "GET", headers: h });
 }
 
 async function fetchAnalytics(auth: AuthState): Promise<StationAnalytics[]> {
-  const data = await apiJson<{ stations: StationAnalytics[] }>("/api/analytics", {
-    method: "GET",
-    headers: authHeaders(auth),
-  });
+  const h: Record<string, string> = { "Content-Type": "application/json", "X-User-Id": auth.userId, "X-Station-Id": "global" };
+  const data = await apiJson<{ stations: StationAnalytics[] }>("/api/analytics", { method: "GET", headers: h });
   return data.stations;
 }
 
@@ -214,6 +210,23 @@ async function fetchCases(auth: AuthState, _view: ViewMode): Promise<CaseSummary
   return apiJson<CaseSummary[]>(`/api/cases?${qs}`, {
     method: "GET",
     headers: authHeaders(auth),
+  });
+}
+
+async function fetchBrowseCases(auth: AuthState, filters?: { clinic?: string; center?: string; station?: string }): Promise<CaseSummary[]> {
+  const qs = new URLSearchParams();
+  if (filters?.clinic) qs.set("clinic", filters.clinic);
+  if (filters?.center) qs.set("center", filters.center);
+  if (filters?.station) qs.set("station", filters.station);
+  // Browse: globaler Kontext, Server filtert nach User-Scope
+  const browseHeaders: Record<string, string> = {
+    "Content-Type": "application/json",
+    "X-User-Id": auth.userId,
+    "X-Station-Id": "global",
+  };
+  return apiJson<CaseSummary[]>(`/api/cases/browse?${qs.toString()}`, {
+    method: "GET",
+    headers: browseHeaders,
   });
 }
 
@@ -328,6 +341,19 @@ export default function App() {
   const canAdmin =
     permissions.has("admin:read") || permissions.has("admin:write") || permissions.has("audit:read");
 
+  // Rollen-basierte UI-Steuerung
+  const userRoles = useMemo(() => new Set(me?.roles ?? []), [me]);
+  const canViewOverview = userRoles.has("system_admin") || userRoles.has("admin") || userRoles.has("manager");
+  const canViewMedical = userRoles.has("clinician") || userRoles.has("system_admin") || userRoles.has("admin");
+  const [permissionInfo, setPermissionInfo] = useState<string | null>(null);
+
+  // Auto-dismiss permission info after 3s
+  useEffect(() => {
+    if (!permissionInfo) return;
+    const t = setTimeout(() => setPermissionInfo(null), 3000);
+    return () => clearTimeout(t);
+  }, [permissionInfo]);
+
   // Session timeout: 30 min inactivity
   const SESSION_TIMEOUT_MS = 30 * 60 * 1000;
   const SESSION_WARNING_MS = 28 * 60 * 1000; // warn 2 min before
@@ -359,6 +385,10 @@ export default function App() {
   const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>("all");
   const [dayState, setDayState] = useState<DayState | null>(null);
   const [cases, setCases] = useState<CaseSummary[]>([]);
+  // Browse-Filter für Fallliste (Standard: alle Fälle)
+  const [browseClinic, setBrowseClinic] = useState<string>("");
+  const [browseCenter, setBrowseCenter] = useState<string>("");
+  const [browseStation, setBrowseStation] = useState<string>("");
   const [overview, setOverview] = useState<StationOverviewItem[]>([]);
   const [analytics, setAnalytics] = useState<StationAnalytics[]>([]);
   const [drillClinic, setDrillClinic] = useState<string | null>(null);
@@ -394,18 +424,71 @@ export default function App() {
   useEffect(() => {
     (async () => {
       try {
-        const data = await apiJson<MetaMe>("/api/meta/me", { method: "GET", headers: authHeaders(auth) });
+        // Meta/me: globaler Kontext (nicht von aktueller Station abhängig)
+        const meHeaders: Record<string, string> = {
+          "Content-Type": "application/json",
+          "X-User-Id": auth.userId,
+          "X-Station-Id": "global",
+        };
+        const data = await apiJson<MetaMe>("/api/meta/me", { method: "GET", headers: meHeaders });
         setMe(data);
       } catch {
         setMe(null);
       }
     })();
-  }, [auth.stationId, auth.userId]);
+  }, [auth.userId]);
+
+  // Redirect: wenn User keinen Zugriff auf aktuellen View/Filter hat
+  useEffect(() => {
+    if (!me) return;
+
+    // 1. Übersicht nicht erlaubt → Fallliste
+    if (viewMode === "overview" && !canViewOverview) {
+      setViewMode("cases");
+    }
+
+    // 2. Klinische Ansicht nicht erlaubt → zurück auf "Alle"
+    if (categoryFilter === "medical" && !canViewMedical) {
+      setCategoryFilter("all");
+    }
+
+    // 3. Aktueller Browse-Filter ausserhalb des Scopes → auf höchsten Scope setzen
+    const vis = me.scope?.visible_stations ?? [];
+    const level = me.scope?.level;
+
+    // Prüfe ob aktuelle Station im Scope liegt
+    const stationOutOfScope = browseStation && vis.length > 0 && !vis.includes(browseStation);
+    // Oder: Filter leer + eingeschränkter Scope → Scope vorselektieren
+    const emptyFilterRestrictedScope = !browseStation && !browseClinic && !browseCenter
+      && viewMode === "cases" && level && level !== "global";
+
+    if (stationOutOfScope || emptyFilterRestrictedScope) {
+      if (level === "klinik" && me.scope?.clinic) {
+        setBrowseClinic(me.scope.clinic);
+        setBrowseCenter("");
+        setBrowseStation("");
+      } else if (level === "zentrum" && me.scope?.center) {
+        setBrowseClinic("");
+        setBrowseCenter(me.scope.center);
+        setBrowseStation("");
+      } else if (level === "station" && vis.length === 1) {
+        setBrowseClinic("");
+        setBrowseCenter("");
+        setBrowseStation(vis[0]);
+      } else {
+        setBrowseClinic("");
+        setBrowseCenter("");
+        setBrowseStation("");
+      }
+      setSelectedCaseId(null);
+      setDetail(null);
+    }
+  }, [me, viewMode, canViewOverview, categoryFilter, canViewMedical, browseStation, browseClinic, browseCenter]);
 
   // Load shift reasons
   useEffect(() => {
-    fetchShiftReasons(auth).then(setShiftReasons);
-  }, [auth.stationId, auth.userId]);
+    fetchShiftReasons(auth).then(setShiftReasons).catch(() => {});
+  }, [auth.userId]);
 
   // Load cases + day state (skip when in overview mode)
   useEffect(() => {
@@ -413,20 +496,33 @@ export default function App() {
     let alive = true;
     const load = async () => {
       try {
-        const [data, ds] = await Promise.all([fetchCases(auth, "cases"), fetchDayState(auth)]);
+        const filters: { clinic?: string; center?: string; station?: string } = {};
+        if (browseClinic) filters.clinic = browseClinic;
+        if (browseCenter) filters.center = browseCenter;
+        if (browseStation) filters.station = browseStation;
+        const data = await fetchBrowseCases(auth, filters);
+        // DayState optional (kann 403 werfen bei eingeschränktem Scope)
+        const ds = await fetchDayState(auth).catch(() => null);
         if (!alive) return;
         setCases(data);
-        setDayState(ds);
+        if (ds) setDayState(ds);
         setError(null);
       } catch (e: any) {
         if (!alive) return;
-        setError(e?.message ?? String(e));
+        // 403 Fehler → keine Berechtigung, aber kein Crash
+        const msg = e?.message ?? String(e);
+        if (msg.includes("403") || msg.includes("Kein Zugriff")) {
+          setCases([]);
+          setPermissionInfo("Keine Berechtigung für diese Ansicht. Bitte wählen Sie einen anderen Filter.");
+        } else {
+          setError(msg);
+        }
       }
     };
     load();
-    const id = window.setInterval(load, 10_000);
+    const id = window.setInterval(load, 15_000);
     return () => { alive = false; window.clearInterval(id); };
-  }, [auth, viewMode]);
+  }, [auth, viewMode, browseClinic, browseCenter, browseStation]);
 
   // Load overview data + analytics
   useEffect(() => {
@@ -475,16 +571,16 @@ export default function App() {
   // Meta stations/users
   useEffect(() => {
     let alive = true;
+    const globalH: Record<string, string> = { "Content-Type": "application/json", "X-User-Id": auth.userId, "X-Station-Id": "global" };
     (async () => {
       try {
-        const st = await apiJson<{ stations: string[] }>("/api/meta/stations", { method: "GET", headers: authHeaders(auth) });
+        const st = await apiJson<{ stations: string[] }>("/api/meta/stations", { method: "GET", headers: globalH });
         if (alive && Array.isArray(st?.stations) && st.stations.length) {
           setStations(st.stations);
-          if (!st.stations.includes(auth.stationId)) updateAuth({ stationId: st.stations[0] });
         }
       } catch { /* keep defaults */ }
       try {
-        const us = await apiJson<{ users: MetaUser[] }>("/api/meta/users", { method: "GET", headers: authHeaders(auth) });
+        const us = await apiJson<{ users: MetaUser[] }>("/api/meta/users", { method: "GET", headers: globalH });
         if (alive && Array.isArray(us?.users) && us.users.length) {
           setMetaUsers(us.users);
           const u = us.users.find((x: MetaUser) => x.user_id === auth.userId) ?? us.users[0];
@@ -609,7 +705,12 @@ export default function App() {
   function goBack() {
     if (isAdminOpen) { setIsAdminOpen(false); return; }
     if (selectedCaseId) { setSelectedCaseId(null); setDetail(null); setDetailError(null); setShiftByAlert({}); return; }
-    if (viewMode !== "overview") { setViewMode("overview"); return; }
+    if (viewMode !== "overview") {
+      setViewMode("overview");
+      // Browse-Filter zurücksetzen
+      setBrowseClinic(""); setBrowseCenter(""); setBrowseStation("");
+      return;
+    }
     if (drillCenter && (scopeLevel === "global" || scopeLevel === "klinik")) { setDrillCenter(null); return; }
     if (drillClinic && scopeLevel === "global") { setDrillClinic(null); return; }
   }
@@ -679,7 +780,14 @@ export default function App() {
             {/* Scope selectors (Dev-Mode) */}
             <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
               <span style={{ fontSize: 10, color: "#9ca3af" }}>User</span>
-              <select value={auth.userId} onChange={(e) => updateAuth({ userId: e.target.value })} style={{ padding: "3px 6px", borderRadius: 5, border: "1px solid #e5e7eb", fontSize: 11, cursor: "pointer" }}>
+              <select value={auth.userId} onChange={(e) => {
+                updateAuth({ userId: e.target.value });
+                // Scope und View zurücksetzen bei User-Wechsel
+                setBrowseClinic(""); setBrowseCenter(""); setBrowseStation("");
+                setSelectedCaseId(null); setDetail(null);
+                setDrillClinic(null); setDrillCenter(null);
+                // me-Redirect-Effect setzt den korrekten Scope nach Laden
+              }} style={{ padding: "3px 6px", borderRadius: 5, border: "1px solid #e5e7eb", fontSize: 11, cursor: "pointer" }}>
                 {metaUsers.map((u) => <option key={u.user_id} value={u.user_id}>{u.user_id}</option>)}
               </select>
             </label>
@@ -687,8 +795,13 @@ export default function App() {
             {me && me.roles.length > 0 && (
               <span style={{ padding: "2px 7px", borderRadius: 999, fontSize: 10, fontWeight: 600, background: "#eff6ff", color: "#1d4ed8", border: "1px solid #bfdbfe" }}>
                 {me.roles.includes("system_admin") ? "System Admin" : me.roles.includes("admin") ? "Admin"
-                  : me.roles.includes("shift_lead") ? "Schichtleitung" : me.roles.includes("clinician") ? "Klinisch"
-                  : me.roles.includes("manager") ? "Management" : me.roles[0]}
+                  : me.roles.includes("manager") ? "Management" : me.roles.includes("shift_lead") ? "Schichtleitung"
+                  : me.roles.includes("clinician") ? "Klinisch" : me.roles[0]}
+                {me.scope && me.scope.level !== "global" && (
+                  <span style={{ color: "#60a5fa", marginLeft: 4 }}>
+                    · {me.scope.level === "klinik" ? me.scope.clinic : me.scope.level === "zentrum" ? me.scope.center : me.scope.station}
+                  </span>
+                )}
               </span>
             )}
             {me?.break_glass && (
@@ -702,7 +815,7 @@ export default function App() {
                 try {
                   const ds = await resetToday(auth);
                   setDayState(ds);
-                  const data = await fetchCases(auth, viewMode);
+                  const data = await fetchBrowseCases(auth, {clinic: browseClinic || undefined, center: browseCenter || undefined, station: browseStation || undefined});
                   setCases(data);
                   setSelectedCaseId(null); setDetail(null); setDetailError(null); setShiftByAlert({});
                 } catch (e: any) { setError(e?.message ?? String(e)); }
@@ -745,23 +858,37 @@ export default function App() {
             { key: "monitoring", label: "Monitoring", icon: "📈" },
           ] as { key: ViewMode; label: string; icon: string }[]).map((tab) => {
             const isActive = viewMode === tab.key;
+            const isRestricted = tab.key === "overview" && !canViewOverview;
             return (
               <button
                 key={tab.key}
                 onClick={() => {
+                  if (isRestricted) {
+                    setPermissionInfo("Übersicht ist nur für Klinikleitung und Administration verfügbar.");
+                    return;
+                  }
                   setViewMode(tab.key);
-                  // Scope persistence: when leaving overview, preserve drill state
-                  // When going TO overview, reset drill
-                  if (tab.key === "overview") { setSelectedCaseId(null); setDetail(null); setDrillClinic(null); setDrillCenter(null); }
-                  if (tab.key !== "overview") { setSelectedCaseId(null); setDetail(null); }
+                  if (tab.key === "overview") {
+                    setSelectedCaseId(null); setDetail(null);
+                    setDrillClinic(null); setDrillCenter(null);
+                  }
+                  if (tab.key !== "overview") {
+                    setSelectedCaseId(null); setDetail(null);
+                  }
+                  // Direkter Tab-Klick auf Fallliste/Tagesbericht/Monitoring:
+                  // Browse-Filter zurücksetzen → zeige alle Fälle
+                  if (tab.key === "cases" || tab.key === "report" || tab.key === "monitoring") {
+                    setBrowseClinic(""); setBrowseCenter(""); setBrowseStation("");
+                  }
                 }}
                 style={{
                   padding: "10px 16px", fontSize: 13,
                   fontWeight: isActive ? 700 : 500,
-                  color: isActive ? "#1d4ed8" : "#6b7280",
+                  color: isRestricted ? "#cbd5e1" : isActive ? "#1d4ed8" : "#6b7280",
                   background: "transparent", border: "none",
-                  borderBottom: isActive ? "2px solid #3b82f6" : "2px solid transparent",
-                  cursor: "pointer", transition: "all 0.15s",
+                  borderBottom: isActive && !isRestricted ? "2px solid #3b82f6" : "2px solid transparent",
+                  cursor: isRestricted ? "not-allowed" : "pointer", transition: "all 0.15s",
+                  opacity: isRestricted ? 0.5 : 1,
                   display: "flex", alignItems: "center", gap: 5,
                 }}
               >
@@ -774,18 +901,14 @@ export default function App() {
           {/* Spacer */}
           <div style={{ flex: 1 }} />
 
-          {/* Scope Context (sichtbar wenn nicht auf Übersicht) */}
-          {viewMode !== "overview" && (
-            <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "#6b7280" }}>
-              {/* Station selector */}
-              <select
-                value={auth.stationId}
-                onChange={(e) => updateAuth({ stationId: e.target.value })}
-                style={{ padding: "4px 8px", borderRadius: 6, border: "1px solid #e5e7eb", fontSize: 12, fontWeight: 600, cursor: "pointer", background: "#f8fafc" }}
-              >
-                {filteredStations.map((s) => <option key={s} value={s}>{s}</option>)}
-              </select>
-              {dayState && <span style={{ color: "#d1d5db", fontSize: 10 }}>V{dayState.version}</span>}
+          {/* Scope-Anzeige (nur wenn gefiltert) */}
+          {viewMode !== "overview" && (browseClinic || browseCenter || browseStation) && (
+            <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "#6b7280" }}>
+              <span style={{ color: "#94a3b8" }}>Anzeige:</span>
+              {browseStation ? <span style={{ fontWeight: 600, color: "#334155" }}>{browseStation}</span>
+                : browseCenter ? <span style={{ fontWeight: 600, color: "#334155" }}>Zentrum {browseCenter}</span>
+                : browseClinic ? <span style={{ fontWeight: 600, color: "#334155" }}>Klinik {browseClinic}</span>
+                : null}
             </div>
           )}
         </div>
@@ -793,6 +916,17 @@ export default function App() {
 
       {metaError ? <div style={{ padding: "10px 16px", color: "#666", background: "#fff", borderBottom: "1px solid #eee" }}>{metaError}</div> : null}
       {error && <div style={{ padding: "10px 16px", color: "#b42318", background: "#fff", borderBottom: "1px solid #eee" }}>Fehler: {error}</div>}
+
+      {/* ═══ Permission Info Toast ═══ */}
+      {permissionInfo && (
+        <div style={{
+          padding: "10px 20px", background: "#fef3c7", borderBottom: "1px solid #fbbf24",
+          display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#92400e",
+        }}>
+          <span>ℹ️</span> {permissionInfo}
+          <button onClick={() => setPermissionInfo(null)} style={{ marginLeft: "auto", background: "none", border: "none", cursor: "pointer", color: "#92400e", fontWeight: 700 }}>✕</button>
+        </div>
+      )}
 
       {/* ═══ Kategorie-Filter (Dokumentation / Klinisch / Alle) ═══ */}
       {viewMode !== "admin" && (
@@ -804,17 +938,25 @@ export default function App() {
             { key: "medical" as CategoryFilter, label: "Klinisch", icon: "🩺" },
           ]).map((f) => {
             const active = categoryFilter === f.key;
+            const restricted = f.key === "medical" && !canViewMedical;
             return (
               <button
                 key={f.key}
-                onClick={() => setCategoryFilter(f.key)}
+                onClick={() => {
+                  if (restricted) {
+                    setPermissionInfo("Klinische Ansicht ist nur für Ärzte und Kliniker verfügbar.");
+                    return;
+                  }
+                  setCategoryFilter(f.key);
+                }}
                 style={{
                   padding: "4px 12px", fontSize: 12, fontWeight: active ? 700 : 500, borderRadius: 6,
-                  background: active ? (f.key === "completeness" ? "#dbeafe" : f.key === "medical" ? "#fce7f3" : "#e5e7eb") : "transparent",
-                  color: active ? (f.key === "completeness" ? "#1d4ed8" : f.key === "medical" ? "#be185d" : "#374151") : "#6b7280",
-                  border: active ? "1px solid" : "1px solid transparent",
-                  borderColor: active ? (f.key === "completeness" ? "#93c5fd" : f.key === "medical" ? "#f9a8d4" : "#d1d5db") : "transparent",
-                  cursor: "pointer", transition: "all 0.15s",
+                  background: restricted ? "transparent" : active ? (f.key === "completeness" ? "#dbeafe" : f.key === "medical" ? "#fce7f3" : "#e5e7eb") : "transparent",
+                  color: restricted ? "#cbd5e1" : active ? (f.key === "completeness" ? "#1d4ed8" : f.key === "medical" ? "#be185d" : "#374151") : "#6b7280",
+                  border: active && !restricted ? "1px solid" : "1px solid transparent",
+                  borderColor: active && !restricted ? (f.key === "completeness" ? "#93c5fd" : f.key === "medical" ? "#f9a8d4" : "#d1d5db") : "transparent",
+                  cursor: restricted ? "not-allowed" : "pointer", transition: "all 0.15s",
+                  opacity: restricted ? 0.5 : 1,
                 }}
               >
                 <span style={{ marginRight: 4 }}>{f.icon}</span>{f.label}
@@ -864,12 +1006,7 @@ export default function App() {
               ) : !drillClinic ? (
                 /* ── LEVEL 1: Kliniken ── */
                 <>
-                  {/* BI Analytics — Gesamtübersicht (Startseite) */}
-                  {filteredAnalytics.length > 0 && (
-                    <AnalyticsPanel stations={filteredAnalytics} scopeLabel="Alle Kliniken" />
-                  )}
-
-                  <h2 style={{ margin: "24px 0 16px 0", fontSize: "1.2rem" }}>Kliniken</h2>
+                  <h2 style={{ margin: "0 0 16px 0", fontSize: "1.2rem" }}>Kliniken</h2>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 16 }}>
                     {clinicGroups.map(([clinic, items]) => {
                       const a = aggregate(items);
@@ -916,19 +1053,16 @@ export default function App() {
                       );
                     })}
                   </div>
+
+                  {/* BI Analytics — Gesamtübersicht */}
+                  {filteredAnalytics.length > 0 && (
+                    <AnalyticsPanel stations={filteredAnalytics} scopeLabel="Alle Kliniken" />
+                  )}
                 </>
               ) : !drillCenter ? (
                 /* ── LEVEL 2: Zentren einer Klinik ── */
                 <>
-                  {/* BI Analytics — Klinik-Ebene */}
-                  {filteredAnalytics.length > 0 && drillClinic && (
-                    <AnalyticsPanel
-                      stations={filteredAnalytics.filter(s => s.clinic === drillClinic)}
-                      scopeLabel={`Klinik ${drillClinic} — ${CLINIC_LABELS[drillClinic] || ""}`}
-                    />
-                  )}
-
-                  <h2 style={{ margin: "24px 0 16px 0", fontSize: "1.2rem" }}>
+                  <h2 style={{ margin: "0 0 16px 0", fontSize: "1.2rem" }}>
                     Zentren – {drillClinic} <span style={{ fontWeight: 400, fontSize: 14, color: "#6b7280" }}>({CLINIC_LABELS[drillClinic] || ""})</span>
                   </h2>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 14 }}>
@@ -974,19 +1108,19 @@ export default function App() {
                       );
                     })}
                   </div>
+
+                  {/* BI Analytics — Klinik-Ebene */}
+                  {filteredAnalytics.length > 0 && drillClinic && (
+                    <AnalyticsPanel
+                      stations={filteredAnalytics.filter(s => s.clinic === drillClinic)}
+                      scopeLabel={`Klinik ${drillClinic} — ${CLINIC_LABELS[drillClinic] || ""}`}
+                    />
+                  )}
                 </>
               ) : (
                 /* ── LEVEL 3: Stationen eines Zentrums ── */
                 <>
-                  {/* BI Analytics — Zentrum-Ebene */}
-                  {filteredAnalytics.length > 0 && drillClinic && drillCenter && (
-                    <AnalyticsPanel
-                      stations={filteredAnalytics.filter(s => s.clinic === drillClinic && s.center === drillCenter)}
-                      scopeLabel={`Zentrum ${drillCenter}`}
-                    />
-                  )}
-
-                  <h2 style={{ margin: "24px 0 16px 0", fontSize: "1.2rem" }}>
+                  <h2 style={{ margin: "0 0 16px 0", fontSize: "1.2rem" }}>
                     Stationen – {drillCenter}
                     <span style={{ fontWeight: 400, fontSize: 12, color: "#6b7280", marginLeft: 8 }}>Klicken für Fallliste</span>
                   </h2>
@@ -997,7 +1131,14 @@ export default function App() {
                       return (
                       <div
                         key={s.station_id}
-                        onClick={() => { updateAuth({ stationId: s.station_id }); setViewMode("cases"); }}
+                        onClick={() => {
+                          setBrowseClinic(s.clinic);
+                          setBrowseCenter(s.center);
+                          setBrowseStation(s.station_id);
+                          // Auth-Kontext für Detailansicht setzen
+                          updateAuth({ stationId: s.station_id });
+                          setViewMode("cases");
+                        }}
                         style={{
                           padding: 16, borderRadius: 10,
                           background: severityColor(eSev),
@@ -1034,6 +1175,14 @@ export default function App() {
                       );
                     })}
                   </div>
+
+                  {/* BI Analytics — Zentrum-Ebene */}
+                  {filteredAnalytics.length > 0 && drillClinic && drillCenter && (
+                    <AnalyticsPanel
+                      stations={filteredAnalytics.filter(s => s.clinic === drillClinic && s.center === drillCenter)}
+                      scopeLabel={`Zentrum ${drillCenter}`}
+                    />
+                  )}
                 </>
               )}
             </div>
@@ -1042,13 +1191,41 @@ export default function App() {
 
         {/* ─── TAB: FALLLISTE (sortierbare Tabelle + Detail) ─── */}
         {viewMode === "cases" && (
-          <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+            {/* Scope-Filter Bar */}
+            <div style={{ padding: "8px 20px", background: "#f8fafc", borderBottom: "1px solid #e5e7eb", display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
+              <span style={{ fontSize: 11, color: "#6b7280", fontWeight: 600 }}>Filter:</span>
+              <select value={browseClinic} onChange={e => { setBrowseClinic(e.target.value); setBrowseCenter(""); setBrowseStation(""); }}
+                style={{ padding: "4px 8px", borderRadius: 6, border: "1px solid #e2e8f0", fontSize: 12, cursor: "pointer" }}>
+                <option value="">Alle Kliniken</option>
+                {[...new Set(filteredOverview.map(s => s.clinic))].sort().map(c => <option key={c} value={c}>{c}{CLINIC_LABELS[c] ? ` — ${CLINIC_LABELS[c]}` : ""}</option>)}
+              </select>
+              <select value={browseCenter} onChange={e => { setBrowseCenter(e.target.value); setBrowseStation(""); }}
+                style={{ padding: "4px 8px", borderRadius: 6, border: "1px solid #e2e8f0", fontSize: 12, cursor: "pointer" }}>
+                <option value="">Alle Zentren</option>
+                {[...new Set(filteredOverview.filter(s => !browseClinic || s.clinic === browseClinic).map(s => s.center))].sort()
+                  .map(z => <option key={z} value={z}>{z}</option>)}
+              </select>
+              <select value={browseStation} onChange={e => setBrowseStation(e.target.value)}
+                style={{ padding: "4px 8px", borderRadius: 6, border: "1px solid #e2e8f0", fontSize: 12, cursor: "pointer" }}>
+                <option value="">Alle Stationen</option>
+                {filteredOverview.filter(s => (!browseClinic || s.clinic === browseClinic) && (!browseCenter || s.center === browseCenter))
+                  .map(s => <option key={s.station_id} value={s.station_id}>{s.station_id}</option>)}
+              </select>
+              <span style={{ fontSize: 11, color: "#94a3b8" }}>{cases.length} Fälle</span>
+            </div>
+            <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
             {/* Left: sortable table */}
             <div style={{ flex: selectedCaseId ? "0 0 55%" : 1, overflowY: "auto", borderRight: selectedCaseId ? "1px solid #e5e7eb" : "none" }}>
               <CaseTable
                 cases={cases}
                 selectedCaseId={selectedCaseId}
-                onSelectCase={setSelectedCaseId}
+                onSelectCase={(caseId) => {
+                  // Auth-Kontext auf Station des gewählten Falls setzen (für Detail-Endpoint)
+                  const c = cases.find(x => x.case_id === caseId);
+                  if (c) updateAuth({ stationId: c.station_id });
+                  setSelectedCaseId(caseId);
+                }}
                 parameterFilter={categoryFilter}
               />
             </div>
@@ -1066,19 +1243,20 @@ export default function App() {
                   onSetShift={setShift}
                   onAckRule={async (caseId, ruleId) => {
                     await ackRule(caseId, ruleId, auth);
-                    const [newList, newDetail] = await Promise.all([fetchCases(auth, viewMode), fetchCaseDetail(caseId, auth, viewMode)]);
+                    const [newList, newDetail] = await Promise.all([fetchBrowseCases(auth, {clinic: browseClinic || undefined, center: browseCenter || undefined, station: browseStation || undefined}), fetchCaseDetail(caseId, auth, viewMode)]);
                     setCases(newList); setDetail(newDetail);
                   }}
                   onShiftRule={async (caseId, ruleId, shiftVal) => {
                     await shiftRule(caseId, ruleId, shiftVal, auth);
                     setShift(caseId, ruleId, "");
-                    const [newList, newDetail] = await Promise.all([fetchCases(auth, viewMode), fetchCaseDetail(caseId, auth, viewMode)]);
+                    const [newList, newDetail] = await Promise.all([fetchBrowseCases(auth, {clinic: browseClinic || undefined, center: browseCenter || undefined, station: browseStation || undefined}), fetchCaseDetail(caseId, auth, viewMode)]);
                     setCases(newList); setDetail(newDetail);
                   }}
                   onError={(msg) => setError(msg)}
                 />}
               </div>
             )}
+          </div>
           </div>
         )}
 

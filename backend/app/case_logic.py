@@ -1465,3 +1465,98 @@ def seed_dummy_cases_to_db():
             db.merge(case)
         db.commit()
         print(f"{len(DUMMY_CASES)} Demo-Faelle in DB importiert")
+
+        # ── Post-Processing: Einige Fälle vervollständigen ────────────
+        # ~30% der Fälle als "vollständig" markieren (ALLE Pflichtfelder ausgefüllt)
+        # damit im Donut auch grüne/OK-Fälle erscheinen.
+        import random as _rng
+        _rng.seed(99)
+
+        _demo_names = [
+            "Dr. Müller", "Dr. Weber", "Dr. Fischer", "Dr. Schneider",
+            "Dr. Huber", "Fr. Meier", "Hr. Steiner", "Fr. Roth",
+        ]
+
+        all_demo = db.query(Case).filter(Case.source == "demo").all()
+        _today = date.today()
+        for c in all_demo:
+            # Responsible person für alle
+            if not c.responsible_person:
+                c.responsible_person = _rng.choice(_demo_names)
+
+            # ~30% komplett ausfüllen — ALLE Felder, damit 0 Alerts feuern
+            if _rng.random() < 0.30:
+                adm = date.fromisoformat(c.admission_date) if c.admission_date else _today
+
+                # ── Klinische Pflichtfelder ──
+                # HoNOS + BSCL Eintritt
+                if c.honos_entry_total is None:
+                    c.honos_entry_total = _rng.randint(5, 25)
+                    c.honos_entry_date = (adm + timedelta(days=1)).isoformat()
+                if c.bscl_total_entry is None:
+                    c.bscl_total_entry = round(_rng.uniform(0.3, 2.5), 2)
+                    c.bscl_entry_date = (adm + timedelta(days=1)).isoformat()
+                # BFS komplett
+                if c.bfs_1 is None: c.bfs_1 = str(_rng.randint(1, 5))
+                if c.bfs_2 is None: c.bfs_2 = str(_rng.randint(1, 5))
+                if c.bfs_3 is None: c.bfs_3 = str(_rng.randint(1, 5))
+                # Behandlungsplan
+                if c.treatment_plan_date is None:
+                    c.treatment_plan_date = (adm + timedelta(days=2)).isoformat()
+                # Allergien
+                c.allergies_recorded = True
+                # EKG-Eintritt (vermeidet EKG_ENTRY_MISSING_7D)
+                if c.ekg_entry_date is None:
+                    c.ekg_entry_date = (adm + timedelta(days=1)).isoformat()
+                # Freiwillig → keine FU-Regeln, keine treatment_plan_involuntary
+                c.is_voluntary = True
+
+                # ── SpiGes Personendaten (MP 3.2) ──
+                if c.zivilstand is None: c.zivilstand = _rng.choice([1, 2, 3, 4])
+                if c.aufenthaltsort_vor_eintritt is None: c.aufenthaltsort_vor_eintritt = _rng.choice([1, 2, 3])
+                if c.schulbildung is None: c.schulbildung = _rng.choice([1, 2, 3, 4])
+                # Beschäftigung: mindestens 1 Feld muss gesetzt sein
+                c.beschaeftigung_vollzeit = _rng.choice([1, 2])
+                c.beschaeftigung_teilzeit = 2
+                c.beschaeftigung_arbeitslos = 2
+                c.beschaeftigung_haushalt = 2
+                c.beschaeftigung_ausbildung = 2
+                c.beschaeftigung_reha = 2
+                c.beschaeftigung_iv = 2
+
+                # ── SpiGes Eintrittsmerkmale (MP 3.3) ──
+                if c.einweisende_instanz is None: c.einweisende_instanz = _rng.choice([1, 2, 3])
+                if c.behandlungsgrund is None: c.behandlungsgrund = _rng.choice([1, 2])
+
+                # ── SpiGes Behandlung (MP 3.4) ──
+                if c.behandlung_typ is None: c.behandlung_typ = _rng.choice([1, 2, 3])
+                # Psychopharmaka: mindestens 1 Feld beantwortet
+                if c.neuroleptika is None:
+                    c.neuroleptika = _rng.choice([1, 2])
+                    c.keine_psychopharmaka = 2
+
+                # ── BFS Minimaldaten (MB) ──
+                if c.eintrittsart is None: c.eintrittsart = _rng.choice([1, 2, 3])
+                if c.klasse is None: c.klasse = _rng.choice([1, 2, 3])
+
+                # ── Geschlossene Fälle: Austrittsfelder ──
+                if c.discharge_date:
+                    dis = date.fromisoformat(c.discharge_date)
+                    # HoNOS + BSCL Austritt (innerhalb ±3 Tage Fenster)
+                    if c.honos_discharge_total is None:
+                        c.honos_discharge_total = _rng.randint(3, 20)
+                        c.honos_discharge_date = dis.isoformat()
+                    if c.bscl_total_discharge is None:
+                        c.bscl_total_discharge = round(_rng.uniform(0.2, 2.0), 2)
+                        c.bscl_discharge_date = dis.isoformat()
+                    # SpiGes Austrittsmerkmale (MP 3.5)
+                    if c.entscheid_austritt is None: c.entscheid_austritt = _rng.choice([1, 2, 3])
+                    if c.aufenthalt_nach_austritt is None: c.aufenthalt_nach_austritt = _rng.choice([1, 2])
+                    if c.behandlung_nach_austritt is None: c.behandlung_nach_austritt = _rng.choice([1, 2])
+                    if c.behandlungsbereich is None: c.behandlungsbereich = _rng.choice([1, 2, 3])
+                    # Status: dokumentiert
+                    c.case_status = "Dokumentation abgeschlossen"
+                    c.sdep_complete = True
+        db.commit()
+        n_complete = sum(1 for c in all_demo if c.honos_entry_total and c.bscl_total_entry and c.eintrittsart and c.klasse)
+        print(f"  → {n_complete}/{len(all_demo)} Fälle vervollständigt")

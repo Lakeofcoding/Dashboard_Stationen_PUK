@@ -83,6 +83,7 @@ rules:
     value: 5
     message: "HONOS Verschlechterung > 5"
     explanation: "Differenz zwischen Eintritt und Austritt > 5."
+    ack_roles: [clinician, system_admin]
 
   - id: BSCL_DELTA_GT_5
     severity: WARN
@@ -91,6 +92,7 @@ rules:
     value: 5
     message: "BSCL Verschlechterung > 5"
     explanation: "Differenz zwischen Eintritt und Austritt > 5."
+    ack_roles: [clinician, system_admin]
 
   # --- Suizidalität Austritt >= 3 => CRITICAL (heikel)
   - id: SUICIDALITY_HIGH_AT_DISCHARGE
@@ -100,6 +102,8 @@ rules:
     value: true
     message: "Hohe Suizidalität bei Austritt"
     explanation: "Suizidalität bei Austritt (HONOS oder BSCL) ist >= 3. Bitte besonders prüfen (heikel)."
+    ack_roles: [clinician, system_admin]
+    restrict_to_responsible: true
 
   # --- Isolation: offen > 48h => CRITICAL
   - id: ISOLATION_OPEN_GT_48H
@@ -109,6 +113,7 @@ rules:
     value: true
     message: "Isolation ohne Ende > 48h"
     explanation: "Isolation hat keinen Stop und läuft länger als 48 Stunden (möglicherweise Ende vergessen)."
+    ack_roles: [clinician, system_admin]
 
   # --- Isolation mehrfach => WARN
   - id: ISOLATION_MULTIPLE
@@ -118,6 +123,7 @@ rules:
     value: true
     message: "Mehrfach-Isolation"
     explanation: "Mehr als eine Isolationsepisode im Fall."
+    ack_roles: [clinician, system_admin]
 
   # --- BFS Paket: vollständig/ unvollständig (wie gehabt)
   - id: BFS_INCOMPLETE
@@ -166,6 +172,7 @@ rules:
     value: true
     message: "EKG in den letzten 24h nicht befundet"
     explanation: "Ein EKG wurde in den letzten 24 Stunden durchgeführt, aber noch nicht befundet."
+    ack_roles: [clinician, system_admin]
 
   # --- Clozapin: Neutrophile ---
   - id: CLOZAPIN_NEUTROPHILS_LOW
@@ -176,6 +183,7 @@ rules:
     value: true
     message: "Clozapin: Neutrophile <2 G/l"
     explanation: "Patient unter Clozapin mit Neutrophilenwert <2 G/l in den letzten 48h. Sofortige Überprüfung erforderlich."
+    ack_roles: [clinician, system_admin]
 
   # --- Clozapin: Grosses Blutbild (<19 Wochen) ---
   - id: CLOZAPIN_CBC_MISSING_EARLY
@@ -186,6 +194,7 @@ rules:
     value: true
     message: "Clozapin <19 Wo: Grosses Blutbild fehlt (>7d)"
     explanation: "Patient unter Clozapin seit <19 Wochen. Grosses Blutbild in den letzten 7 Tagen fehlt."
+    ack_roles: [clinician, system_admin]
 
   # --- Clozapin: Troponin (<5 Wochen) ---
   - id: CLOZAPIN_TROPONIN_MISSING_EARLY
@@ -196,6 +205,7 @@ rules:
     value: true
     message: "Clozapin <5 Wo: Troponin fehlt (>7d)"
     explanation: "Patient unter Clozapin seit <5 Wochen. Troponin in den letzten 7 Tagen fehlt."
+    ack_roles: [clinician, system_admin]
 
   # ==========================================================================
   # NEUE REGELN – Wöchentlich / Klinisch (medical)
@@ -210,6 +220,7 @@ rules:
     value: true
     message: "Eintritts-EKG fehlt (>7 Tage)"
     explanation: "Eintritt vor >7 Tagen, aber kein Eintritts-EKG dokumentiert."
+    ack_roles: [clinician, system_admin]
 
   # --- Notfall-BEM > 3 Tage ---
   - id: EMERGENCY_BEM_OVER_3D
@@ -220,6 +231,7 @@ rules:
     value: true
     message: "Notfall-BEM seit >3 Tagen"
     explanation: "Notfall-Behandlungs-/Ernährungs-/Medikationsplan (BEM) ist seit mehr als 3 Tagen aktiv."
+    ack_roles: [clinician, system_admin]
 
   # --- Notfallmedikation > 3 Tage ---
   - id: EMERGENCY_MED_OVER_3D
@@ -230,6 +242,7 @@ rules:
     value: true
     message: "Notfallmedikation seit >3 Tagen"
     explanation: "Notfallmedikation läuft seit mehr als 3 Tagen. Reguläre Verordnung prüfen."
+    ack_roles: [clinician, system_admin]
 
   # --- Allergien nicht erfasst nach 7 Tagen ---
   - id: ALLERGIES_MISSING_7D
@@ -240,6 +253,7 @@ rules:
     value: true
     message: "Allergien nicht erfasst (>7 Tage)"
     explanation: "Eintritt vor >7 Tagen, Allergien sind noch nicht dokumentiert."
+    ack_roles: [clinician, system_admin]
 
   # ==========================================================================
   # Dokumentationsabschluss nach Austritt (completeness)
@@ -390,6 +404,8 @@ rules:
     value: true
     message: "FU läuft in ≤7 Tagen ab"
     explanation: "Die ärztliche FU läuft in weniger als 7 Tagen ab. Verlängerung oder KESB-Antrag prüfen."
+    ack_roles: [clinician, system_admin]
+    restrict_to_responsible: true
 
   - id: FU_EXPIRED
     category: medical
@@ -399,6 +415,8 @@ rules:
     value: true
     message: "FU abgelaufen!"
     explanation: "Die FU-Gültigkeitsdauer ist überschritten. Sofortige Klärung erforderlich (Art. 429 ZGB)."
+    ack_roles: [clinician, system_admin]
+    restrict_to_responsible: true
 
   # ==========================================================================
   # Langlieger (v4)
@@ -412,6 +430,7 @@ rules:
     value: true
     message: "Langlieger-Warnung (≥25 Tage)"
     explanation: "Patient ist seit ≥25 Tagen stationär. Überprüfung der Aufenthaltsdauer empfohlen."
+    ack_roles: [clinician, system_admin]
 
   - id: LANGLIEGER_CRITICAL
     category: medical
@@ -421,6 +440,7 @@ rules:
     value: true
     message: "Langlieger (≥28 Tage)"
     explanation: "Patient ist seit ≥28 Tagen (4 Wochen) stationär. Eskaliert alle 2 Wochen."
+    ack_roles: [clinician, system_admin]
 
   # ==========================================================================
   # SpiGes Behandlungsdaten MP 3.4 (v5)
