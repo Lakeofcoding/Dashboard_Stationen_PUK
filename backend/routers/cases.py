@@ -1,7 +1,7 @@
 """Case-Endpoints: Listing, Detail, ACK, Shift, DayState, Reset."""
 from __future__ import annotations
 from typing import Any, Literal, Optional
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from app.auth import AuthContext, get_auth_context, require_ctx
 from app.rbac import require_permission
@@ -16,6 +16,7 @@ from app.excel_loader import get_lab_history, get_ekg_history, get_efm_events
 from app.ack_store import AckStore
 from app.db import SessionLocal
 from app.models import DayState, ShiftReason
+from app.audit import log_security_event
 
 ack_store = AckStore()
 
@@ -248,6 +249,7 @@ def get_case(
 @router.post("/api/ack")
 def ack(
     req: AckRequest,
+    request: Request,
     ctx: AuthContext = Depends(get_auth_context),
     _ctx: str = Depends(require_ctx),
     _perm: None = Depends(require_permission("ack:write")),
@@ -328,13 +330,36 @@ def ack(
         ack_scope=req.ack_scope,
         scope_id=req.scope_id,
         user_id=ctx.user_id,
-        comment=req.comment,
+        comment=req.reason,
         condition_hash=condition_hash,
         business_date=business_date,
         version=current_version,
         action=(req.action or "ACK"),
         shift_code=req.shift_code,
     )
+
+    # Audit: Jede Quittierung/Schiebung wird protokolliert
+    action_type = req.action or "ACK"
+    with SessionLocal() as audit_db:
+        log_security_event(
+            audit_db,
+            request=request,
+            actor_user_id=ctx.user_id,
+            actor_station_id=ctx.station_id,
+            action=f"CASE_{action_type}",
+            target_type="case",
+            target_id=req.case_id,
+            success=True,
+            message=f"{action_type} für {req.ack_scope}/{req.scope_id}",
+            details={
+                "ack_scope": req.ack_scope,
+                "scope_id": req.scope_id,
+                "condition_hash": condition_hash,
+                "shift_code": req.shift_code,
+                "business_date": business_date,
+                "version": current_version,
+            },
+        )
 
     return {
         "case_id": ack_row.case_id,
@@ -364,6 +389,7 @@ def get_day_state(
 
 @router.post("/api/reset_today")
 def reset_today(
+    request: Request,
     ctx: AuthContext = Depends(get_auth_context),
     _ctx: str = Depends(require_ctx),
     _perm: None = Depends(require_permission("reset:today")),
@@ -405,6 +431,21 @@ def reset_today(
         )
 
         db.commit()
+
+    # Audit: Reset ist sicherheitsrelevant (invalidiert alle Quittierungen)
+    with SessionLocal() as audit_db:
+        log_security_event(
+            audit_db,
+            request=request,
+            actor_user_id=ctx.user_id,
+            actor_station_id=ctx.station_id,
+            action="RESET_TODAY",
+            target_type="station",
+            target_id=ctx.station_id,
+            success=True,
+            message=f"Tages-Reset: Version {old_v} → {old_v + 1}",
+            details={"business_date": bdate, "old_version": old_v, "new_version": old_v + 1},
+        )
 
     return {
         "station_id": ctx.station_id,

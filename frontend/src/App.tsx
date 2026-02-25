@@ -523,6 +523,50 @@ export default function App() {
     return overview.filter(s => s.clinic === drillClinic && s.center === drillCenter);
   }, [overview, drillClinic, drillCenter]);
 
+  // ── Zurück-Navigation: kennt die logische Hierarchie ──
+  const canGoBack = (() => {
+    if (isAdminOpen) return true;
+    if (selectedCaseId) return true;
+    if (viewMode !== "overview") return true;
+    if (drillCenter) return true;
+    if (drillClinic) return true;
+    return false;
+  })();
+
+  function goBack() {
+    // 1. Admin-Modal offen → schliessen
+    if (isAdminOpen) { setIsAdminOpen(false); return; }
+    // 2. Fall-Detail offen → Detail schliessen
+    if (selectedCaseId) { setSelectedCaseId(null); setDetail(null); setDetailError(null); setShiftByAlert({}); return; }
+    // 3. Nicht auf Übersicht → zurück zur Übersicht
+    if (viewMode !== "overview") { setViewMode("overview"); return; }
+    // 4. Übersicht: Zentrum → zurück zu Klinik
+    if (drillCenter) { setDrillCenter(null); return; }
+    // 5. Übersicht: Klinik → zurück zur Gesamtübersicht
+    if (drillClinic) { setDrillClinic(null); return; }
+  }
+
+  // Browser-Back-Button integrieren
+  useEffect(() => {
+    function onPopState(e: PopStateEvent) {
+      e.preventDefault();
+      if (canGoBack) goBack();
+    }
+    // Push einen Eintrag damit popstate feuert
+    window.history.pushState({ puk: true }, "");
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  });
+
+  // Escape-Taste → Zurück
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape" && canGoBack) { e.preventDefault(); goBack(); }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  });
+
   return (
     <main style={{ display: "flex", flexDirection: "column", height: "100vh", width: "100vw", overflow: "hidden", fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial", backgroundColor: "#f4f7f6" }}>
       {/* SESSION EXPIRED OVERLAY */}
@@ -560,6 +604,24 @@ export default function App() {
         {/* Top row: Logo + Controls */}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 20px", gap: 16 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+            {/* Zurück-Button */}
+            <button
+              onClick={goBack}
+              disabled={!canGoBack}
+              title="Zurück"
+              style={{
+                width: 32, height: 32, borderRadius: 8, border: "1px solid #d1d5db",
+                background: canGoBack ? "#f9fafb" : "transparent",
+                color: canGoBack ? "#374151" : "#d1d5db",
+                fontSize: 16, fontWeight: 700, cursor: canGoBack ? "pointer" : "default",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                transition: "all 0.15s", flexShrink: 0,
+              }}
+              onMouseEnter={(e) => { if (canGoBack) e.currentTarget.style.background = "#e5e7eb"; }}
+              onMouseLeave={(e) => { if (canGoBack) e.currentTarget.style.background = "#f9fafb"; }}
+            >
+              ←
+            </button>
             <h1 style={{ margin: 0, fontSize: "1.15rem", color: "#1a1a1a", fontWeight: 800 }}>PUK Dashboard</h1>
             <div style={{ flexShrink: 0 }}><ClinicLogo title="Klinik-Logo" /></div>
             <label style={{ display: "flex", alignItems: "center", gap: 4, marginLeft: 8 }}>
