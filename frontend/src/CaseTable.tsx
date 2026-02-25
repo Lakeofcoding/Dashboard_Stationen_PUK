@@ -9,7 +9,8 @@
  * - Klick auf Zeile öffnet Detail
  */
 import { useState, useMemo } from "react";
-import type { CaseSummary, ParameterStatus, Severity } from "./types";
+import type { CaseSummary, ParameterStatus, ParameterGroup, Severity } from "./types";
+import { CompactGroupPills } from "./ParameterGroupPanel";
 
 /* ───── Sortierung ───── */
 type SortKey =
@@ -267,12 +268,25 @@ export default function CaseTable({ cases, selectedCaseId, onSelectCase, paramet
                     </span>
                   </td>
 
-                  {/* Parameter-Badges */}
+                  {/* Parameter-Badges: nur Probleme zeigen (kompakt) */}
                   <td style={{ padding: "8px 8px" }}>
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 3 }}>
-                      {filtered.map((p) => (
-                        <ParamDot key={p.id} p={p} />
-                      ))}
+                      {filtered
+                        .filter(p => p.status === "critical" || p.status === "warn")
+                        .slice(0, 8)
+                        .map((p) => (
+                          <ParamDot key={p.id} p={p} />
+                        ))}
+                      {filtered.filter(p => p.status === "critical" || p.status === "warn").length > 8 && (
+                        <span style={{ fontSize: 10, color: "#9ca3af", padding: "1px 4px" }}>
+                          +{filtered.filter(p => p.status === "critical" || p.status === "warn").length - 8}
+                        </span>
+                      )}
+                      {filtered.filter(p => p.status === "critical" || p.status === "warn").length === 0 && (
+                        <span style={{ fontSize: 10, color: "#22c55e", fontWeight: 600, padding: "1px 5px" }}>
+                          ✓ alle OK
+                        </span>
+                      )}
                     </div>
                   </td>
                 </tr>

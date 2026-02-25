@@ -37,10 +37,7 @@ Thumbs.db
 *.log
 backend/logs/
 
-# Temp files
-_start_backend.bat
-_start_frontend.bat
-__installed__
+
 
 # Docker volumes
 postgres_data/

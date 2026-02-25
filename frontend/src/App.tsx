@@ -19,6 +19,7 @@ import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import type { CaseSummary, CaseDetail, Severity, DayState } from "./types";
 import { AdminPanel } from "./AdminPanel";
 import ParameterBar from "./ParameterBar";
+import ParameterGroupPanel from "./ParameterGroupPanel";
 import CaseTable from "./CaseTable";
 import MatrixReport from "./MatrixReport";
 import MonitoringPanel from "./MonitoringPanel";
@@ -1085,6 +1086,9 @@ function DetailPanel({ detail, canAck, shiftByAlert, shiftReasons, categoryFilte
           <div style={{ fontSize: 12, color: detail.discharge_date ? "#374151" : "#2563eb", fontWeight: detail.discharge_date ? 400 : 600 }}>
             <strong>Austritt:</strong> {detail.discharge_date ?? "Offener Fall"}
           </div>
+          {(detail as any).days_since_admission != null && (
+            <div style={{ fontSize: 12, marginTop: 2 }}><strong>Aufenthalt:</strong> {(detail as any).days_since_admission} Tage</div>
+          )}
           {detail.case_status && (
             <div style={{ fontSize: 12, marginTop: 2 }}><strong>Status:</strong> {detail.case_status}</div>
           )}
@@ -1097,97 +1101,60 @@ function DetailPanel({ detail, canAck, shiftByAlert, shiftReasons, categoryFilte
           <div style={{ fontSize: 12 }}><strong>HoNOS:</strong> {(detail as any).honos ?? "—"}</div>
           <div style={{ fontSize: 12 }}><strong>BSCL:</strong> {(detail as any).bscl ?? "—"}</div>
         </div>
-        <div style={{ padding: 10, borderRadius: 8, background: "#f9fafb", border: "1px solid #e5e7eb" }}>
-          <div style={{ fontSize: 10, color: "#6b7280", fontWeight: 600, textTransform: "uppercase", marginBottom: 4 }}>Dokumentation</div>
-          <div style={{ fontSize: 12 }}><strong>BFS:</strong> {(detail as any).bfs_complete ? "✓ Vollständig" : "✕ Unvollständig"}</div>
-          <div style={{ fontSize: 12 }}><strong>Status:</strong> {detail.severity === "OK" ? "✓ OK" : detail.severity}</div>
-        </div>
+        {/* FU-Karte (nur bei FU-Patienten) */}
+        {(detail as any).fu_status?.is_fu && (() => {
+          const fu = (detail as any).fu_status;
+          const fuBg = fu.severity === "CRITICAL" ? "#fef2f2" : fu.severity === "WARN" ? "#fffbeb" : "#f0fdf4";
+          const fuBorder = fu.severity === "CRITICAL" ? "#fca5a5" : fu.severity === "WARN" ? "#fcd34d" : "#bbf7d0";
+          return (
+            <div style={{ padding: 10, borderRadius: 8, background: fuBg, border: `1px solid ${fuBorder}` }}>
+              <div style={{ fontSize: 10, color: "#6b7280", fontWeight: 600, textTransform: "uppercase", marginBottom: 4 }}>⚖️ FU</div>
+              <div style={{ fontSize: 12 }}><strong>Typ:</strong> {fu.fu_typ ?? "–"}</div>
+              {fu.fu_gueltig_bis && <div style={{ fontSize: 12 }}><strong>Gültig bis:</strong> {fu.fu_gueltig_bis}</div>}
+              {fu.days_until_expiry != null && (
+                <div style={{ fontSize: 12, fontWeight: fu.days_until_expiry <= 7 ? 700 : 400, color: fu.days_until_expiry < 0 ? "#dc2626" : fu.days_until_expiry <= 7 ? "#d97706" : "#374151" }}>
+                  {fu.days_until_expiry < 0 ? `⚠ Abgelaufen (${Math.abs(fu.days_until_expiry)}d)` : `${fu.days_until_expiry}d verbleibend`}
+                </div>
+              )}
+            </div>
+          );
+        })()}
+        {/* Langlieger-Karte */}
+        {(detail as any).langlieger?.active && (() => {
+          const ll = (detail as any).langlieger;
+          const llBg = ll.severity === "CRITICAL" ? "#fef2f2" : "#fffbeb";
+          const llBorder = ll.severity === "CRITICAL" ? "#fca5a5" : "#fcd34d";
+          return (
+            <div style={{ padding: 10, borderRadius: 8, background: llBg, border: `1px solid ${llBorder}` }}>
+              <div style={{ fontSize: 10, color: "#6b7280", fontWeight: 600, textTransform: "uppercase", marginBottom: 4 }}>🏥 Langlieger</div>
+              <div style={{ fontSize: 12, fontWeight: 700 }}>{ll.days} Tage stationär</div>
+              {ll.week && <div style={{ fontSize: 12 }}>Woche {ll.week}</div>}
+              {ll.next_threshold && <div style={{ fontSize: 11, color: "#6b7280" }}>Nächste Eskalation: Tag {ll.next_threshold}</div>}
+            </div>
+          );
+        })()}
       </div>
 
-      {/* Parameter Status */}
-      {filteredParams.length > 0 && (
+      {/* Parameter-Übersicht mit integriertem ACK/SHIFT */}
+      {(detail as any).parameter_groups && (detail as any).parameter_groups.length > 0 ? (
+        <div style={{ marginBottom: 14, padding: 12, borderRadius: 8, background: "#fff", border: "1px solid #e5e7eb" }}>
+          <ParameterGroupPanel
+            groups={(detail as any).parameter_groups}
+            categoryFilter={categoryFilter}
+            canAck={canAck}
+            caseId={detail.case_id}
+            shiftReasons={shiftReasons}
+            onAckRule={onAckRule}
+            onShiftRule={onShiftRule}
+            onError={onError}
+          />
+        </div>
+      ) : filteredParams.length > 0 ? (
         <div style={{ marginBottom: 14, padding: 12, borderRadius: 8, background: "#fff", border: "1px solid #e5e7eb" }}>
           <div style={{ fontSize: 12, fontWeight: 700, color: "#374151", marginBottom: 6 }}>Parameter-Übersicht</div>
           <ParameterBar parameters={filteredParams} compact={false} showGroupLabels={categoryFilter === "all"} />
         </div>
-      )}
-
-      {/* Alerts */}
-      <h3 style={{ margin: "0 0 8px 0", fontSize: "0.95rem" }}>
-        Alerts
-        {categoryFilter !== "all" && (
-          <span style={{ fontSize: 12, fontWeight: 400, color: "#6b7280", marginLeft: 8 }}>
-            ({categoryFilter === "completeness" ? "📋 Dokumentation" : "🩺 Klinisch"})
-          </span>
-        )}
-      </h3>
-      {filteredAlerts.length === 0 ? (
-        <div style={{ color: "#16a34a", padding: 14, background: "#f0fdf4", borderRadius: 8, fontSize: 13 }}>
-          ✓ Keine offenen Alerts.
-        </div>
-      ) : (
-        <div style={{ display: "grid", gap: 8 }}>
-          {filteredAlerts.map((a) => {
-            const key = `${detail.case_id}::${a.rule_id}`;
-            const shiftVal = shiftByAlert[key] ?? "";
-            return (
-              <div
-                key={a.rule_id}
-                style={{
-                  padding: 12, borderRadius: 8,
-                  backgroundColor: severityColor(a.severity),
-                  border: `1px solid ${severityBorderColor(a.severity)}40`,
-                }}
-              >
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontWeight: 700, fontSize: 13 }}>{(a as any).message ?? a.rule_id}</div>
-                    {(a as any).explanation && (
-                      <div style={{ fontSize: 12, color: "#4b5563", marginTop: 3 }}>{(a as any).explanation}</div>
-                    )}
-                    <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 3 }}>
-                      {a.category === "completeness" ? "📋 Vollständigkeit" : "🏥 Medizinisch"} · {a.severity}
-                    </div>
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
-                    <select
-                      disabled={!canAck}
-                      value={shiftVal}
-                      onChange={(e) => onSetShift(detail.case_id, a.rule_id, e.target.value)}
-                      style={{ padding: "4px 6px", borderRadius: 6, border: "1px solid #d1d5db", fontSize: 11, cursor: canAck ? "pointer" : "not-allowed", maxWidth: 140 }}
-                    >
-                      <option value="">Erinnern…</option>
-                      {shiftReasons.map((r) => (
-                        <option key={r.code} value={r.code}>{r.code}: {r.label}</option>
-                      ))}
-                    </select>
-                    <button
-                      disabled={!canAck || !shiftVal}
-                      onClick={async () => {
-                        try { await onShiftRule(detail.case_id, a.rule_id, shiftVal); }
-                        catch (e: any) { onError(e?.message ?? String(e)); }
-                      }}
-                      style={{ padding: "4px 8px", fontSize: 11, borderRadius: 6, border: "1px solid #d1d5db", background: "#fff", cursor: canAck && shiftVal ? "pointer" : "not-allowed", opacity: canAck && shiftVal ? 1 : 0.5 }}
-                    >
-                      Erinnern
-                    </button>
-                    <button
-                      disabled={!canAck}
-                      onClick={async () => {
-                        try { await onAckRule(detail.case_id, a.rule_id); }
-                        catch (e: any) { onError(e?.message ?? String(e)); }
-                      }}
-                      style={{ padding: "4px 10px", fontSize: 11, borderRadius: 6, border: "none", background: canAck ? "#1f2937" : "#9ca3af", color: "#fff", fontWeight: 700, cursor: canAck ? "pointer" : "not-allowed" }}
-                    >
-                      {ackLabel(a.category)}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
+      ) : null}
     </div>
   );
 }

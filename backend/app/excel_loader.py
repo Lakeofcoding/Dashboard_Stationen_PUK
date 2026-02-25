@@ -202,6 +202,32 @@ def _load_cases_from_excel() -> list[dict]:
             # Fallstatus & Verantwortlichkeit (v3)
             "case_status": _to_str(r.get("Fallstatus")),
             "responsible_person": _to_str(r.get("Fallführende Person")),
+            # SpiGes Personendaten (v4) – Defaults, ggf. aus BFS_SPIGES überschrieben
+            "zivilstand": None, "aufenthaltsort_vor_eintritt": None,
+            "beschaeftigung_teilzeit": None, "beschaeftigung_vollzeit": None,
+            "beschaeftigung_arbeitslos": None, "beschaeftigung_haushalt": None,
+            "beschaeftigung_ausbildung": None, "beschaeftigung_reha": None,
+            "beschaeftigung_iv": None, "schulbildung": None,
+            # SpiGes Eintrittsmerkmale (v4)
+            "einweisende_instanz": None, "behandlungsgrund": None,
+            # SpiGes Austrittsmerkmale (v4)
+            "entscheid_austritt": None, "aufenthalt_nach_austritt": None,
+            "behandlung_nach_austritt": None, "behandlungsbereich": None,
+            # FU (v4)
+            "fu_bei_eintritt": _to_str(r.get("FU bei Eintritt")),
+            "fu_typ": _to_str(r.get("FU Typ")),
+            "fu_datum": _to_date(r.get("FU Datum")),
+            "fu_gueltig_bis": _to_date(r.get("FU gültig bis")),
+            "fu_nummer": _to_int(r.get("FU Nummer")),
+            "fu_einweisende_instanz": _to_str(r.get("FU Einweisende Instanz")),
+            # SpiGes Behandlungsdaten MP 3.4 (v5)
+            "behandlung_typ": None, "neuroleptika": None, "depotneuroleptika": None,
+            "antidepressiva": None, "tranquilizer": None, "hypnotika": None,
+            "psychostimulanzien": None, "suchtaversionsmittel": None,
+            "lithium": None, "antiepileptika": None,
+            "andere_psychopharmaka": None, "keine_psychopharmaka": None,
+            # MB Minimaldaten (v5)
+            "eintrittsart": None, "klasse": None,
         }
 
     # ─── Fallback: Auto-Ableitung falls Excel-Spalten leer ───
@@ -243,7 +269,7 @@ def _load_cases_from_excel() -> list[dict]:
     except Exception as e:
         print(f"[excel_loader] EKG-Sheet: {e}")
 
-    # ─── BFS (aus BFS_SPIGES, nur GAF als bfs_1/2/3 Proxy) ───
+    # ─── BFS + SpiGes (aus BFS_SPIGES) ───
     try:
         df_bfs = pd.read_excel(_EXCEL_PATH, sheet_name="BFS_SPIGES")
         for _, r in df_bfs.iterrows():
@@ -251,11 +277,53 @@ def _load_cases_from_excel() -> list[dict]:
             if fnr not in cases_by_fnr:
                 continue
             c = cases_by_fnr[fnr]
+            # BFS (wie bisher)
             c["bfs_1"] = _to_int(r.get("1.5.V01 GAF bei Eintritt"))
             c["bfs_2"] = _to_int(r.get("1.5.V03 Symptom-Schweregrad (CGI-S) Eintritt"))
             c["bfs_3"] = _to_int(r.get("1.5.V02 GAF bei Austritt"))
+            # SpiGes Personendaten (MP 3.2)
+            c["zivilstand"] = _to_str(r.get("3.2.V01 Zivilstand")) or _to_str(r.get("Zivilstand")) or c["zivilstand"]
+            c["aufenthaltsort_vor_eintritt"] = _to_str(r.get("3.2.V02 Aufenthaltsort")) or _to_str(r.get("Aufenthaltsort")) or c["aufenthaltsort_vor_eintritt"]
+            c["beschaeftigung_teilzeit"] = _to_int(r.get("3.2.V03 Teilzeit")) if not _is_na(r.get("3.2.V03 Teilzeit")) else c["beschaeftigung_teilzeit"]
+            c["beschaeftigung_vollzeit"] = _to_int(r.get("3.2.V04 Vollzeit")) if not _is_na(r.get("3.2.V04 Vollzeit")) else c["beschaeftigung_vollzeit"]
+            c["beschaeftigung_arbeitslos"] = _to_int(r.get("3.2.V05 Arbeitslos")) if not _is_na(r.get("3.2.V05 Arbeitslos")) else c["beschaeftigung_arbeitslos"]
+            c["beschaeftigung_haushalt"] = _to_int(r.get("3.2.V06 Haushalt")) if not _is_na(r.get("3.2.V06 Haushalt")) else c["beschaeftigung_haushalt"]
+            c["beschaeftigung_ausbildung"] = _to_int(r.get("3.2.V07 Ausbildung")) if not _is_na(r.get("3.2.V07 Ausbildung")) else c["beschaeftigung_ausbildung"]
+            c["beschaeftigung_reha"] = _to_int(r.get("3.2.V08 Reha")) if not _is_na(r.get("3.2.V08 Reha")) else c["beschaeftigung_reha"]
+            c["beschaeftigung_iv"] = _to_int(r.get("3.2.V09 IV")) if not _is_na(r.get("3.2.V09 IV")) else c["beschaeftigung_iv"]
+            c["schulbildung"] = _to_str(r.get("3.2.V10 Schulbildung")) or _to_str(r.get("Schulbildung")) or c["schulbildung"]
+            # SpiGes Eintrittsmerkmale (MP 3.3)
+            c["einweisende_instanz"] = _to_str(r.get("3.3.V01 Einweisende Instanz")) or _to_str(r.get("Einweisende Instanz")) or c["einweisende_instanz"]
+            c["behandlungsgrund"] = _to_str(r.get("3.3.V02 Behandlungsgrund")) or _to_str(r.get("Behandlungsgrund")) or c["behandlungsgrund"]
+            # FU bei Eintritt (BFS 3.3.V03)
+            fu_val = _to_str(r.get("3.3.V03 FU bei Eintritt"))
+            if fu_val and not c.get("fu_bei_eintritt"):
+                c["fu_bei_eintritt"] = fu_val
+            # SpiGes Austrittsmerkmale (MP 3.5)
+            c["entscheid_austritt"] = _to_str(r.get("3.5.V01 Entscheid Austritt")) or _to_str(r.get("Entscheid Austritt")) or c["entscheid_austritt"]
+            c["aufenthalt_nach_austritt"] = _to_str(r.get("3.5.V02 Aufenthalt nach Austritt")) or _to_str(r.get("Aufenthalt nach Austritt")) or c["aufenthalt_nach_austritt"]
+            c["behandlung_nach_austritt"] = _to_str(r.get("3.5.V03 Behandlung nach Austritt")) or _to_str(r.get("Behandlung nach Austritt")) or c["behandlung_nach_austritt"]
+            c["behandlungsbereich"] = _to_str(r.get("3.5.V04 Behandlungsbereich")) or _to_str(r.get("Behandlungsbereich")) or c["behandlungsbereich"]
+            # SpiGes Behandlungsdaten (MP 3.4)
+            c["behandlung_typ"] = _to_str(r.get("3.4.V02 Behandlung")) or _to_str(r.get("Behandlung")) or c.get("behandlung_typ")
+            for col_suffix, field_name in [
+                ("V03 Neuroleptika", "neuroleptika"), ("V04 Depotneuroleptika", "depotneuroleptika"),
+                ("V05 Antidepressiva", "antidepressiva"), ("V06 Tranquilizer", "tranquilizer"),
+                ("V07 Hypnotika", "hypnotika"), ("V08 Psychostimulanzien", "psychostimulanzien"),
+                ("V09 Suchtaversionsmittel", "suchtaversionsmittel"), ("V10 Lithium", "lithium"),
+                ("V11 Antiepileptika", "antiepileptika"), ("V12 Andere Psychopharmaka", "andere_psychopharmaka"),
+                ("V13 Keine Psychopharmaka", "keine_psychopharmaka"),
+            ]:
+                val = r.get(f"3.4.{col_suffix}")
+                if val is None:
+                    val = r.get(col_suffix.split(" ", 1)[-1])  # Kurzname-Fallback
+                if not _is_na(val):
+                    c[field_name] = _to_int(val) if c.get(field_name) is None else c[field_name]
+            # MB Minimaldaten
+            c["eintrittsart"] = _to_str(r.get("1.2.V03 Eintrittsart")) or _to_str(r.get("Eintrittsart")) or c.get("eintrittsart")
+            c["klasse"] = _to_str(r.get("1.3.V02 Klasse")) or _to_str(r.get("Klasse")) or c.get("klasse")
     except Exception as e:
-        print(f"[excel_loader] BFS-Sheet: {e}")
+        print(f"[excel_loader] BFS/SpiGes-Sheet: {e}")
 
     # ─── EFM -> Isolations-Liste ───
     try:

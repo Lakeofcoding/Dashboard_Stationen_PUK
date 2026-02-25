@@ -2,7 +2,6 @@
 Pydantic-Modelle fuer API Requests und Responses.
 Zentral gesammelt damit Router und Services sie importieren koennen.
 """
-from __future__ import annotations
 from datetime import date
 from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field
@@ -27,6 +26,43 @@ class ParameterStatus(BaseModel):
     group: Literal["completeness", "medical"]
     status: Literal["ok", "warn", "critical", "na"]  # na = nicht relevant
     detail: Optional[str] = None  # Erklaerungstext
+    # Alert-Mapping (v5): verknüpft Parameter mit Regel für ACK/SHIFT
+    rule_id: Optional[str] = None          # z.B. "SPIGES_ZIVILSTAND_MISSING"
+    explanation: Optional[str] = None      # Langtext der Regel
+    condition_hash: Optional[str] = None   # Hash für Re-Fire-Erkennung
+    # ACK/SHIFT Status (vom Router injiziert)
+    ack: Optional[dict] = None             # {"state": "ACK"|"SHIFT", "ts": "...", "shift_code": "a"|null}
+
+
+class ParameterGroup(BaseModel):
+    """Hierarchische Gruppe mit worst-child Severity-Kaskade."""
+    key: str             # z.B. "spiges_person", "fu", "honos"
+    label: str           # Anzeigename
+    severity: Severity   # worst-child: CRITICAL > WARN > OK
+    # items als dict statt ParameterStatus — verhindert dass Pydantic
+    # dynamisch gesetzte Felder (rule_id, explanation, ack) verliert
+    items: list[dict] = Field(default_factory=list)
+
+
+class LangliegerStatus(BaseModel):
+    """Top-Level Langlieger-Warnung (nicht in Parametergruppen)."""
+    active: bool = False
+    severity: Severity = "OK"
+    days: int = 0
+    week: Optional[int] = None            # Aktuelle Woche (4, 6, 8, 10...)
+    message: Optional[str] = None
+    next_threshold: Optional[int] = None  # Nächste Schwelle in Tagen
+
+
+class FuStatus(BaseModel):
+    """FU-Zusammenfassung mit Ablauf-Countdown."""
+    is_fu: bool = False
+    fu_typ: Optional[str] = None          # "aerztlich" | "kesb"
+    fu_datum: Optional[str] = None
+    fu_gueltig_bis: Optional[str] = None
+    days_until_expiry: Optional[int] = None
+    severity: Severity = "OK"
+    message: Optional[str] = None
 
 
 class CaseSummary(BaseModel):
@@ -53,6 +89,9 @@ class CaseSummary(BaseModel):
     responsible_person: Optional[str] = None
     acked_at: Optional[str] = None
     parameter_status: list[ParameterStatus] = Field(default_factory=list)
+    # Neu (v4): Aufenthaltsdauer + Langlieger
+    days_since_admission: int = 0
+    langlieger: Optional[LangliegerStatus] = None
 
 
 class CaseDetail(CaseSummary):
@@ -61,6 +100,9 @@ class CaseDetail(CaseSummary):
     bfs_complete: bool = False
     alerts: list[Alert] = Field(default_factory=list)
     rule_states: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    # Neu (v4): Parametergruppen + FU
+    parameter_groups: list[ParameterGroup] = Field(default_factory=list)
+    fu_status: Optional[FuStatus] = None
 
 
 # --- ACK / Shift ---
@@ -70,7 +112,7 @@ class AckRequest(BaseModel):
     scope_id: str = "*"
     action: Literal["ACK", "SHIFT"] = "ACK"
     shift_code: Optional[str] = None
-    reason: Optional[str] = None
+    comment: Optional[str] = None  # optionaler Freitext (= DB Ack.comment)
 
 
 # --- Day State ---

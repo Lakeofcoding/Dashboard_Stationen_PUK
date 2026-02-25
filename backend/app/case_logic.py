@@ -12,7 +12,7 @@ from app.db import SessionLocal
 from app.models import Case, ShiftReason
 from app.day_state import today_local, _parse_iso_dt, get_day_version
 from app.rule_engine import evaluate_alerts
-from app.schemas import ParameterStatus
+from app.schemas import ParameterStatus, ParameterGroup, LangliegerStatus, FuStatus
 from app.excel_loader import get_demo_cases
 
 
@@ -131,6 +131,481 @@ def build_parameter_status(c: dict) -> list[dict]:
         params.append({"id": "isolation", "label": "Iso.", "group": "medical", "status": "warn", "detail": "Mehrfach"})
 
     return params
+
+
+def _worst_severity(items: list[dict]) -> str:
+    """Worst-child Severity: critical > warn > ok."""
+    for sev in ("critical", "warn"):
+        if any(i.get("status") == sev for i in items):
+            return sev
+    return "ok"
+
+
+def _sev_to_api(s: str) -> str:
+    """Konvertiert internen Status (ok/warn/critical) zu API Severity (OK/WARN/CRITICAL)."""
+    return {"ok": "OK", "warn": "WARN", "critical": "CRITICAL"}.get(s, "OK")
+
+
+def build_parameter_groups(c: dict) -> list[dict]:
+    """Hierarchische Parametergruppen mit worst-child Severity-Kaskade."""
+    derived = c.get("_derived", {})
+    discharge = c.get("discharge_date")
+    is_active = discharge is None
+    groups = []
+
+    # ─── SpiGes Personendaten ───
+    spiges_person = []
+    if derived.get("zivilstand_missing"):
+        spiges_person.append({"id": "zivilstand", "label": "Zivilstand", "group": "completeness", "status": "warn", "detail": "Fehlt"})
+    elif derived.get("zivilstand_unknown"):
+        spiges_person.append({"id": "zivilstand", "label": "Zivilstand", "group": "completeness", "status": "warn", "detail": "Unbekannt"})
+    else:
+        spiges_person.append({"id": "zivilstand", "label": "Zivilstand", "group": "completeness", "status": "ok", "detail": c.get("zivilstand")})
+
+    if derived.get("aufenthaltsort_missing"):
+        spiges_person.append({"id": "aufenthaltsort", "label": "Aufenthaltsort", "group": "completeness", "status": "warn", "detail": "Fehlt"})
+    else:
+        spiges_person.append({"id": "aufenthaltsort", "label": "Aufenthaltsort", "group": "completeness", "status": "ok", "detail": "Erfasst"})
+
+    if derived.get("beschaeftigung_missing"):
+        spiges_person.append({"id": "beschaeftigung", "label": "Beschäftigung", "group": "completeness", "status": "warn", "detail": "Keine Angabe (mind. 1 nötig)"})
+    else:
+        spiges_person.append({"id": "beschaeftigung", "label": "Beschäftigung", "group": "completeness", "status": "ok", "detail": "Erfasst"})
+
+    if derived.get("schulbildung_missing"):
+        spiges_person.append({"id": "schulbildung", "label": "Schulbildung", "group": "completeness", "status": "warn", "detail": "Fehlt"})
+    else:
+        spiges_person.append({"id": "schulbildung", "label": "Schulbildung", "group": "completeness", "status": "ok", "detail": "Erfasst"})
+
+    groups.append({
+        "key": "spiges_person",
+        "label": "SpiGes Personendaten",
+        "severity": _sev_to_api(_worst_severity(spiges_person)),
+        "items": spiges_person,
+    })
+
+    # ─── SpiGes Eintrittsmerkmale ───
+    spiges_eintritt = []
+    if derived.get("einweisende_instanz_missing"):
+        spiges_eintritt.append({"id": "einweisende_instanz", "label": "Einw. Instanz", "group": "completeness", "status": "warn", "detail": "Fehlt"})
+    else:
+        spiges_eintritt.append({"id": "einweisende_instanz", "label": "Einw. Instanz", "group": "completeness", "status": "ok", "detail": "Erfasst"})
+
+    if derived.get("behandlungsgrund_missing"):
+        spiges_eintritt.append({"id": "behandlungsgrund", "label": "Behandlungsgrund", "group": "completeness", "status": "warn", "detail": "Fehlt"})
+    else:
+        spiges_eintritt.append({"id": "behandlungsgrund", "label": "Behandlungsgrund", "group": "completeness", "status": "ok", "detail": "Erfasst"})
+
+    groups.append({
+        "key": "spiges_eintritt",
+        "label": "SpiGes Eintritt",
+        "severity": _sev_to_api(_worst_severity(spiges_eintritt)),
+        "items": spiges_eintritt,
+    })
+
+    # ─── SpiGes Austrittsmerkmale (nur bei Austritt) ───
+    if discharge is not None:
+        spiges_austritt = []
+        for fld, lbl in [("entscheid_austritt", "Entscheid Austritt"), ("aufenthalt_nach_austritt", "Aufenthalt nach AT"),
+                         ("behandlung_nach_austritt", "Behandlung nach AT"), ("behandlungsbereich", "Behandlungsbereich")]:
+            if derived.get(f"{fld}_missing"):
+                spiges_austritt.append({"id": fld, "label": lbl, "group": "completeness", "status": "warn", "detail": "Fehlt"})
+            else:
+                spiges_austritt.append({"id": fld, "label": lbl, "group": "completeness", "status": "ok", "detail": "Erfasst"})
+        groups.append({
+            "key": "spiges_austritt",
+            "label": "SpiGes Austritt",
+            "severity": _sev_to_api(_worst_severity(spiges_austritt)),
+            "items": spiges_austritt,
+        })
+
+    # ─── SpiGes Behandlung (MP 3.4) ───
+    spiges_behandlung = []
+    if derived.get("behandlung_typ_missing"):
+        spiges_behandlung.append({"id": "behandlung_typ", "label": "Behandlungstyp", "group": "completeness", "status": "warn", "detail": "Fehlt"})
+    else:
+        spiges_behandlung.append({"id": "behandlung_typ", "label": "Behandlungstyp", "group": "completeness", "status": "ok", "detail": c.get("behandlung_typ")})
+
+    if derived.get("psychopharmaka_missing"):
+        spiges_behandlung.append({"id": "psychopharmaka", "label": "Psychopharmaka", "group": "completeness", "status": "warn", "detail": "Keine Angabe (mind. 1 Feld nötig)"})
+    else:
+        # Zähle aktive Pharma
+        pharma_labels = []
+        for fk, fl in [("neuroleptika", "NL"), ("depotneuroleptika", "Depot-NL"), ("antidepressiva", "AD"),
+                        ("tranquilizer", "Tranq."), ("hypnotika", "Hypn."), ("psychostimulanzien", "Stim."),
+                        ("suchtaversionsmittel", "SuAv."), ("lithium", "Li"), ("antiepileptika", "AE"),
+                        ("andere_psychopharmaka", "Andere")]:
+            if c.get(fk) == 1:
+                pharma_labels.append(fl)
+        if c.get("keine_psychopharmaka") == 1:
+            pharma_labels = ["Keine"]
+        detail = ", ".join(pharma_labels) if pharma_labels else "Erfasst"
+        spiges_behandlung.append({"id": "psychopharmaka", "label": "Psychopharmaka", "group": "completeness", "status": "ok", "detail": detail})
+
+    groups.append({
+        "key": "spiges_behandlung",
+        "label": "SpiGes Behandlung",
+        "severity": _sev_to_api(_worst_severity(spiges_behandlung)),
+        "items": spiges_behandlung,
+    })
+
+    # ─── MB Minimaldaten ───
+    mb_items = []
+    if derived.get("eintrittsart_missing"):
+        mb_items.append({"id": "eintrittsart", "label": "Eintrittsart", "group": "completeness", "status": "warn", "detail": "Fehlt"})
+    else:
+        mb_items.append({"id": "eintrittsart", "label": "Eintrittsart", "group": "completeness", "status": "ok", "detail": c.get("eintrittsart")})
+    if derived.get("klasse_missing"):
+        mb_items.append({"id": "klasse", "label": "Klasse", "group": "completeness", "status": "warn", "detail": "Fehlt"})
+    else:
+        mb_items.append({"id": "klasse", "label": "Klasse", "group": "completeness", "status": "ok", "detail": c.get("klasse")})
+    groups.append({
+        "key": "mb_minimaldaten",
+        "label": "Minimaldaten",
+        "severity": _sev_to_api(_worst_severity(mb_items)),
+        "items": mb_items,
+    })
+
+    # ─── FU (nur bei nicht-freiwilligen Patienten) ───
+    if derived.get("is_fu"):
+        fu_items = []
+        if derived.get("fu_missing"):
+            fu_items.append({"id": "fu_bei_eintritt", "label": "FU bei Eintritt", "group": "completeness", "status": "critical", "detail": "Nicht dokumentiert"})
+        else:
+            fu_items.append({"id": "fu_bei_eintritt", "label": "FU bei Eintritt", "group": "completeness", "status": "ok", "detail": "Dokumentiert"})
+
+        if derived.get("fu_expired"):
+            fu_items.append({"id": "fu_ablauf", "label": "FU Gültigkeit", "group": "medical", "status": "critical", "detail": "Abgelaufen!"})
+        elif derived.get("fu_expiring_soon"):
+            days_left = derived.get("fu_days_until_expiry", 0)
+            fu_items.append({"id": "fu_ablauf", "label": "FU Gültigkeit", "group": "medical", "status": "warn", "detail": f"Läuft ab in {days_left}d"})
+        elif c.get("fu_gueltig_bis"):
+            fu_items.append({"id": "fu_ablauf", "label": "FU Gültigkeit", "group": "medical", "status": "ok", "detail": f"Gültig bis {c['fu_gueltig_bis']}"})
+
+        groups.append({
+            "key": "fu",
+            "label": "FU",
+            "severity": _sev_to_api(_worst_severity(fu_items)),
+            "items": fu_items,
+        })
+
+    # ─── HoNOS ───
+    honos_items = []
+    honos_e = c.get("honos_entry_total")
+    if honos_e is not None:
+        honos_items.append({"id": "honos_entry", "label": "HoNOS ET", "group": "completeness", "status": "ok", "detail": f"Score: {honos_e}"})
+    elif derived.get("honos_entry_missing_over_3d"):
+        honos_items.append({"id": "honos_entry", "label": "HoNOS ET", "group": "completeness", "status": "critical", "detail": "Fehlt >3d"})
+    else:
+        honos_items.append({"id": "honos_entry", "label": "HoNOS ET", "group": "completeness", "status": "warn", "detail": "Nicht erfasst"})
+
+    if discharge is not None:
+        honos_d = c.get("honos_discharge_total")
+        if honos_d is not None:
+            honos_items.append({"id": "honos_discharge", "label": "HoNOS AT", "group": "completeness", "status": "ok", "detail": f"Score: {honos_d}"})
+        elif derived.get("honos_discharge_missing_over_3d_after_discharge"):
+            honos_items.append({"id": "honos_discharge", "label": "HoNOS AT", "group": "completeness", "status": "critical", "detail": "Fehlt >3d nach AT"})
+        else:
+            honos_items.append({"id": "honos_discharge", "label": "HoNOS AT", "group": "completeness", "status": "warn", "detail": "Nicht erfasst"})
+
+    # HoNOS Delta (Verschlechterung)
+    honos_delta = derived.get("honos_delta")
+    if honos_delta is not None and honos_delta > 5:
+        honos_items.append({"id": "honos_delta", "label": "HoNOS Δ", "group": "medical", "status": "warn", "detail": f"Verschlechterung: +{honos_delta}"})
+
+    groups.append({
+        "key": "honos", "label": "HoNOS",
+        "severity": _sev_to_api(_worst_severity(honos_items)),
+        "items": honos_items,
+    })
+
+    # ─── BSCL ───
+    bscl_items = []
+    bscl_e = c.get("bscl_total_entry")
+    if bscl_e is not None:
+        bscl_items.append({"id": "bscl_entry", "label": "BSCL ET", "group": "completeness", "status": "ok", "detail": f"Score: {bscl_e}"})
+    elif derived.get("bscl_entry_missing_over_3d"):
+        bscl_items.append({"id": "bscl_entry", "label": "BSCL ET", "group": "completeness", "status": "critical", "detail": "Fehlt >3d"})
+    elif is_active:
+        bscl_items.append({"id": "bscl_entry", "label": "BSCL ET", "group": "completeness", "status": "warn", "detail": "Nicht erfasst"})
+
+    if discharge is not None:
+        bscl_d = c.get("bscl_total_discharge")
+        if bscl_d is not None:
+            bscl_items.append({"id": "bscl_discharge", "label": "BSCL AT", "group": "completeness", "status": "ok", "detail": f"Score: {bscl_d}"})
+        elif derived.get("bscl_discharge_missing_over_3d_after_discharge"):
+            bscl_items.append({"id": "bscl_discharge", "label": "BSCL AT", "group": "completeness", "status": "critical", "detail": "Fehlt >3d nach AT"})
+        else:
+            bscl_items.append({"id": "bscl_discharge", "label": "BSCL AT", "group": "completeness", "status": "warn", "detail": "Nicht erfasst"})
+
+    # BSCL Delta (Verschlechterung)
+    bscl_delta = derived.get("bscl_delta")
+    if bscl_delta is not None and bscl_delta > 5:
+        bscl_items.append({"id": "bscl_delta", "label": "BSCL Δ", "group": "medical", "status": "warn", "detail": f"Verschlechterung: +{bscl_delta}"})
+
+    if bscl_items:
+        groups.append({
+            "key": "bscl", "label": "BSCL",
+            "severity": _sev_to_api(_worst_severity(bscl_items)),
+            "items": bscl_items,
+        })
+
+    # ─── BFS ───
+    bfs_items = []
+    bfs_incomplete = derived.get("bfs_incomplete", False)
+    bfs_items.append({"id": "bfs", "label": "BFS Paket", "group": "completeness",
+                      "status": "warn" if bfs_incomplete else "ok",
+                      "detail": "Unvollständig" if bfs_incomplete else "Vollständig"})
+    groups.append({
+        "key": "bfs", "label": "BFS",
+        "severity": _sev_to_api(_worst_severity(bfs_items)),
+        "items": bfs_items,
+    })
+
+    # ─── SDEP + Dok.Abschluss (nur bei Austritt) ───
+    if discharge is not None:
+        dok_items = []
+        sdep = c.get("sdep_complete")
+        if sdep:
+            dok_items.append({"id": "sdep", "label": "SDEP", "group": "completeness", "status": "ok", "detail": "Abgeschlossen"})
+        elif derived.get("sdep_incomplete_at_discharge"):
+            dok_items.append({"id": "sdep", "label": "SDEP", "group": "completeness", "status": "critical", "detail": "Nicht abgeschlossen"})
+        else:
+            dok_items.append({"id": "sdep", "label": "SDEP", "group": "completeness", "status": "warn", "detail": "Offen"})
+
+        cs = c.get("case_status", "")
+        if cs == "Dokumentation abgeschlossen":
+            dok_items.append({"id": "doc_completion", "label": "Dok.Abschl.", "group": "completeness", "status": "ok", "detail": "Abgeschlossen"})
+        elif derived.get("doc_completion_overdue"):
+            dok_items.append({"id": "doc_completion", "label": "Dok.Abschl.", "group": "completeness", "status": "critical", "detail": "Überfällig (≥10d)"})
+        elif derived.get("doc_completion_warn"):
+            dok_items.append({"id": "doc_completion", "label": "Dok.Abschl.", "group": "completeness", "status": "warn", "detail": "Offen"})
+        elif cs == "Dokumentation offen":
+            dok_items.append({"id": "doc_completion", "label": "Dok.Abschl.", "group": "completeness", "status": "ok", "detail": "Im Zeitfenster"})
+
+        if dok_items:
+            groups.append({
+                "key": "dok_austritt", "label": "Austritts-Dokumentation",
+                "severity": _sev_to_api(_worst_severity(dok_items)),
+                "items": dok_items,
+            })
+
+    # ─── Behandlungsplan (nur bei nicht-freiwillig) ───
+    if not c.get("is_voluntary", True):
+        bp_items = []
+        tp = c.get("treatment_plan_date")
+        if tp:
+            bp_items.append({"id": "treatment_plan", "label": "Behandlungsplan", "group": "completeness", "status": "ok", "detail": "Erstellt"})
+        elif derived.get("treatment_plan_missing_involuntary_72h"):
+            bp_items.append({"id": "treatment_plan", "label": "Behandlungsplan", "group": "completeness", "status": "critical", "detail": "Fehlt (>72h)"})
+        else:
+            bp_items.append({"id": "treatment_plan", "label": "Behandlungsplan", "group": "completeness", "status": "warn", "detail": "Nicht erstellt"})
+        groups.append({
+            "key": "behandlungsplan", "label": "Behandlungsplan",
+            "severity": _sev_to_api(_worst_severity(bp_items)),
+            "items": bp_items,
+        })
+
+    # ─── Langlieger ───
+    if is_active and derived.get("days_since_admission", 0) >= 25:
+        ll_items = []
+        days = derived.get("days_since_admission", 0)
+        if derived.get("langlieger_critical"):
+            week = derived.get("langlieger_week", 4)
+            ll_items.append({"id": "langlieger", "label": "Langlieger", "group": "medical", "status": "critical",
+                             "detail": f"{days}d stationär (Woche {week})"})
+        elif derived.get("langlieger_warn"):
+            ll_items.append({"id": "langlieger", "label": "Langlieger", "group": "medical", "status": "warn",
+                             "detail": f"{days}d stationär (≥25d)"})
+        if ll_items:
+            groups.append({
+                "key": "langlieger", "label": "Langlieger",
+                "severity": _sev_to_api(_worst_severity(ll_items)),
+                "items": ll_items,
+            })
+
+    # ─── Klinisch / Medical ───
+    med_items = []
+
+    # EKG
+    if derived.get("ekg_not_reported_24h"):
+        med_items.append({"id": "ekg", "label": "EKG", "group": "medical", "status": "critical", "detail": "Nicht befundet (24h)"})
+    elif derived.get("ekg_entry_missing_7d"):
+        med_items.append({"id": "ekg", "label": "EKG", "group": "medical", "status": "warn", "detail": "ET-EKG fehlt (>7d)"})
+    elif c.get("ekg_entry_date") or c.get("ekg_last_date"):
+        med_items.append({"id": "ekg", "label": "EKG", "group": "medical", "status": "ok", "detail": "Dokumentiert"})
+
+    # Clozapin
+    if c.get("clozapin_active"):
+        if derived.get("clozapin_neutrophils_low"):
+            med_items.append({"id": "clozapin", "label": "Clozapin", "group": "medical", "status": "critical", "detail": "Neutrophile <2 G/l!"})
+        elif derived.get("clozapin_troponin_missing_early"):
+            med_items.append({"id": "clozapin", "label": "Clozapin", "group": "medical", "status": "warn", "detail": "Troponin fehlt (<5 Wo)"})
+        elif derived.get("clozapin_cbc_missing_early"):
+            med_items.append({"id": "clozapin", "label": "Clozapin", "group": "medical", "status": "warn", "detail": "BB fehlt (<19 Wo)"})
+        else:
+            med_items.append({"id": "clozapin", "label": "Clozapin", "group": "medical", "status": "ok", "detail": "Monitoring OK"})
+
+    # Suizidalität
+    if derived.get("suicidality_discharge_high"):
+        med_items.append({"id": "suicidality", "label": "Suizid.", "group": "medical", "status": "critical", "detail": "AT >= 3"})
+
+    # Notfall-BEM / NotfMed
+    if derived.get("emergency_bem_over_3d"):
+        med_items.append({"id": "notfall_bem", "label": "NotfBEM", "group": "medical", "status": "critical", "detail": ">3d aktiv"})
+    if derived.get("emergency_med_over_3d"):
+        med_items.append({"id": "notfall_med", "label": "NotfMed", "group": "medical", "status": "critical", "detail": ">3d aktiv"})
+
+    # Allergien
+    if is_active:
+        if c.get("allergies_recorded"):
+            med_items.append({"id": "allergies", "label": "Allergien", "group": "medical", "status": "ok", "detail": "Erfasst"})
+        elif derived.get("allergies_missing_7d"):
+            med_items.append({"id": "allergies", "label": "Allergien", "group": "medical", "status": "warn", "detail": "Fehlt (>7d)"})
+
+    # Isolation
+    if derived.get("isolation_open_over_48h"):
+        med_items.append({"id": "isolation", "label": "Isolation", "group": "medical", "status": "critical", "detail": "Offen >48h"})
+    elif derived.get("isolation_multiple"):
+        med_items.append({"id": "isolation", "label": "Isolation", "group": "medical", "status": "warn", "detail": "Mehrfach"})
+
+    if med_items:
+        groups.append({
+            "key": "klinisch", "label": "Klinisch",
+            "severity": _sev_to_api(_worst_severity(med_items)),
+            "items": med_items,
+        })
+
+    # ─── Post-Processing: rule_id Mapping ───
+    # Verknüpft Parameter-Items mit ihren Regel-IDs für ACK/SHIFT-Workflow
+    PARAM_RULE_MAP = {
+        # SpiGes Personendaten
+        ("zivilstand", "warn"): ["SPIGES_ZIVILSTAND_MISSING", "SPIGES_ZIVILSTAND_UNKNOWN"],
+        ("aufenthaltsort", "warn"): ["SPIGES_AUFENTHALTSORT_MISSING"],
+        ("beschaeftigung", "warn"): ["SPIGES_BESCHAEFTIGUNG_MISSING"],
+        ("schulbildung", "warn"): ["SPIGES_SCHULBILDUNG_MISSING"],
+        # SpiGes Eintritt
+        ("einweisende_instanz", "warn"): ["SPIGES_EINWEISENDE_INSTANZ_MISSING"],
+        ("behandlungsgrund", "warn"): ["SPIGES_BEHANDLUNGSGRUND_MISSING"],
+        # SpiGes Austritt
+        ("entscheid_austritt", "warn"): ["SPIGES_ENTSCHEID_AUSTRITT_MISSING"],
+        ("aufenthalt_nach_austritt", "warn"): ["SPIGES_AUFENTHALT_NACH_AUSTRITT_MISSING"],
+        ("behandlung_nach_austritt", "warn"): ["SPIGES_BEHANDLUNG_NACH_AUSTRITT_MISSING"],
+        ("behandlungsbereich", "warn"): ["SPIGES_BEHANDLUNGSBEREICH_MISSING"],
+        # SpiGes Behandlung
+        ("behandlung_typ", "warn"): ["SPIGES_BEHANDLUNG_TYP_MISSING"],
+        ("psychopharmaka", "warn"): ["SPIGES_PSYCHOPHARMAKA_MISSING"],
+        # MB Minimaldaten
+        ("eintrittsart", "warn"): ["MB_EINTRITTSART_MISSING"],
+        ("klasse", "warn"): ["MB_KLASSE_MISSING"],
+        # FU
+        ("fu_bei_eintritt", "critical"): ["FU_MISSING"],
+        ("fu_ablauf", "warn"): ["FU_EXPIRING_SOON"],
+        ("fu_ablauf", "critical"): ["FU_EXPIRED"],
+        # HoNOS
+        ("honos_entry", "warn"): ["HONOS_ENTRY_MISSING_WARN"],
+        ("honos_entry", "critical"): ["HONOS_ENTRY_MISSING_CRIT_3D"],
+        ("honos_discharge", "warn"): ["HONOS_DISCHARGE_MISSING_WARN"],
+        ("honos_discharge", "critical"): ["HONOS_DISCHARGE_MISSING_CRIT_3D"],
+        # BSCL
+        ("bscl_entry", "warn"): ["BSCL_ENTRY_MISSING_WARN"],
+        ("bscl_entry", "critical"): ["BSCL_ENTRY_MISSING_CRIT_3D"],
+        ("bscl_discharge", "warn"): ["BSCL_DISCHARGE_MISSING_WARN"],
+        ("bscl_discharge", "critical"): ["BSCL_DISCHARGE_MISSING_CRIT_3D"],
+        # BFS
+        ("bfs", "warn"): ["BFS_INCOMPLETE"],
+        # Dok Austritt
+        ("sdep", "critical"): ["SDEP_INCOMPLETE_AT_DISCHARGE"],
+        ("doc_completion", "warn"): ["DOC_COMPLETION_WARN"],
+        ("doc_completion", "critical"): ["DOC_COMPLETION_OVERDUE"],
+        # Behandlungsplan
+        ("treatment_plan", "critical"): ["TREATMENT_PLAN_MISSING_72H"],
+        ("treatment_plan", "warn"): ["TREATMENT_PLAN_MISSING_72H"],
+        # Klinisch
+        ("ekg", "critical"): ["EKG_NOT_REPORTED_24H"],
+        ("ekg", "warn"): ["EKG_ENTRY_MISSING_7D"],
+        ("clozapin", "critical"): ["CLOZAPIN_NEUTROPHILS_LOW"],
+        ("clozapin", "warn"): ["CLOZAPIN_CBC_MISSING_EARLY", "CLOZAPIN_TROPONIN_MISSING_EARLY"],
+        ("suicidality", "critical"): ["SUICIDALITY_HIGH_AT_DISCHARGE"],
+        ("notfall_bem", "critical"): ["EMERGENCY_BEM_OVER_3D"],
+        ("notfall_med", "critical"): ["EMERGENCY_MED_OVER_3D"],
+        ("allergies", "warn"): ["ALLERGIES_MISSING_7D"],
+        ("isolation", "critical"): ["ISOLATION_OPEN_GT_48H"],
+        ("isolation", "warn"): ["ISOLATION_MULTIPLE"],
+        # HoNOS/BSCL Delta
+        ("honos_delta", "warn"): ["HONOS_DELTA_GT_5"],
+        ("bscl_delta", "warn"): ["BSCL_DELTA_GT_5"],
+        # Langlieger
+        ("langlieger", "warn"): ["LANGLIEGER_WARN"],
+        ("langlieger", "critical"): ["LANGLIEGER_CRITICAL"],
+    }
+    for group in groups:
+        for item in group["items"]:
+            if item["status"] in ("ok", "na"):
+                continue
+            candidates = PARAM_RULE_MAP.get((item["id"], item["status"]), [])
+            if candidates:
+                item["rule_id"] = candidates[0]  # primäre Regel
+
+    return groups
+
+
+def build_langlieger_status(c: dict) -> dict:
+    """Top-Level Langlieger-Warnung mit Wochen-/Schwellenanzeige."""
+    derived = c.get("_derived", {})
+    days = derived.get("days_since_admission", 0)
+    discharge = c.get("discharge_date")
+
+    if discharge is not None or days < 25:
+        return {"active": False, "severity": "OK", "days": days, "week": None, "message": None, "next_threshold": None}
+
+    if derived.get("langlieger_critical"):
+        week = derived.get("langlieger_week", 4)
+        next_t = derived.get("langlieger_next_threshold", 42)
+        return {
+            "active": True, "severity": "CRITICAL", "days": days, "week": week,
+            "message": f"Langlieger: {days} Tage (Woche {week})",
+            "next_threshold": next_t,
+        }
+
+    return {
+        "active": True, "severity": "WARN", "days": days, "week": None,
+        "message": f"Langlieger-Warnung: {days} Tage (≥25d)",
+        "next_threshold": 28,
+    }
+
+
+def build_fu_status(c: dict) -> dict:
+    """FU-Zusammenfassung mit Ablauf-Countdown."""
+    derived = c.get("_derived", {})
+    is_fu = derived.get("is_fu", False)
+
+    if not is_fu:
+        return {"is_fu": False, "fu_typ": None, "fu_datum": None, "fu_gueltig_bis": None,
+                "days_until_expiry": None, "severity": "OK", "message": None}
+
+    fu_typ = c.get("fu_typ")
+    fu_datum = c.get("fu_datum")
+    fu_gueltig_bis = c.get("fu_gueltig_bis")
+    days_until = derived.get("fu_days_until_expiry")
+
+    if derived.get("fu_expired"):
+        sev = "CRITICAL"
+        msg = f"FU abgelaufen! ({abs(days_until)}d überfällig)" if days_until is not None else "FU abgelaufen!"
+    elif derived.get("fu_expiring_soon"):
+        sev = "WARN"
+        msg = f"FU läuft ab in {days_until} Tagen" if days_until is not None else "FU läuft bald ab"
+    elif derived.get("fu_missing"):
+        sev = "CRITICAL"
+        msg = "FU bei Eintritt nicht dokumentiert"
+    else:
+        sev = "OK"
+        msg = f"FU gültig ({fu_typ or 'unbekannt'})"
+
+    return {
+        "is_fu": True, "fu_typ": fu_typ, "fu_datum": fu_datum, "fu_gueltig_bis": fu_gueltig_bis,
+        "days_until_expiry": days_until, "severity": sev, "message": msg,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -415,7 +890,137 @@ def enrich_case(c: dict) -> dict:
         # Dokumentationsabschluss (v3)
         "doc_completion_warn": doc_completion_warn,
         "doc_completion_overdue": doc_completion_overdue,
+        # Aufenthaltsdauer
+        "days_since_admission": days_since_admission,
     }
+
+    # ─── FU (Fürsorgerische Unterbringung) – v4 ───
+    is_fu = not c.get("is_voluntary", True)
+    fu_bei_eintritt = c.get("fu_bei_eintritt")
+    fu_typ = c.get("fu_typ")
+    fu_gueltig_bis_str = c.get("fu_gueltig_bis")
+    fu_days_until_expiry: int | None = None
+    fu_expired = False
+    fu_expiring_soon = False  # ≤7 Tage bis Ablauf
+
+    if is_fu and fu_gueltig_bis_str:
+        try:
+            fu_exp = fu_gueltig_bis_str if isinstance(fu_gueltig_bis_str, date) else date.fromisoformat(str(fu_gueltig_bis_str)[:10])
+            fu_days_until_expiry = (fu_exp - today).days
+            fu_expired = fu_days_until_expiry < 0
+            fu_expiring_soon = 0 <= fu_days_until_expiry <= 7
+        except Exception:
+            pass
+
+    fu_missing = is_fu and fu_bei_eintritt is None
+
+    out["_derived"].update({
+        # FU (v4)
+        "is_fu": is_fu,
+        "fu_missing": fu_missing,
+        "fu_days_until_expiry": fu_days_until_expiry,
+        "fu_expired": fu_expired,
+        "fu_expiring_soon": fu_expiring_soon,
+    })
+
+    # ─── Langlieger – v4 ───
+    langlieger_warn = days_since_admission >= 25 and discharge_date is None
+    langlieger_critical = days_since_admission >= 28 and discharge_date is None
+    langlieger_week: int | None = None
+    langlieger_next_threshold: int | None = None
+    if langlieger_critical:
+        steps_past = max(0, (days_since_admission - 28) // 14)
+        langlieger_week = 4 + steps_past * 2  # Wochen 4, 6, 8, 10...
+        langlieger_next_threshold = 28 + (steps_past + 1) * 14  # 42, 56, 70...
+    elif langlieger_warn:
+        langlieger_week = None
+        langlieger_next_threshold = 28
+
+    out["_derived"].update({
+        "langlieger_warn": langlieger_warn,
+        "langlieger_critical": langlieger_critical,
+        "langlieger_week": langlieger_week,
+        "langlieger_next_threshold": langlieger_next_threshold,
+        # v5.1: Fälle verschwinden nicht mehr, aber markiert
+        "days_from_discharge": (today - discharge_date).days if discharge_date else None,
+    })
+
+    # ─── SpiGes Vollständigkeits-Checks – v4 ───
+    zivilstand = c.get("zivilstand")
+    zivilstand_missing = zivilstand is None
+    zivilstand_unknown = str(zivilstand).strip().lower() in ("unbekannt", "9") if zivilstand else False
+    aufenthaltsort_missing = c.get("aufenthaltsort_vor_eintritt") is None
+    schulbildung_missing = c.get("schulbildung") is None
+
+    # Beschäftigung: Aggregat – mind. 1 der 7 Felder = 1 (ja)
+    besch_fields = [
+        c.get("beschaeftigung_teilzeit"), c.get("beschaeftigung_vollzeit"),
+        c.get("beschaeftigung_arbeitslos"), c.get("beschaeftigung_haushalt"),
+        c.get("beschaeftigung_ausbildung"), c.get("beschaeftigung_reha"),
+        c.get("beschaeftigung_iv"),
+    ]
+    all_none = all(v is None for v in besch_fields)
+    any_yes = any(v == 1 for v in besch_fields if v is not None)
+    beschaeftigung_missing = all_none or (not any_yes and not all_none)
+
+    einweisende_instanz_missing = c.get("einweisende_instanz") is None
+    behandlungsgrund_missing = c.get("behandlungsgrund") is None
+
+    # Austritt-Felder (nur wenn discharge_date gesetzt)
+    has_discharge = discharge_date is not None
+    entscheid_austritt_missing = has_discharge and c.get("entscheid_austritt") is None
+    aufenthalt_nach_austritt_missing = has_discharge and c.get("aufenthalt_nach_austritt") is None
+    behandlung_nach_austritt_missing = has_discharge and c.get("behandlung_nach_austritt") is None
+    behandlungsbereich_missing = has_discharge and c.get("behandlungsbereich") is None
+
+    # Gruppen-Aggregate
+    spiges_person_incomplete = any([zivilstand_missing, zivilstand_unknown, aufenthaltsort_missing, beschaeftigung_missing, schulbildung_missing])
+    spiges_eintritt_incomplete = any([einweisende_instanz_missing, behandlungsgrund_missing])
+    spiges_austritt_incomplete = has_discharge and any([entscheid_austritt_missing, aufenthalt_nach_austritt_missing, behandlung_nach_austritt_missing, behandlungsbereich_missing])
+
+    out["_derived"].update({
+        "zivilstand_missing": zivilstand_missing,
+        "zivilstand_unknown": zivilstand_unknown,
+        "aufenthaltsort_missing": aufenthaltsort_missing,
+        "schulbildung_missing": schulbildung_missing,
+        "beschaeftigung_missing": beschaeftigung_missing,
+        "einweisende_instanz_missing": einweisende_instanz_missing,
+        "behandlungsgrund_missing": behandlungsgrund_missing,
+        "entscheid_austritt_missing": entscheid_austritt_missing,
+        "aufenthalt_nach_austritt_missing": aufenthalt_nach_austritt_missing,
+        "behandlung_nach_austritt_missing": behandlung_nach_austritt_missing,
+        "behandlungsbereich_missing": behandlungsbereich_missing,
+        "spiges_person_incomplete": spiges_person_incomplete,
+        "spiges_eintritt_incomplete": spiges_eintritt_incomplete,
+        "spiges_austritt_incomplete": spiges_austritt_incomplete,
+    })
+
+    # ─── SpiGes Behandlungsdaten MP 3.4 – v5 ───
+    behandlung_typ_missing = c.get("behandlung_typ") is None
+    # Psychopharmaka: analog Beschäftigung — mind. 1 Feld beantwortet (ja/nein)
+    pharma_fields = [
+        c.get("neuroleptika"), c.get("depotneuroleptika"), c.get("antidepressiva"),
+        c.get("tranquilizer"), c.get("hypnotika"), c.get("psychostimulanzien"),
+        c.get("suchtaversionsmittel"), c.get("lithium"), c.get("antiepileptika"),
+        c.get("andere_psychopharmaka"), c.get("keine_psychopharmaka"),
+    ]
+    pharma_all_none = all(v is None for v in pharma_fields)
+    pharma_any_answered = any(v is not None for v in pharma_fields)
+    psychopharmaka_missing = pharma_all_none  # kein einziges Feld ausgefüllt
+
+    # MB Minimaldaten
+    eintrittsart_missing = c.get("eintrittsart") is None
+    klasse_missing = c.get("klasse") is None
+
+    spiges_behandlung_incomplete = any([behandlung_typ_missing, psychopharmaka_missing])
+
+    out["_derived"].update({
+        "behandlung_typ_missing": behandlung_typ_missing,
+        "psychopharmaka_missing": psychopharmaka_missing,
+        "eintrittsart_missing": eintrittsart_missing,
+        "klasse_missing": klasse_missing,
+        "spiges_behandlung_incomplete": spiges_behandlung_incomplete,
+    })
     out["case_status"] = case_status
     out["responsible_person"] = c.get("responsible_person")
     return out
@@ -472,6 +1077,48 @@ def _load_raw_cases_from_db(station_id: str) -> list[dict]:
                 # Fallstatus (v3)
                 "case_status": c.case_status,
                 "responsible_person": c.responsible_person,
+                # SpiGes Personendaten (v4)
+                "zivilstand": c.zivilstand,
+                "aufenthaltsort_vor_eintritt": c.aufenthaltsort_vor_eintritt,
+                "beschaeftigung_teilzeit": c.beschaeftigung_teilzeit,
+                "beschaeftigung_vollzeit": c.beschaeftigung_vollzeit,
+                "beschaeftigung_arbeitslos": c.beschaeftigung_arbeitslos,
+                "beschaeftigung_haushalt": c.beschaeftigung_haushalt,
+                "beschaeftigung_ausbildung": c.beschaeftigung_ausbildung,
+                "beschaeftigung_reha": c.beschaeftigung_reha,
+                "beschaeftigung_iv": c.beschaeftigung_iv,
+                "schulbildung": c.schulbildung,
+                # SpiGes Eintrittsmerkmale (v4)
+                "einweisende_instanz": c.einweisende_instanz,
+                "behandlungsgrund": c.behandlungsgrund,
+                # SpiGes Austrittsmerkmale (v4)
+                "entscheid_austritt": c.entscheid_austritt,
+                "aufenthalt_nach_austritt": c.aufenthalt_nach_austritt,
+                "behandlung_nach_austritt": c.behandlung_nach_austritt,
+                "behandlungsbereich": c.behandlungsbereich,
+                # FU (v4)
+                "fu_bei_eintritt": c.fu_bei_eintritt,
+                "fu_typ": c.fu_typ,
+                "fu_datum": c.fu_datum,
+                "fu_gueltig_bis": c.fu_gueltig_bis,
+                "fu_nummer": c.fu_nummer,
+                "fu_einweisende_instanz": c.fu_einweisende_instanz,
+                # SpiGes Behandlungsdaten MP 3.4 (v5)
+                "behandlung_typ": c.behandlung_typ,
+                "neuroleptika": c.neuroleptika,
+                "depotneuroleptika": c.depotneuroleptika,
+                "antidepressiva": c.antidepressiva,
+                "tranquilizer": c.tranquilizer,
+                "hypnotika": c.hypnotika,
+                "psychostimulanzien": c.psychostimulanzien,
+                "suchtaversionsmittel": c.suchtaversionsmittel,
+                "lithium": c.lithium,
+                "antiepileptika": c.antiepileptika,
+                "andere_psychopharmaka": c.andere_psychopharmaka,
+                "keine_psychopharmaka": c.keine_psychopharmaka,
+                # MB Minimaldaten (v5)
+                "eintrittsart": c.eintrittsart,
+                "klasse": c.klasse,
             }
             result.append(case_dict)
         return result
@@ -498,19 +1145,8 @@ def _all_alerts_resolved(case_dict: dict, station_id: str, ack_store) -> bool:
 
 
 def load_cases_from_db(station_id: str, ack_store=None) -> list[dict]:
-    """Faelle mit Auto-Expire-Filterung (3 Tage nach Austritt wenn alles quittiert)."""
-    all_cases = _load_raw_cases_from_db(station_id)
-    result = []
-    for c in all_cases:
-        if c["discharge_date"]:
-            try:
-                days_since = (today_local() - c["discharge_date"]).days
-                if days_since > 3 and ack_store and _all_alerts_resolved(c, station_id, ack_store):
-                    continue
-            except Exception:
-                pass
-        result.append(c)
-    return result
+    """Alle Fälle einer Station laden (kein Auto-Hide mehr seit v5.1)."""
+    return _load_raw_cases_from_db(station_id)
 
 
 def get_station_cases(station_id: str, ack_store=None) -> list[dict]:
@@ -614,6 +1250,48 @@ def seed_dummy_cases_to_db():
                 # Fallstatus (v3)
                 case_status=c.get("case_status"),
                 responsible_person=c.get("responsible_person"),
+                # SpiGes Personendaten (v4)
+                zivilstand=c.get("zivilstand"),
+                aufenthaltsort_vor_eintritt=c.get("aufenthaltsort_vor_eintritt"),
+                beschaeftigung_teilzeit=c.get("beschaeftigung_teilzeit"),
+                beschaeftigung_vollzeit=c.get("beschaeftigung_vollzeit"),
+                beschaeftigung_arbeitslos=c.get("beschaeftigung_arbeitslos"),
+                beschaeftigung_haushalt=c.get("beschaeftigung_haushalt"),
+                beschaeftigung_ausbildung=c.get("beschaeftigung_ausbildung"),
+                beschaeftigung_reha=c.get("beschaeftigung_reha"),
+                beschaeftigung_iv=c.get("beschaeftigung_iv"),
+                schulbildung=c.get("schulbildung"),
+                # SpiGes Eintrittsmerkmale (v4)
+                einweisende_instanz=c.get("einweisende_instanz"),
+                behandlungsgrund=c.get("behandlungsgrund"),
+                # SpiGes Austrittsmerkmale (v4)
+                entscheid_austritt=c.get("entscheid_austritt"),
+                aufenthalt_nach_austritt=c.get("aufenthalt_nach_austritt"),
+                behandlung_nach_austritt=c.get("behandlung_nach_austritt"),
+                behandlungsbereich=c.get("behandlungsbereich"),
+                # FU (v4)
+                fu_bei_eintritt=c.get("fu_bei_eintritt"),
+                fu_typ=c.get("fu_typ"),
+                fu_datum=_date_to_str(c.get("fu_datum")),
+                fu_gueltig_bis=_date_to_str(c.get("fu_gueltig_bis")),
+                fu_nummer=c.get("fu_nummer"),
+                fu_einweisende_instanz=c.get("fu_einweisende_instanz"),
+                # SpiGes Behandlung MP 3.4 (v5)
+                behandlung_typ=c.get("behandlung_typ"),
+                neuroleptika=c.get("neuroleptika"),
+                depotneuroleptika=c.get("depotneuroleptika"),
+                antidepressiva=c.get("antidepressiva"),
+                tranquilizer=c.get("tranquilizer"),
+                hypnotika=c.get("hypnotika"),
+                psychostimulanzien=c.get("psychostimulanzien"),
+                suchtaversionsmittel=c.get("suchtaversionsmittel"),
+                lithium=c.get("lithium"),
+                antiepileptika=c.get("antiepileptika"),
+                andere_psychopharmaka=c.get("andere_psychopharmaka"),
+                keine_psychopharmaka=c.get("keine_psychopharmaka"),
+                # MB Minimaldaten (v5)
+                eintrittsart=c.get("eintrittsart"),
+                klasse=c.get("klasse"),
                 source="demo",
             )
             db.merge(case)

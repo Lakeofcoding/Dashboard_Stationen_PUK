@@ -1,16 +1,15 @@
 """Case-Endpoints: Listing, Detail, ACK, Shift, DayState, Reset."""
 from __future__ import annotations
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
 from app.auth import AuthContext, get_auth_context, require_ctx
 from app.rbac import require_permission
-from app.schemas import Alert, CaseSummary, CaseDetail
+from app.schemas import Alert, CaseSummary, CaseDetail, AckRequest
 from app.day_state import today_local, get_day_version, ack_is_valid_today
 from app.rule_engine import evaluate_alerts, summarize_severity
 from app.case_logic import (
     get_station_cases, get_single_case, enrich_case, get_valid_shift_codes,
-    build_parameter_status,
+    build_parameter_status, build_parameter_groups, build_langlieger_status, build_fu_status,
 )
 from app.excel_loader import get_lab_history, get_ekg_history, get_efm_events
 from app.ack_store import AckStore
@@ -19,15 +18,6 @@ from app.models import DayState, ShiftReason
 from app.audit import log_security_event
 
 ack_store = AckStore()
-
-
-class AckRequest(BaseModel):
-    case_id: str
-    ack_scope: str = "case"
-    scope_id: str = "*"
-    comment: Optional[str] = None
-    action: Optional[Literal["ACK", "SHIFT"]] = "ACK"
-    shift_code: Optional[str] = None
 
 
 router = APIRouter()
@@ -130,6 +120,8 @@ def list_cases(
                 responsible_person=c.get("responsible_person"),
                 acked_at=case_level_acked_at.get(c["case_id"]),
                 parameter_status=build_parameter_status(c),
+                days_since_admission=(c.get("_derived") or {}).get("days_since_admission", 0),
+                langlieger=build_langlieger_status(c),
             )
         )
 
@@ -216,6 +208,24 @@ def get_case(
     comp_sev, _, comp_cc, comp_wc = summarize_severity(comp_alerts)
     med_sev, _, med_cc, med_wc = summarize_severity(med_alerts)
 
+    # ─── Parameter Groups mit ACK/Alert-Enrichment ───
+    param_groups = build_parameter_groups(c)
+    # Alert-Lookup: rule_id -> Alert (für explanation + condition_hash)
+    alert_by_rule = {a.rule_id: a for a in raw_alerts}
+    for group in param_groups:
+        for item in group["items"]:
+            rid = item.get("rule_id")
+            if not rid:
+                continue
+            alert = alert_by_rule.get(rid)
+            if alert:
+                item["explanation"] = alert.explanation
+                item["condition_hash"] = alert.condition_hash
+            # ACK/SHIFT Status aus rule_states injizieren
+            ack_info = rule_states.get(rid)
+            if ack_info:
+                item["ack"] = ack_info
+
     return CaseDetail(
         case_id=c["case_id"],
         patient_id=c["patient_id"],
@@ -238,11 +248,15 @@ def get_case(
         responsible_person=c.get("responsible_person"),
         acked_at=acked_at,
         parameter_status=build_parameter_status(c),
+        days_since_admission=(c.get("_derived") or {}).get("days_since_admission", 0),
+        langlieger=build_langlieger_status(c),
         honos=c.get("honos_entry_total"),
         bscl=c.get("bscl_total_entry"),
         bfs_complete=not (c.get("_derived") or {}).get("bfs_incomplete", False),
-        alerts=visible_alerts,
+        alerts=raw_alerts,  # ALLE Alerts (nicht nur visible) — Frontend entscheidet Anzeige
         rule_states=rule_states,
+        parameter_groups=param_groups,
+        fu_status=build_fu_status(c),
     )
 
 
@@ -330,7 +344,7 @@ def ack(
         ack_scope=req.ack_scope,
         scope_id=req.scope_id,
         user_id=ctx.user_id,
-        comment=req.reason,
+        comment=req.comment,
         condition_hash=condition_hash,
         business_date=business_date,
         version=current_version,

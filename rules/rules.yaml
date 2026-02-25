@@ -262,3 +262,206 @@ rules:
     value: true
     message: "Dokumentation überfällig (≥10 Tage nach Austritt)"
     explanation: "Die 10-Tages-Frist für den Dokumentationsabschluss nach Austritt ist überschritten."
+
+  # ==========================================================================
+  # SpiGes / BFS Psychiatrie-Zusatzdaten (v4)
+  # ==========================================================================
+
+  # --- SpiGes Personendaten (MP 3.2) ---
+  - id: SPIGES_ZIVILSTAND_MISSING
+    category: completeness
+    severity: WARN
+    metric: zivilstand_missing
+    operator: is_true
+    value: true
+    message: "SpiGes: Zivilstand fehlt"
+    explanation: "Zivilstand (3.2.V01) ist nicht erfasst."
+
+  - id: SPIGES_ZIVILSTAND_UNKNOWN
+    category: completeness
+    severity: WARN
+    metric: zivilstand_unknown
+    operator: is_true
+    value: true
+    message: "SpiGes: Zivilstand unbekannt"
+    explanation: "Zivilstand (3.2.V01) ist als 'unbekannt' erfasst."
+
+  - id: SPIGES_AUFENTHALTSORT_MISSING
+    category: completeness
+    severity: WARN
+    metric: aufenthaltsort_missing
+    operator: is_true
+    value: true
+    message: "SpiGes: Aufenthaltsort fehlt"
+    explanation: "Aufenthaltsort vor Eintritt (3.2.V02) ist nicht erfasst."
+
+  - id: SPIGES_BESCHAEFTIGUNG_MISSING
+    category: completeness
+    severity: WARN
+    metric: beschaeftigung_missing
+    operator: is_true
+    value: true
+    message: "SpiGes: Beschäftigung fehlt"
+    explanation: "Keine Beschäftigung angegeben (mind. 1 von 7 Feldern muss 'ja' sein)."
+
+  - id: SPIGES_SCHULBILDUNG_MISSING
+    category: completeness
+    severity: WARN
+    metric: schulbildung_missing
+    operator: is_true
+    value: true
+    message: "SpiGes: Schulbildung fehlt"
+    explanation: "Schulbildung (3.2.V10) ist nicht erfasst."
+
+  # --- SpiGes Eintrittsmerkmale (MP 3.3) ---
+  - id: SPIGES_EINWEISENDE_INSTANZ_MISSING
+    category: completeness
+    severity: WARN
+    metric: einweisende_instanz_missing
+    operator: is_true
+    value: true
+    message: "SpiGes: Einweisende Instanz fehlt"
+    explanation: "Einweisende Instanz (3.3.V01) ist nicht erfasst."
+
+  - id: SPIGES_BEHANDLUNGSGRUND_MISSING
+    category: completeness
+    severity: WARN
+    metric: behandlungsgrund_missing
+    operator: is_true
+    value: true
+    message: "SpiGes: Behandlungsgrund fehlt"
+    explanation: "Behandlungsgrund (3.3.V02) ist nicht erfasst."
+
+  # --- SpiGes Austrittsmerkmale (MP 3.5, nur bei Austritt) ---
+  - id: SPIGES_ENTSCHEID_AUSTRITT_MISSING
+    category: completeness
+    severity: WARN
+    metric: entscheid_austritt_missing
+    operator: is_true
+    value: true
+    message: "SpiGes: Entscheid Austritt fehlt"
+    explanation: "Entscheid für Austritt (3.5.V01) ist nicht erfasst."
+
+  - id: SPIGES_AUFENTHALT_NACH_AUSTRITT_MISSING
+    category: completeness
+    severity: WARN
+    metric: aufenthalt_nach_austritt_missing
+    operator: is_true
+    value: true
+    message: "SpiGes: Aufenthalt nach Austritt fehlt"
+    explanation: "Aufenthalt nach Austritt (3.5.V02) ist nicht erfasst."
+
+  - id: SPIGES_BEHANDLUNG_NACH_AUSTRITT_MISSING
+    category: completeness
+    severity: WARN
+    metric: behandlung_nach_austritt_missing
+    operator: is_true
+    value: true
+    message: "SpiGes: Behandlung nach Austritt fehlt"
+    explanation: "Behandlung nach Austritt (3.5.V03) ist nicht erfasst."
+
+  - id: SPIGES_BEHANDLUNGSBEREICH_MISSING
+    category: completeness
+    severity: WARN
+    metric: behandlungsbereich_missing
+    operator: is_true
+    value: true
+    message: "SpiGes: Behandlungsbereich fehlt"
+    explanation: "Behandlungsbereich (3.5.V04) ist nicht erfasst."
+
+  # ==========================================================================
+  # FU – Fürsorgerische Unterbringung (v4)
+  # ==========================================================================
+
+  - id: FU_MISSING
+    category: completeness
+    severity: CRITICAL
+    metric: fu_missing
+    operator: is_true
+    value: true
+    message: "FU bei Eintritt nicht dokumentiert"
+    explanation: "Patient ist nicht freiwillig aufgenommen, aber FU bei Eintritt (3.3.V03) ist nicht dokumentiert."
+
+  - id: FU_EXPIRING_SOON
+    category: medical
+    severity: WARN
+    metric: fu_expiring_soon
+    operator: is_true
+    value: true
+    message: "FU läuft in ≤7 Tagen ab"
+    explanation: "Die ärztliche FU läuft in weniger als 7 Tagen ab. Verlängerung oder KESB-Antrag prüfen."
+
+  - id: FU_EXPIRED
+    category: medical
+    severity: CRITICAL
+    metric: fu_expired
+    operator: is_true
+    value: true
+    message: "FU abgelaufen!"
+    explanation: "Die FU-Gültigkeitsdauer ist überschritten. Sofortige Klärung erforderlich (Art. 429 ZGB)."
+
+  # ==========================================================================
+  # Langlieger (v4)
+  # ==========================================================================
+
+  - id: LANGLIEGER_WARN
+    category: medical
+    severity: WARN
+    metric: langlieger_warn
+    operator: is_true
+    value: true
+    message: "Langlieger-Warnung (≥25 Tage)"
+    explanation: "Patient ist seit ≥25 Tagen stationär. Überprüfung der Aufenthaltsdauer empfohlen."
+
+  - id: LANGLIEGER_CRITICAL
+    category: medical
+    severity: CRITICAL
+    metric: langlieger_critical
+    operator: is_true
+    value: true
+    message: "Langlieger (≥28 Tage)"
+    explanation: "Patient ist seit ≥28 Tagen (4 Wochen) stationär. Eskaliert alle 2 Wochen."
+
+  # ==========================================================================
+  # SpiGes Behandlungsdaten MP 3.4 (v5)
+  # ==========================================================================
+
+  - id: SPIGES_BEHANDLUNG_TYP_MISSING
+    category: completeness
+    severity: WARN
+    metric: behandlung_typ_missing
+    operator: is_true
+    value: true
+    message: "Behandlungstyp fehlt (MP 3.4.V02)"
+    explanation: "BFS-Variable Behandlungstyp ist nicht ausgefüllt."
+
+  - id: SPIGES_PSYCHOPHARMAKA_MISSING
+    category: completeness
+    severity: WARN
+    metric: psychopharmaka_missing
+    operator: is_true
+    value: true
+    message: "Psychopharmaka nicht dokumentiert (MP 3.4.V03-V13)"
+    explanation: "Keines der 11 Psychopharmaka-Felder (V03-V13) ist ausgefüllt. Mindestens 1 Feld muss beantwortet sein."
+
+  # ==========================================================================
+  # MB Minimaldaten (v5)
+  # ==========================================================================
+
+  - id: MB_EINTRITTSART_MISSING
+    category: completeness
+    severity: WARN
+    metric: eintrittsart_missing
+    operator: is_true
+    value: true
+    message: "Eintrittsart fehlt (MB 1.2.V03)"
+    explanation: "BFS-Minimaldaten-Variable Eintrittsart (Notfall/geplant/intern) ist nicht ausgefüllt."
+
+  - id: MB_KLASSE_MISSING
+    category: completeness
+    severity: WARN
+    metric: klasse_missing
+    operator: is_true
+    value: true
+    message: "Klasse fehlt (MB 1.3.V02)"
+    explanation: "BFS-Minimaldaten-Variable Klasse (allgemein/halbprivat/privat) ist nicht ausgefüllt."

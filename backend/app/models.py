@@ -75,6 +75,9 @@ class Ack(Base):
     action: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     shift_code: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # "a"|"b"|"c"
 
+    # Langlieger: ACK gilt bis zu diesem Datum (nächste Schwelle)
+    ack_valid_until: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # ISO date
+
 
 # Klasse: AckEvent – strukturiert Daten/Logik (z.B. Modelle, Services).
 class AckEvent(Base):
@@ -365,6 +368,53 @@ class Case(Base):
 
     # --- Allergien ---
     allergies_recorded: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+
+    # --- SpiGes / BFS Psychiatrie-Zusatzdaten (MP-Zeile) ---
+    # Personendaten (MP 3.2)
+    zivilstand: Mapped[Optional[str]] = mapped_column(String, nullable=True)           # 3.2.V01
+    aufenthaltsort_vor_eintritt: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # 3.2.V02
+    beschaeftigung_teilzeit: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 3.2.V03
+    beschaeftigung_vollzeit: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 3.2.V04
+    beschaeftigung_arbeitslos: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 3.2.V05
+    beschaeftigung_haushalt: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 3.2.V06
+    beschaeftigung_ausbildung: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 3.2.V07
+    beschaeftigung_reha: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 3.2.V08
+    beschaeftigung_iv: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 3.2.V09
+    schulbildung: Mapped[Optional[str]] = mapped_column(String, nullable=True)           # 3.2.V10
+    # Eintrittsmerkmale (MP 3.3)
+    einweisende_instanz: Mapped[Optional[str]] = mapped_column(String, nullable=True)   # 3.3.V01
+    behandlungsgrund: Mapped[Optional[str]] = mapped_column(String, nullable=True)       # 3.3.V02
+    # Austrittsmerkmale (MP 3.5, nur bei Austritt)
+    entscheid_austritt: Mapped[Optional[str]] = mapped_column(String, nullable=True)     # 3.5.V01
+    aufenthalt_nach_austritt: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # 3.5.V02
+    behandlung_nach_austritt: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # 3.5.V03
+    behandlungsbereich: Mapped[Optional[str]] = mapped_column(String, nullable=True)     # 3.5.V04
+
+    # --- FU (Fürsorgerische Unterbringung) ---
+    fu_bei_eintritt: Mapped[Optional[str]] = mapped_column(String, nullable=True)   # BFS 3.3.V03
+    fu_typ: Mapped[Optional[str]] = mapped_column(String, nullable=True)            # "aerztlich" | "kesb"
+    fu_datum: Mapped[Optional[str]] = mapped_column(String, nullable=True)          # ISO date
+    fu_gueltig_bis: Mapped[Optional[str]] = mapped_column(String, nullable=True)    # ISO date (Ablauf)
+    fu_nummer: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)        # Laufnummer (Erneuerungen)
+    fu_einweisende_instanz: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    # SpiGes Behandlungsdaten (MP 3.4)
+    behandlung_typ: Mapped[Optional[str]] = mapped_column(String, nullable=True)       # 3.4.V02 Behandlung
+    neuroleptika: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)         # 3.4.V03 1=ja/2=nein
+    depotneuroleptika: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)    # 3.4.V04
+    antidepressiva: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)       # 3.4.V05
+    tranquilizer: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)         # 3.4.V06
+    hypnotika: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)            # 3.4.V07
+    psychostimulanzien: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)   # 3.4.V08
+    suchtaversionsmittel: Mapped[Optional[int]] = mapped_column(Integer, nullable=True) # 3.4.V09
+    lithium: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)              # 3.4.V10
+    antiepileptika: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)       # 3.4.V11
+    andere_psychopharmaka: Mapped[Optional[int]] = mapped_column(Integer, nullable=True) # 3.4.V12
+    keine_psychopharmaka: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 3.4.V13
+
+    # MB Minimaldaten (Konsistenz-Checks)
+    eintrittsart: Mapped[Optional[str]] = mapped_column(String, nullable=True)          # 1.2.V03
+    klasse: Mapped[Optional[str]] = mapped_column(String, nullable=True)                # 1.3.V02
 
     # Metadata
     imported_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)

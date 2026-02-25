@@ -26,6 +26,38 @@ export interface ParameterStatus {
   group: "completeness" | "medical";
   status: "ok" | "warn" | "critical" | "na";
   detail: string | null;
+  // Alert-Mapping (v5)
+  rule_id?: string | null;
+  explanation?: string | null;
+  condition_hash?: string | null;
+  // ACK/SHIFT status (injected by router)
+  ack?: { state: "ACK" | "SHIFT"; ts: string; shift_code?: string | null } | null;
+}
+
+export interface ParameterGroup {
+  key: string;
+  label: string;
+  severity: Severity;
+  items: ParameterStatus[];
+}
+
+export interface LangliegerStatus {
+  active: boolean;
+  severity: Severity;
+  days: number;
+  week?: number | null;
+  message?: string | null;
+  next_threshold?: number | null;
+}
+
+export interface FuStatus {
+  is_fu: boolean;
+  fu_typ?: string | null;
+  fu_datum?: string | null;
+  fu_gueltig_bis?: string | null;
+  days_until_expiry?: number | null;
+  severity: Severity;
+  message?: string | null;
 }
 
 export interface CaseSummary {
@@ -52,6 +84,9 @@ export interface CaseSummary {
   responsible_person?: string | null;
   acked_at?: string | null;
   parameter_status?: ParameterStatus[];
+  // v4
+  days_since_admission?: number;
+  langlieger?: LangliegerStatus | null;
 }
 
 export interface CaseDetail extends CaseSummary {
@@ -61,6 +96,9 @@ export interface CaseDetail extends CaseSummary {
   alerts: Alert[];
   // rule_id -> Status der Einzelmeldung für *heute*
   rule_states: Record<string, { state: "ACK" | "SHIFT"; ts: string; shift_code?: "a" | "b" | "c" | null }>;
+  // v4: Hierarchische Parametergruppen + FU
+  parameter_groups?: ParameterGroup[];
+  fu_status?: FuStatus | null;
 }
 
 export interface DayState {
