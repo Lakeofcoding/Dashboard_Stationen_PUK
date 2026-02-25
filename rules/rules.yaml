@@ -240,3 +240,25 @@ rules:
     value: true
     message: "Allergien nicht erfasst (>7 Tage)"
     explanation: "Eintritt vor >7 Tagen, Allergien sind noch nicht dokumentiert."
+
+  # ==========================================================================
+  # Dokumentationsabschluss nach Austritt (completeness)
+  # ==========================================================================
+
+  - id: DOC_COMPLETION_WARN
+    category: completeness
+    severity: WARN
+    metric: doc_completion_warn
+    operator: is_true
+    value: true
+    message: "Dokumentation nach Austritt noch offen"
+    explanation: "Der Fall wurde entlassen, die Dokumentation ist aber noch nicht abgeschlossen. Frist: 10 Tage nach Austritt."
+
+  - id: DOC_COMPLETION_OVERDUE
+    category: completeness
+    severity: CRITICAL
+    metric: doc_completion_overdue
+    operator: is_true
+    value: true
+    message: "Dokumentation überfällig (≥10 Tage nach Austritt)"
+    explanation: "Die 10-Tages-Frist für den Dokumentationsabschluss nach Austritt ist überschritten."

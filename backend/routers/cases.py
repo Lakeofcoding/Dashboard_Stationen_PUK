@@ -100,6 +100,12 @@ def list_cases(
 
         severity, top_alert, critical_count, warn_count = summarize_severity(visible_alerts)
 
+        # Per-category severity
+        comp_alerts = [a for a in visible_alerts if a.category == "completeness"]
+        med_alerts = [a for a in visible_alerts if a.category == "medical"]
+        comp_sev, _, comp_cc, comp_wc = summarize_severity(comp_alerts)
+        med_sev, _, med_cc, med_wc = summarize_severity(med_alerts)
+
         out.append(
             CaseSummary(
                 case_id=c["case_id"],
@@ -113,6 +119,14 @@ def list_cases(
                 top_alert=top_alert,
                 critical_count=critical_count,
                 warn_count=warn_count,
+                completeness_severity=comp_sev,
+                completeness_critical=comp_cc,
+                completeness_warn=comp_wc,
+                medical_severity=med_sev,
+                medical_critical=med_cc,
+                medical_warn=med_wc,
+                case_status=c.get("case_status"),
+                responsible_person=c.get("responsible_person"),
                 acked_at=case_level_acked_at.get(c["case_id"]),
                 parameter_status=build_parameter_status(c),
             )
@@ -195,6 +209,12 @@ def get_case(
     visible_alerts = [a for a in raw_alerts if a.rule_id not in rule_states]
     severity, top_alert, critical_count, warn_count = summarize_severity(visible_alerts)
 
+    # Per-category severity
+    comp_alerts = [a for a in visible_alerts if a.category == "completeness"]
+    med_alerts = [a for a in visible_alerts if a.category == "medical"]
+    comp_sev, _, comp_cc, comp_wc = summarize_severity(comp_alerts)
+    med_sev, _, med_cc, med_wc = summarize_severity(med_alerts)
+
     return CaseDetail(
         case_id=c["case_id"],
         patient_id=c["patient_id"],
@@ -207,6 +227,14 @@ def get_case(
         top_alert=top_alert,
         critical_count=critical_count,
         warn_count=warn_count,
+        completeness_severity=comp_sev,
+        completeness_critical=comp_cc,
+        completeness_warn=comp_wc,
+        medical_severity=med_sev,
+        medical_critical=med_cc,
+        medical_warn=med_wc,
+        case_status=c.get("case_status"),
+        responsible_person=c.get("responsible_person"),
         acked_at=acked_at,
         parameter_status=build_parameter_status(c),
         honos=c.get("honos_entry_total"),

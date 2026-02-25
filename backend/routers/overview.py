@@ -46,6 +46,10 @@ def station_overview(
         station_critical = 0
         station_warn = 0
         station_ok = 0
+        comp_crit = 0
+        comp_warn_n = 0
+        med_crit = 0
+        med_warn_n = 0
 
         for c in cases:
             alerts = evaluate_alerts(c)
@@ -56,6 +60,19 @@ def station_overview(
                 station_warn += 1
             else:
                 station_ok += 1
+            # Per-category: count cases with category-specific issues
+            comp_alerts = [a for a in alerts if a.category == "completeness"]
+            med_alerts = [a for a in alerts if a.category == "medical"]
+            c_sev, _, _, _ = summarize_severity(comp_alerts)
+            m_sev, _, _, _ = summarize_severity(med_alerts)
+            if c_sev == "CRITICAL":
+                comp_crit += 1
+            elif c_sev == "WARN":
+                comp_warn_n += 1
+            if m_sev == "CRITICAL":
+                med_crit += 1
+            elif m_sev == "WARN":
+                med_warn_n += 1
 
         if station_critical > 0:
             worst = "CRITICAL"
@@ -63,6 +80,9 @@ def station_overview(
             worst = "WARN"
         else:
             worst = "OK"
+
+        def _sev(c, w):
+            return "CRITICAL" if c > 0 else "WARN" if w > 0 else "OK"
 
         result.append(StationOverviewItem(
             station_id=sid,
@@ -74,6 +94,12 @@ def station_overview(
             warn_count=station_warn,
             ok_count=station_ok,
             severity=worst,
+            completeness_critical=comp_crit,
+            completeness_warn=comp_warn_n,
+            completeness_severity=_sev(comp_crit, comp_warn_n),
+            medical_critical=med_crit,
+            medical_warn=med_warn_n,
+            medical_severity=_sev(med_crit, med_warn_n),
         ))
 
     return result

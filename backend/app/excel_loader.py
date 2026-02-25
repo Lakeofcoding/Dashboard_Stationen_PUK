@@ -199,7 +199,15 @@ def _load_cases_from_excel() -> list[dict]:
             "troponin_last_date": None, "cbc_last_date": None,
             "emergency_bem_start_date": None, "emergency_med_start_date": None,
             "allergies_recorded": True,
+            # Fallstatus & Verantwortlichkeit (v3)
+            "case_status": _to_str(r.get("Fallstatus")),
+            "responsible_person": _to_str(r.get("Fallführende Person")),
         }
+
+    # ─── Fallback: Auto-Ableitung falls Excel-Spalten leer ───
+    for fnr, c in cases_by_fnr.items():
+        if not c.get("case_status"):
+            c["case_status"] = "Fall offen" if c["discharge_date"] is None else "Dokumentation abgeschlossen"
 
     # ─── Clozapin (Snapshot-Werte fuer Rule-Engine) ───
     try:

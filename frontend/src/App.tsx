@@ -163,6 +163,7 @@ async function apiJson<T>(path: string, init: RequestInit): Promise<T> {
 }
 
 type ViewMode = "overview" | "cases" | "report" | "monitoring" | "admin";
+type CategoryFilter = "all" | "completeness" | "medical";
 
 type StationOverviewItem = {
   station_id: string;
@@ -174,6 +175,13 @@ type StationOverviewItem = {
   warn_count: number;
   ok_count: number;
   severity: Severity;
+  // Per-category
+  completeness_critical?: number;
+  completeness_warn?: number;
+  completeness_severity?: Severity;
+  medical_critical?: number;
+  medical_warn?: number;
+  medical_severity?: Severity;
 };
 
 async function fetchOverview(auth: AuthState): Promise<StationOverviewItem[]> {
@@ -330,6 +338,7 @@ export default function App() {
   }, []);
 
   const [viewMode, setViewMode] = useState<ViewMode>("overview");
+  const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>("all");
   const [dayState, setDayState] = useState<DayState | null>(null);
   const [cases, setCases] = useState<CaseSummary[]>([]);
   const [overview, setOverview] = useState<StationOverviewItem[]>([]);
@@ -479,9 +488,18 @@ export default function App() {
   const aggregate = (items: StationOverviewItem[]): AggItem => {
     const total = items.reduce((s, i) => s + i.total_cases, 0);
     const open = items.reduce((s, i) => s + i.open_cases, 0);
-    const critical = items.reduce((s, i) => s + i.critical_count, 0);
-    const warn = items.reduce((s, i) => s + i.warn_count, 0);
-    const ok = items.reduce((s, i) => s + i.ok_count, 0);
+    // Use per-category counts when filtered
+    const critical = items.reduce((s, i) => s + (
+      categoryFilter === "completeness" ? (i.completeness_critical ?? i.critical_count)
+      : categoryFilter === "medical" ? (i.medical_critical ?? i.critical_count)
+      : i.critical_count
+    ), 0);
+    const warn = items.reduce((s, i) => s + (
+      categoryFilter === "completeness" ? (i.completeness_warn ?? i.warn_count)
+      : categoryFilter === "medical" ? (i.medical_warn ?? i.warn_count)
+      : i.warn_count
+    ), 0);
+    const ok = total - critical - warn;
     const severity: Severity = critical > 0 ? "CRITICAL" : warn > 0 ? "WARN" : "OK";
     return { total, open, closed: total - open, critical, warn, ok, severity };
   };
@@ -646,6 +664,36 @@ export default function App() {
       {metaError ? <div style={{ padding: "10px 16px", color: "#666", background: "#fff", borderBottom: "1px solid #eee" }}>{metaError}</div> : null}
       {error && <div style={{ padding: "10px 16px", color: "#b42318", background: "#fff", borderBottom: "1px solid #eee" }}>Fehler: {error}</div>}
 
+      {/* ═══ Kategorie-Filter (Dokumentation / Klinisch / Alle) ═══ */}
+      {viewMode !== "admin" && (
+        <div style={{ padding: "6px 20px", background: "#f9fafb", borderBottom: "1px solid #e5e7eb", display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 12, color: "#6b7280", marginRight: 4 }}>Ansicht:</span>
+          {([
+            { key: "all" as CategoryFilter, label: "Alle", icon: "⊞" },
+            { key: "completeness" as CategoryFilter, label: "Dokumentation", icon: "📋" },
+            { key: "medical" as CategoryFilter, label: "Klinisch", icon: "🩺" },
+          ]).map((f) => {
+            const active = categoryFilter === f.key;
+            return (
+              <button
+                key={f.key}
+                onClick={() => setCategoryFilter(f.key)}
+                style={{
+                  padding: "4px 12px", fontSize: 12, fontWeight: active ? 700 : 500, borderRadius: 6,
+                  background: active ? (f.key === "completeness" ? "#dbeafe" : f.key === "medical" ? "#fce7f3" : "#e5e7eb") : "transparent",
+                  color: active ? (f.key === "completeness" ? "#1d4ed8" : f.key === "medical" ? "#be185d" : "#374151") : "#6b7280",
+                  border: active ? "1px solid" : "1px solid transparent",
+                  borderColor: active ? (f.key === "completeness" ? "#93c5fd" : f.key === "medical" ? "#f9a8d4" : "#d1d5db") : "transparent",
+                  cursor: "pointer", transition: "all 0.15s",
+                }}
+              >
+                <span style={{ marginRight: 4 }}>{f.icon}</span>{f.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       {/* ═══ MAIN CONTENT ═══ */}
       <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
 
@@ -791,14 +839,17 @@ export default function App() {
                     Stationen – {drillCenter}
                   </h2>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 14 }}>
-                    {stationItems.map((s) => (
+                    {stationItems.map((s) => {
+                      const eSev = categoryFilter === "completeness" ? (s.completeness_severity ?? s.severity)
+                        : categoryFilter === "medical" ? (s.medical_severity ?? s.severity) : s.severity;
+                      return (
                       <div
                         key={s.station_id}
                         onClick={() => { updateAuth({ stationId: s.station_id }); setViewMode("cases"); }}
                         style={{
                           padding: 16, borderRadius: 10,
-                          background: severityColor(s.severity),
-                          border: `2px solid ${severityBorderColor(s.severity)}`,
+                          background: severityColor(eSev),
+                          border: `2px solid ${severityBorderColor(eSev)}`,
                           cursor: "pointer", transition: "transform 0.15s, box-shadow 0.15s",
                         }}
                         onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.transform = "translateY(-2px)"; (e.currentTarget as HTMLElement).style.boxShadow = "0 4px 16px rgba(0,0,0,0.1)"; }}
@@ -811,11 +862,11 @@ export default function App() {
                           </div>
                           <div style={{
                             width: 36, height: 36, borderRadius: "50%",
-                            background: s.severity === "CRITICAL" ? "#ef4444" : s.severity === "WARN" ? "#f59e0b" : "#22c55e",
+                            background: eSev === "CRITICAL" ? "#ef4444" : eSev === "WARN" ? "#f59e0b" : "#22c55e",
                             display: "flex", alignItems: "center", justifyContent: "center",
                             color: "#fff", fontWeight: 800, fontSize: 15,
                           }}>
-                            {s.severity === "CRITICAL" ? "!" : s.severity === "WARN" ? "⚠" : "✓"}
+                            {eSev === "CRITICAL" ? "!" : eSev === "WARN" ? "⚠" : "✓"}
                           </div>
                         </div>
                         <div style={{ display: "flex", gap: 12, fontSize: 12, color: "#374151" }}>
@@ -828,7 +879,8 @@ export default function App() {
                           {s.critical_count === 0 && s.warn_count === 0 && <span style={{ fontSize: 11, background: "#22c55e", color: "#fff", padding: "2px 8px", borderRadius: 999, fontWeight: 700 }}>OK</span>}
                         </div>
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </>
               )}
@@ -845,6 +897,7 @@ export default function App() {
                 cases={cases}
                 selectedCaseId={selectedCaseId}
                 onSelectCase={setSelectedCaseId}
+                parameterFilter={categoryFilter}
               />
             </div>
             {/* Right: detail panel */}
@@ -857,6 +910,7 @@ export default function App() {
                   canAck={canAck}
                   shiftByAlert={shiftByAlert}
                   shiftReasons={shiftReasons}
+                  categoryFilter={categoryFilter}
                   onSetShift={setShift}
                   onAckRule={async (caseId, ruleId) => {
                     await ackRule(caseId, ruleId, auth);
@@ -884,6 +938,7 @@ export default function App() {
                 cases={cases}
                 onSelectCase={(id) => { setSelectedCaseId(id); setViewMode("cases"); }}
                 authHeaders={authHeaders(auth) as Record<string, string>}
+                categoryFilter={categoryFilter}
               />
             </div>
           </div>
@@ -930,13 +985,21 @@ interface DetailPanelProps {
   canAck: boolean;
   shiftByAlert: Record<string, string>;
   shiftReasons: ShiftReason[];
+  categoryFilter: "all" | "completeness" | "medical";
   onSetShift: (caseId: string, ruleId: string, value: string) => void;
   onAckRule: (caseId: string, ruleId: string) => Promise<void>;
   onShiftRule: (caseId: string, ruleId: string, shiftVal: string) => Promise<void>;
   onError: (msg: string) => void;
 }
 
-function DetailPanel({ detail, canAck, shiftByAlert, shiftReasons, onSetShift, onAckRule, onShiftRule, onError }: DetailPanelProps) {
+function DetailPanel({ detail, canAck, shiftByAlert, shiftReasons, categoryFilter, onSetShift, onAckRule, onShiftRule, onError }: DetailPanelProps) {
+  const filteredAlerts = categoryFilter === "all"
+    ? detail.alerts
+    : detail.alerts.filter(a => a.category === categoryFilter);
+  const filteredParams = categoryFilter === "all"
+    ? (detail.parameter_status ?? [])
+    : (detail.parameter_status ?? []).filter(p => p.group === categoryFilter);
+
   return (
     <div style={{ maxWidth: 980 }}>
       {/* Header */}
@@ -960,6 +1023,12 @@ function DetailPanel({ detail, canAck, shiftByAlert, shiftReasons, onSetShift, o
           <div style={{ fontSize: 12, color: detail.discharge_date ? "#374151" : "#2563eb", fontWeight: detail.discharge_date ? 400 : 600 }}>
             <strong>Austritt:</strong> {detail.discharge_date ?? "Offener Fall"}
           </div>
+          {detail.case_status && (
+            <div style={{ fontSize: 12, marginTop: 2 }}><strong>Status:</strong> {detail.case_status}</div>
+          )}
+          {detail.responsible_person && (
+            <div style={{ fontSize: 12, marginTop: 2 }}><strong>Fallführung:</strong> {detail.responsible_person}</div>
+          )}
         </div>
         <div style={{ padding: 10, borderRadius: 8, background: "#f9fafb", border: "1px solid #e5e7eb" }}>
           <div style={{ fontSize: 10, color: "#6b7280", fontWeight: 600, textTransform: "uppercase", marginBottom: 4 }}>Scores</div>
@@ -974,22 +1043,29 @@ function DetailPanel({ detail, canAck, shiftByAlert, shiftReasons, onSetShift, o
       </div>
 
       {/* Parameter Status */}
-      {detail.parameter_status && detail.parameter_status.length > 0 && (
+      {filteredParams.length > 0 && (
         <div style={{ marginBottom: 14, padding: 12, borderRadius: 8, background: "#fff", border: "1px solid #e5e7eb" }}>
           <div style={{ fontSize: 12, fontWeight: 700, color: "#374151", marginBottom: 6 }}>Parameter-Übersicht</div>
-          <ParameterBar parameters={detail.parameter_status} compact={false} showGroupLabels={true} />
+          <ParameterBar parameters={filteredParams} compact={false} showGroupLabels={categoryFilter === "all"} />
         </div>
       )}
 
       {/* Alerts */}
-      <h3 style={{ margin: "0 0 8px 0", fontSize: "0.95rem" }}>Alerts</h3>
-      {detail.alerts.length === 0 ? (
+      <h3 style={{ margin: "0 0 8px 0", fontSize: "0.95rem" }}>
+        Alerts
+        {categoryFilter !== "all" && (
+          <span style={{ fontSize: 12, fontWeight: 400, color: "#6b7280", marginLeft: 8 }}>
+            ({categoryFilter === "completeness" ? "📋 Dokumentation" : "🩺 Klinisch"})
+          </span>
+        )}
+      </h3>
+      {filteredAlerts.length === 0 ? (
         <div style={{ color: "#16a34a", padding: 14, background: "#f0fdf4", borderRadius: 8, fontSize: 13 }}>
           ✓ Keine offenen Alerts.
         </div>
       ) : (
         <div style={{ display: "grid", gap: 8 }}>
-          {detail.alerts.map((a) => {
+          {filteredAlerts.map((a) => {
             const key = `${detail.case_id}::${a.rule_id}`;
             const shiftVal = shiftByAlert[key] ?? "";
             return (

@@ -41,6 +41,16 @@ class CaseSummary(BaseModel):
     top_alert: Optional[str] = None
     critical_count: int = 0
     warn_count: int = 0
+    # Severity pro Kategorie (fuer gefilterte Ansicht)
+    completeness_severity: Severity = "OK"
+    completeness_critical: int = 0
+    completeness_warn: int = 0
+    medical_severity: Severity = "OK"
+    medical_critical: int = 0
+    medical_warn: int = 0
+    # Fallstatus & Verantwortlichkeit
+    case_status: Optional[str] = None
+    responsible_person: Optional[str] = None
     acked_at: Optional[str] = None
     parameter_status: list[ParameterStatus] = Field(default_factory=list)
 
@@ -148,6 +158,13 @@ class StationOverviewItem(BaseModel):
     warn_count: int = 0
     ok_count: int = 0
     severity: Severity = "OK"
+    # Per-category
+    completeness_critical: int = 0
+    completeness_warn: int = 0
+    completeness_severity: Severity = "OK"
+    medical_critical: int = 0
+    medical_warn: int = 0
+    medical_severity: Severity = "OK"
 
 class NotificationRuleCreate(BaseModel):
     name: str

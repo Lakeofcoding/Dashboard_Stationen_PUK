@@ -40,6 +40,16 @@ export interface CaseSummary {
   top_alert?: string | null;
   critical_count?: number;
   warn_count?: number;
+  // Per-category severity
+  completeness_severity?: Severity;
+  completeness_critical?: number;
+  completeness_warn?: number;
+  medical_severity?: Severity;
+  medical_critical?: number;
+  medical_warn?: number;
+  // Fallstatus & Verantwortlichkeit
+  case_status?: string | null;
+  responsible_person?: string | null;
   acked_at?: string | null;
   parameter_status?: ParameterStatus[];
 }

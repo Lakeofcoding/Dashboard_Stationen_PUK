@@ -31,7 +31,7 @@ Hinweis:
 
 from typing import Optional
 
-from sqlalchemy import Boolean, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -320,10 +320,10 @@ class Case(Base):
     honos_discharge_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     honos_discharge_suicidality: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
-    # BSCL
-    bscl_total_entry: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # BSCL (Durchschnittswerte 0.0–4.0 → Float)
+    bscl_total_entry: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     bscl_entry_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    bscl_total_discharge: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    bscl_total_discharge: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     bscl_discharge_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     bscl_discharge_suicidality: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
@@ -331,6 +331,10 @@ class Case(Base):
     bfs_1: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     bfs_2: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     bfs_3: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    # Fallstatus & Verantwortlichkeit
+    case_status: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # "Fall offen", "Dokumentation offen", "Dokumentation abgeschlossen"
+    responsible_person: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # Fallführende Person
 
     # Isolation (JSON-encoded list)
     isolations_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

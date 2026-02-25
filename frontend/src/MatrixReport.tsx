@@ -16,19 +16,34 @@ interface ColDef {
   short: string;
 }
 
-const GROUPS: { key: string; label: string; icon: string; cols: ColDef[] }[] = [
+const GROUPS: { key: string; category: "completeness" | "medical"; label: string; icon: string; cols: ColDef[] }[] = [
   {
     key: "scores",
+    category: "completeness",
     label: "Scores",
     icon: "📊",
     cols: [
       { id: "honos_entry", label: "HoNOS Eintritt", short: "HoNOS ET" },
       { id: "honos_discharge", label: "HoNOS Austritt", short: "HoNOS AT" },
       { id: "bscl_entry", label: "BSCL Eintritt", short: "BSCL ET" },
+      { id: "bscl_discharge", label: "BSCL Austritt", short: "BSCL AT" },
+    ],
+  },
+  {
+    key: "documentation",
+    category: "completeness",
+    label: "Dokumentation",
+    icon: "📋",
+    cols: [
+      { id: "bfs", label: "BFS", short: "BFS" },
+      { id: "sdep", label: "SDEP", short: "SDEP" },
+      { id: "treatment_plan", label: "Behandlungsplan", short: "BehPl" },
+      { id: "doc_completion", label: "Dok.Abschluss", short: "Dok.A" },
     ],
   },
   {
     key: "monitoring",
+    category: "medical",
     label: "Klinisches Monitoring",
     icon: "🩺",
     cols: [
@@ -38,16 +53,6 @@ const GROUPS: { key: string; label: string; icon: string; cols: ColDef[] }[] = [
       { id: "notfall_bem", label: "Notfall-BEM", short: "NotfB" },
       { id: "notfall_med", label: "Notfall-Med", short: "NotfM" },
       { id: "isolation", label: "Isolation", short: "Iso." },
-    ],
-  },
-  {
-    key: "documentation",
-    label: "Dokumentation",
-    icon: "📋",
-    cols: [
-      { id: "bfs", label: "BFS", short: "BFS" },
-      { id: "sdep", label: "SDEP", short: "SDEP" },
-      { id: "treatment_plan", label: "Behandlungsplan", short: "BehPl" },
       { id: "allergies", label: "Allergien", short: "Allg." },
     ],
   },
@@ -89,9 +94,15 @@ interface Props {
   cases: CaseSummary[];
   onSelectCase: (caseId: string) => void;
   authHeaders: Record<string, string>;
+  categoryFilter?: "all" | "completeness" | "medical";
 }
 
-export default function MatrixReport({ cases, onSelectCase, authHeaders }: Props) {
+export default function MatrixReport({ cases, onSelectCase, authHeaders, categoryFilter = "all" }: Props) {
+  const visibleGroups = useMemo(() => {
+    if (categoryFilter === "all") return GROUPS;
+    return GROUPS.filter(g => g.category === categoryFilter);
+  }, [categoryFilter]);
+  const visibleColIds = useMemo(() => visibleGroups.flatMap(g => g.cols.map(c => c.id)), [visibleGroups]);
   const [hoveredCell, setHoveredCell] = useState<{ caseId: string; colId: string } | null>(null);
   const [filterStatus, setFilterStatus] = useState<"all" | "critical" | "warn" | "issues">("all");
 
@@ -110,12 +121,12 @@ export default function MatrixReport({ cases, onSelectCase, authHeaders }: Props
   /* Summary-Zähler pro Spalte */
   const colCounts = useMemo(() => {
     const counts: Record<string, { ok: number; warn: number; critical: number }> = {};
-    for (const colId of ALL_COL_IDS) {
+    for (const colId of visibleColIds) {
       counts[colId] = { ok: 0, warn: 0, critical: 0 };
     }
     for (const c of cases) {
       const params = c.parameter_status ?? [];
-      for (const colId of ALL_COL_IDS) {
+      for (const colId of visibleColIds) {
         const p = getParamStatus(params, colId);
         if (p && p.status in counts[colId]) {
           counts[colId][p.status as "ok" | "warn" | "critical"]++;
@@ -123,16 +134,16 @@ export default function MatrixReport({ cases, onSelectCase, authHeaders }: Props
       }
     }
     return counts;
-  }, [cases]);
+  }, [cases, visibleColIds]);
 
   const totalIssues = useMemo(() => {
     let crit = 0, warn = 0;
-    for (const c of ALL_COL_IDS) {
-      crit += colCounts[c].critical;
-      warn += colCounts[c].warn;
+    for (const c of visibleColIds) {
+      crit += colCounts[c]?.critical ?? 0;
+      warn += colCounts[c]?.warn ?? 0;
     }
     return { crit, warn };
-  }, [colCounts]);
+  }, [colCounts, visibleColIds]);
 
   return (
     <div>
@@ -205,7 +216,7 @@ export default function MatrixReport({ cases, onSelectCase, authHeaders }: Props
             <tr style={{ background: "#f9fafb" }}>
               <th style={{ ...thStyle, width: 90, borderRight: "2px solid #e5e7eb" }} rowSpan={2}>Fall-Nr.</th>
               <th style={{ ...thStyle, width: 50, borderRight: "2px solid #e5e7eb" }} rowSpan={2}>St.</th>
-              {GROUPS.map((g) => (
+              {visibleGroups.map((g) => (
                 <th
                   key={g.key}
                   colSpan={g.cols.length}
@@ -223,7 +234,7 @@ export default function MatrixReport({ cases, onSelectCase, authHeaders }: Props
             </tr>
             {/* Spaltenheader */}
             <tr style={{ background: "#f9fafb" }}>
-              {GROUPS.map((g) =>
+              {visibleGroups.map((g) =>
                 g.cols.map((col, i) => (
                   <th
                     key={col.id}
@@ -247,7 +258,7 @@ export default function MatrixReport({ cases, onSelectCase, authHeaders }: Props
           <tbody>
             {filteredCases.length === 0 ? (
               <tr>
-                <td colSpan={2 + ALL_COL_IDS.length} style={{ padding: 24, textAlign: "center", color: "#9ca3af" }}>
+                <td colSpan={2 + visibleColIds.length} style={{ padding: 24, textAlign: "center", color: "#9ca3af" }}>
                   Keine Fälle mit diesem Filter.
                 </td>
               </tr>
@@ -268,7 +279,7 @@ export default function MatrixReport({ cases, onSelectCase, authHeaders }: Props
                     <td style={{ padding: "8px 6px", fontSize: 11, fontWeight: 600, borderRight: "2px solid #e5e7eb" }}>
                       {c.station_id}
                     </td>
-                    {GROUPS.map((g) =>
+                    {visibleGroups.map((g) =>
                       g.cols.map((col, i) => {
                         const p = getParamStatus(params, col.id);
                         const status = p?.status ?? "na";
@@ -341,7 +352,7 @@ export default function MatrixReport({ cases, onSelectCase, authHeaders }: Props
               <td colSpan={2} style={{ padding: "8px 8px", fontSize: 11, borderRight: "2px solid #e5e7eb", color: "#6b7280" }}>
                 Σ ({filteredCases.length} Fälle)
               </td>
-              {GROUPS.map((g) =>
+              {visibleGroups.map((g) =>
                 g.cols.map((col, i) => {
                   const cnt = colCounts[col.id] ?? { ok: 0, warn: 0, critical: 0 };
                   const issues = cnt.critical + cnt.warn;

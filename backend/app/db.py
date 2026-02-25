@@ -101,3 +101,6 @@ def _ensure_schema() -> None:
         safe_add(conn, "case_data", "emergency_bem_start_date")
         safe_add(conn, "case_data", "emergency_med_start_date")
         safe_add(conn, "case_data", "allergies_recorded", "BOOLEAN")
+        # Fallstatus & Verantwortlichkeit (v3)
+        safe_add(conn, "case_data", "case_status")
+        safe_add(conn, "case_data", "responsible_person")

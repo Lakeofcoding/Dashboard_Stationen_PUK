@@ -49,6 +49,15 @@ def build_parameter_status(c: dict) -> list[dict]:
     elif is_active:
         params.append({"id": "bscl_entry", "label": "BSCL ET", "group": "completeness", "status": "warn", "detail": "Nicht erfasst"})
 
+    if discharge is not None:
+        bscl_d = c.get("bscl_total_discharge")
+        if bscl_d is not None:
+            params.append({"id": "bscl_discharge", "label": "BSCL AT", "group": "completeness", "status": "ok", "detail": f"Score: {bscl_d}"})
+        elif derived.get("bscl_discharge_missing_over_3d_after_discharge"):
+            params.append({"id": "bscl_discharge", "label": "BSCL AT", "group": "completeness", "status": "critical", "detail": "Fehlt >3d nach AT"})
+        else:
+            params.append({"id": "bscl_discharge", "label": "BSCL AT", "group": "completeness", "status": "warn", "detail": "Nicht erfasst"})
+
     params.append({"id": "bfs", "label": "BFS", "group": "completeness",
                     "status": "ok" if not derived.get("bfs_incomplete") else "warn",
                     "detail": "Vollstaendig" if not derived.get("bfs_incomplete") else "Unvollstaendig"})
@@ -61,6 +70,18 @@ def build_parameter_status(c: dict) -> list[dict]:
             params.append({"id": "sdep", "label": "SDEP", "group": "completeness", "status": "critical", "detail": "Nicht abgeschlossen"})
         elif not sdep:
             params.append({"id": "sdep", "label": "SDEP", "group": "completeness", "status": "warn", "detail": "Offen"})
+
+    # Dokumentationsabschluss (nach Austritt)
+    if discharge is not None:
+        cs = c.get("case_status", "")
+        if cs == "Dokumentation abgeschlossen":
+            params.append({"id": "doc_completion", "label": "Dok.Abschl.", "group": "completeness", "status": "ok", "detail": "Abgeschlossen"})
+        elif derived.get("doc_completion_overdue"):
+            params.append({"id": "doc_completion", "label": "Dok.Abschl.", "group": "completeness", "status": "critical", "detail": "Überfällig (≥10d)"})
+        elif derived.get("doc_completion_warn"):
+            params.append({"id": "doc_completion", "label": "Dok.Abschl.", "group": "completeness", "status": "warn", "detail": "Offen"})
+        elif cs == "Dokumentation offen":
+            params.append({"id": "doc_completion", "label": "Dok.Abschl.", "group": "completeness", "status": "ok", "detail": "Im Zeitfenster"})
 
     if not c.get("is_voluntary", True):
         tp = c.get("treatment_plan_date")
@@ -352,6 +373,22 @@ def enrich_case(c: dict) -> dict:
         and not allergies_recorded
     )
 
+    # Dokumentationsabschluss nach Austritt
+    case_status = c.get("case_status")  # "Fall offen", "Dokumentation offen", "Dokumentation abgeschlossen"
+    # Auto-Ableitung wenn nicht explizit gesetzt
+    if not case_status:
+        if discharge_date is None:
+            case_status = "Fall offen"
+        else:
+            case_status = "Dokumentation abgeschlossen"  # Default bei fehlender Info
+    doc_completion_warn = False   # Tag 1-9 nach Austritt: gelb
+    doc_completion_overdue = False  # Ab Tag 10 nach Austritt: rot
+    if discharge_date is not None and case_status == "Dokumentation offen" and days_from_discharge is not None:
+        if days_from_discharge >= 10:
+            doc_completion_overdue = True
+        elif days_from_discharge >= 1:
+            doc_completion_warn = True
+
     out["_derived"] = {
         "honos_entry_missing_over_3d": honos_entry_missing_over_3d,
         "bscl_entry_missing_over_3d": bscl_entry_missing_over_3d,
@@ -375,7 +412,12 @@ def enrich_case(c: dict) -> dict:
         "emergency_bem_over_3d": emergency_bem_over_3d,
         "emergency_med_over_3d": emergency_med_over_3d,
         "allergies_missing_7d": allergies_missing_7d,
+        # Dokumentationsabschluss (v3)
+        "doc_completion_warn": doc_completion_warn,
+        "doc_completion_overdue": doc_completion_overdue,
     }
+    out["case_status"] = case_status
+    out["responsible_person"] = c.get("responsible_person")
     return out
 
 
@@ -427,6 +469,9 @@ def _load_raw_cases_from_db(station_id: str) -> list[dict]:
                 "emergency_bem_start_date": date.fromisoformat(c.emergency_bem_start_date) if c.emergency_bem_start_date else None,
                 "emergency_med_start_date": date.fromisoformat(c.emergency_med_start_date) if c.emergency_med_start_date else None,
                 "allergies_recorded": c.allergies_recorded,
+                # Fallstatus (v3)
+                "case_status": c.case_status,
+                "responsible_person": c.responsible_person,
             }
             result.append(case_dict)
         return result
@@ -566,6 +611,9 @@ def seed_dummy_cases_to_db():
                 emergency_bem_start_date=_date_to_str(c.get("emergency_bem_start_date")),
                 emergency_med_start_date=_date_to_str(c.get("emergency_med_start_date")),
                 allergies_recorded=c.get("allergies_recorded"),
+                # Fallstatus (v3)
+                case_status=c.get("case_status"),
+                responsible_person=c.get("responsible_person"),
                 source="demo",
             )
             db.merge(case)

@@ -10,50 +10,61 @@ echo.
 
 cd /d "%~dp0"
 
-:: Pruefe Python
+:: 1) Python pruefen
 echo [1/4] Pruefe Python...
 where python >nul 2>&1
-if %errorlevel% neq 0 (
-    echo  FEHLER: Python nicht gefunden!
-    echo  Bitte installieren: https://www.python.org/downloads/
-    pause
-    exit /b 1
-)
-python --version
+if %errorlevel% neq 0 goto :NO_PYTHON
+for /f "tokens=*" %%v in ('python --version 2^>^&1') do echo   %%v
+goto :CHECK_NODE
 
-:: Pruefe Node
+:NO_PYTHON
+echo.
+echo  FEHLER: Python nicht gefunden!
+echo  Bitte installieren: https://www.python.org/downloads/
+echo  WICHTIG: "Add Python to PATH" ankreuzen!
+echo.
+pause
+exit /b 1
+
+:: 2) Node.js pruefen
+:CHECK_NODE
 echo [2/4] Pruefe Node.js...
 where node >nul 2>&1
-if %errorlevel% neq 0 (
-    echo  FEHLER: Node.js nicht gefunden!
-    echo  Bitte installieren: https://nodejs.org/
-    pause
-    exit /b 1
-)
-node --version
+if %errorlevel% equ 0 goto :NODE_OK
+echo.
+echo  FEHLER: Node.js nicht gefunden!
+echo  Bitte installieren: https://nodejs.org/ (LTS-Version)
+echo  Oder per Terminal:  winget install OpenJS.NodeJS.LTS
+echo  Danach dieses Fenster schliessen und neu starten.
+echo.
+pause
+exit /b 1
 
-:: Backend-Pakete pruefen
+:NODE_OK
+for /f "tokens=*" %%v in ('node --version 2^>^&1') do echo   Node %%v
+
+:: 3) Abhaengigkeiten
 echo [3/4] Pruefe Abhaengigkeiten...
-if exist "backend\.venv\Scripts\python.exe" (
-    echo   Python-venv gefunden.
-) else (
-    python -c "import fastapi" >nul 2>&1
-    if %errorlevel% neq 0 (
-        echo   Installiere Backend-Pakete...
-        pushd backend
-        pip install -r requirements.txt -q
-        popd
-    )
-)
-if not exist "frontend\node_modules\." (
-    echo   Installiere Frontend-Pakete...
-    pushd frontend
-    call npm install
-    popd
-)
+
+pushd backend
+if exist ".venv\Scripts\python.exe" goto :BE_OK
+python -c "import fastapi" >nul 2>&1
+if %errorlevel% equ 0 goto :BE_OK
+echo   Installiere Backend-Pakete...
+pip install -r requirements.txt -q --break-system-packages 2>nul
+if %errorlevel% neq 0 pip install -r requirements.txt -q
+:BE_OK
+popd
+
+if exist "frontend\node_modules\." goto :FE_OK
+echo   Installiere Frontend-Pakete (1-2 Min.)...
+pushd frontend
+call npm install --loglevel error
+popd
+:FE_OK
 echo   OK.
 
-:: Server starten
+:: 4) Starten
 echo [4/4] Starte Dashboard...
 echo.
 
@@ -68,39 +79,19 @@ start "" /min "%~dp0_start_frontend.bat"
 echo  Frontend gestartet. Warte 5 Sek...
 timeout /t 5 /nobreak >nul
 
-:: Fertig
 echo.
 echo  ========================================
 echo  Dashboard laeuft!
 echo  ========================================
-echo.
-echo  Dieser PC:     http://localhost:5173
-echo.
-echo  Im Netzwerk:
-for /f "tokens=2 delims=:" %%a in ('ipconfig ^| findstr /c:"IPv4"') do (
-    set "IP=%%a"
-    setlocal enabledelayedexpansion
-    set "IP=!IP: =!"
-    echo                  http://!IP!:5173
-    endlocal
-)
-echo.
-echo  Login: User "demo", dann Station waehlen
-echo  API-Docs: http://localhost:8000/docs
-echo.
+echo  http://localhost:5173
+echo  Login: User "demo", Station waehlen
 echo  ========================================
-echo  Dieses Fenster OFFEN lassen!
-echo  ENTER zum Beenden.
+echo  Fenster OFFEN lassen. ENTER = Beenden.
 echo  ========================================
 
 timeout /t 2 /nobreak >nul
 start "" "http://localhost:5173"
-
-echo.
 pause
 
-echo Beende...
 taskkill /f /fi "WINDOWTITLE eq PUK-Backend" >nul 2>&1
 taskkill /f /fi "WINDOWTITLE eq PUK-Frontend" >nul 2>&1
-echo Fertig.
-timeout /t 2 /nobreak >nul

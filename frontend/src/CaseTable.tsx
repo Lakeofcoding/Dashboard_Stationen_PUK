@@ -178,7 +178,23 @@ export default function CaseTable({ cases, selectedCaseId, onSelectCase, paramet
             sorted.map((c) => {
               const isSelected = selectedCaseId === c.case_id;
               const days = daysSince(c.admission_date);
-              const sev = SEV_BADGE[c.severity];
+              // Use category-specific severity when filtered
+              const effectiveSev = parameterFilter === "completeness"
+                ? (c.completeness_severity ?? c.severity)
+                : parameterFilter === "medical"
+                  ? (c.medical_severity ?? c.severity)
+                  : c.severity;
+              const effectiveCC = parameterFilter === "completeness"
+                ? (c.completeness_critical ?? 0)
+                : parameterFilter === "medical"
+                  ? (c.medical_critical ?? 0)
+                  : (c.critical_count ?? 0);
+              const effectiveWC = parameterFilter === "completeness"
+                ? (c.completeness_warn ?? 0)
+                : parameterFilter === "medical"
+                  ? (c.medical_warn ?? 0)
+                  : (c.warn_count ?? 0);
+              const sev = SEV_BADGE[effectiveSev];
               const params = c.parameter_status ?? [];
               const filtered =
                 parameterFilter === "all" ? params : params.filter((p) => p.group === parameterFilter);
@@ -244,9 +260,9 @@ export default function CaseTable({ cases, selectedCaseId, onSelectCase, paramet
                         color: sev.color,
                       }}
                     >
-                      {c.severity === "CRITICAL" ? "‼" : c.severity === "WARN" ? "⚠" : "✓"}
-                      {" "}{(c.critical_count ?? 0) + (c.warn_count ?? 0) > 0
-                        ? `${c.critical_count ?? 0}/${c.warn_count ?? 0}`
+                      {effectiveSev === "CRITICAL" ? "‼" : effectiveSev === "WARN" ? "⚠" : "✓"}
+                      {" "}{effectiveCC + effectiveWC > 0
+                        ? `${effectiveCC}/${effectiveWC}`
                         : "OK"}
                     </span>
                   </td>
