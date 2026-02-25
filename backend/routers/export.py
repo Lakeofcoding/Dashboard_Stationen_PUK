@@ -63,10 +63,9 @@ def _load_all_enriched(station_ids: list[str] | None = None) -> list[dict]:
                     seen.add(c["case_id"])
                     result.append(enrich_case(c))
 
-    # Fallback: Demo-Fälle falls DB leer
+    # Wenn DB leer: leere Liste (kein stiller Fallback auf DUMMY_CASES)
     if not result:
-        from app.case_logic import DUMMY_CASES
-        result = [enrich_case(c) for c in DUMMY_CASES]
+        print("[export] WARNUNG: Keine Fälle in DB gefunden für Export")
 
     return result
 

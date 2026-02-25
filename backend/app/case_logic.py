@@ -614,35 +614,205 @@ def build_fu_status(c: dict) -> dict:
 
 def make_dummy_cases() -> list[dict]:
     """Laedt Demo-Faelle aus Excel (backend/data/demo_cases.xlsx).
-    Fallback auf minimale Hardcoded-Daten wenn Excel nicht vorhanden.
+    Fallback auf umfassende generierte Daten wenn Excel nicht vorhanden.
     """
     cases = get_demo_cases()
     if cases:
         return cases
 
-    # Minimaler Fallback wenn keine Excel vorhanden
+    # ── Umfassende Demo-Daten (nur wenn KEINE Excel vorhanden) ───────
+    import random
+    random.seed(42)  # Reproduzierbar
+
+    # Lokale Station-Definitionen für den Fallback-Fall.
+    # Diese werden NUR verwendet wenn keine demo_cases.xlsx existiert.
+    # Im Normalbetrieb kommen alle Daten aus der Excel.
+    _FALLBACK_STATIONS = {
+        # station_id: (clinic, center)
+        "Demo-A1": ("EPP", "ZAPE"),
+        "Demo-A2": ("EPP", "ZAPE"),
+        "Demo-B1": ("EPP", "ZDAP"),
+        "Demo-B2": ("EPP", "ZDAP"),
+        "Demo-C1": ("EPP", "ZASP"),
+        "Demo-K1": ("KPP", "ZKJP"),
+    }
+
     _today = date.today()
-    return [
-        {
-            "case_id": "DEMO001", "patient_id": "P001", "clinic": "EPP",
-            "station_id": "Station A1", "center": "ZAPE",
-            "admission_date": _today - timedelta(days=10), "discharge_date": None,
+    _names = [
+        "Dr. Müller", "Dr. Weber", "Dr. Fischer", "Dr. Schneider", "Dr. Meyer",
+        "Dr. Huber", "Dr. Brunner", "Dr. Keller", "Dr. Gerber", "Dr. Baumann",
+        "Fr. Meier", "Fr. Schmid", "Hr. Steiner", "Fr. Roth", "Hr. Hofer",
+    ]
+
+    def _base_case(case_id, station_id, **kw):
+        """Grundgerüst eines Falls mit allen Feldern."""
+        _stn = _FALLBACK_STATIONS.get(station_id, ("EPP", "UNKNOWN"))
+        c = {
+            "case_id": case_id, "patient_id": f"P{case_id[1:]}",
+            "clinic": _stn[0],
+            "station_id": station_id,
+            "center": _stn[1],
+            "admission_date": _today - timedelta(days=random.randint(3, 60)),
+            "discharge_date": None,
             "honos_entry_total": None, "honos_entry_date": None,
             "honos_discharge_total": None, "honos_discharge_date": None,
             "honos_discharge_suicidality": None,
             "bscl_total_entry": None, "bscl_entry_date": None,
             "bscl_total_discharge": None, "bscl_discharge_date": None,
             "bscl_discharge_suicidality": None,
-            "bfs_1": None, "bfs_2": None, "bfs_3": None, "isolations": [],
-            "is_voluntary": True, "treatment_plan_date": None, "sdep_complete": None,
+            "bfs_1": None, "bfs_2": None, "bfs_3": None,
+            "isolations": [],
+            "is_voluntary": True, "treatment_plan_date": None,
+            "sdep_complete": None, "case_status": None,
+            "responsible_person": random.choice(_names),
             "ekg_last_date": None, "ekg_last_reported": None, "ekg_entry_date": None,
             "clozapin_active": False, "clozapin_start_date": None,
             "neutrophils_last_date": None, "neutrophils_last_value": None,
             "troponin_last_date": None, "cbc_last_date": None,
             "emergency_bem_start_date": None, "emergency_med_start_date": None,
             "allergies_recorded": True,
-        },
-    ]
+            # SpiGes Stammdaten
+            "zivilstand": None, "aufenthaltsort_vor_eintritt": None,
+            "beschaeftigung_1": None, "schulbildung": None,
+            "einweisende_instanz": None,
+            "behandlungsgrund": None, "behandlungsbereich": None,
+            # SpiGes Austritt
+            "entscheid_austritt": None, "aufenthalt_nach_austritt": None,
+            "behandlung_nach_austritt": None,
+            # SpiGes Behandlung
+            "behandlung_typ": None,
+            "neuroleptika": None, "depotneuroleptika": None,
+            "antidepressiva": None, "tranquilizer": None,
+            "hypnotika": None, "psychostimulanzien": None,
+            "suchtaversionsmittel": None, "lithium": None,
+            "antiepileptika": None, "andere_psychopharmaka": None,
+            "keine_psychopharmaka": None,
+            # Minimaldaten
+            "eintrittsart": None, "klasse": None,
+            # FU
+            "fu_start": None, "fu_end": None, "fu_typ": None,
+            # Dok Austritt
+            "doc_completion_date": None,
+        }
+        c.update(kw)
+        return c
+
+    def _fill_complete(c, pct=0.95):
+        """Füllt Felder mit Wahrscheinlichkeit pct aus."""
+        adm = c["admission_date"]
+        if random.random() < pct:
+            c["honos_entry_total"] = random.randint(5, 30)
+            c["honos_entry_date"] = (adm + timedelta(days=1)).isoformat()
+        if random.random() < pct:
+            c["bscl_total_entry"] = round(random.uniform(0.3, 3.2), 2)
+            c["bscl_entry_date"] = (adm + timedelta(days=1)).isoformat()
+        if random.random() < pct:
+            c["bfs_1"] = random.randint(1, 5)
+            c["bfs_2"] = random.randint(1, 5)
+            c["bfs_3"] = random.randint(1, 5)
+        if random.random() < pct:
+            c["treatment_plan_date"] = (adm + timedelta(days=2)).isoformat()
+        # SpiGes Stammdaten
+        if random.random() < pct:
+            c["zivilstand"] = random.choice([1, 2, 3, 4, 5])
+        if random.random() < pct:
+            c["aufenthaltsort_vor_eintritt"] = random.choice([1, 2, 3, 4])
+        if random.random() < pct:
+            c["beschaeftigung_1"] = random.choice([1, 2, 3, 4, 5, 6])
+        if random.random() < pct:
+            c["schulbildung"] = random.choice([1, 2, 3, 4])
+        if random.random() < pct:
+            c["einweisende_instanz"] = random.choice([1, 2, 3, 4, 5])
+        if random.random() < pct:
+            c["behandlungsgrund"] = random.choice([1, 2, 3])
+        if random.random() < pct:
+            c["behandlungsbereich"] = random.choice([1, 2])
+        # Psychopharmaka
+        if random.random() < pct:
+            c["neuroleptika"] = random.choice([1, 2])
+            c["antidepressiva"] = random.choice([1, 2])
+            c["keine_psychopharmaka"] = 2
+        # Minimaldaten
+        if random.random() < pct:
+            c["eintrittsart"] = random.choice([1, 2, 3])
+        if random.random() < pct:
+            c["klasse"] = random.choice([1, 2, 3])
+        # EKG
+        if random.random() < pct * 0.6:
+            c["ekg_entry_date"] = (adm + timedelta(days=random.randint(0, 5))).isoformat()
+            c["ekg_last_date"] = (adm + timedelta(days=random.randint(0, 5))).isoformat()
+            c["ekg_last_reported"] = True
+
+    def _close_case(c, days_ago, doc_done=True, pct_discharge=0.9):
+        """Schliesst einen Fall ab."""
+        c["discharge_date"] = _today - timedelta(days=days_ago)
+        if random.random() < pct_discharge:
+            c["honos_discharge_total"] = random.randint(3, 25)
+            c["honos_discharge_date"] = c["discharge_date"].isoformat()
+        if random.random() < pct_discharge:
+            c["bscl_total_discharge"] = round(random.uniform(0.2, 2.8), 2)
+            c["bscl_discharge_date"] = c["discharge_date"].isoformat()
+        if random.random() < pct_discharge:
+            c["entscheid_austritt"] = random.choice([1, 2, 3])
+        if random.random() < pct_discharge:
+            c["aufenthalt_nach_austritt"] = random.choice([1, 2, 3])
+        if random.random() < pct_discharge:
+            c["behandlung_nach_austritt"] = random.choice([1, 2, 3])
+        if doc_done:
+            c["case_status"] = "Dokumentation abgeschlossen"
+            c["doc_completion_date"] = (c["discharge_date"] + timedelta(days=random.randint(1, 7))).isoformat()
+            c["sdep_complete"] = True
+        else:
+            c["case_status"] = "Dokumentation offen"
+            c["sdep_complete"] = False
+
+    all_cases = []
+    idx = 1
+
+    # ── Station-Profile ──────────────────────────────────────────────
+    # Jede Station hat ein Completeness-Profil (0.0 - 1.0)
+    station_profiles = {
+        # Nur für den Fall dass keine Excel vorhanden ist.
+        # Prefix "Demo-" macht klar, dass es Fallback-Daten sind.
+        "Demo-A1": {"fill_pct": 0.96, "n_open": 6, "n_closed": 4, "doc_done_pct": 0.9},
+        "Demo-A2": {"fill_pct": 0.65, "n_open": 5, "n_closed": 3, "doc_done_pct": 0.6},
+        "Demo-B1": {"fill_pct": 0.70, "n_open": 4, "n_closed": 3, "doc_done_pct": 0.6},
+        "Demo-B2": {"fill_pct": 0.40, "n_open": 3, "n_closed": 4, "doc_done_pct": 0.3},
+        "Demo-C1": {"fill_pct": 0.85, "n_open": 5, "n_closed": 2, "doc_done_pct": 0.8},
+        "Demo-K1": {"fill_pct": 0.80, "n_open": 4, "n_closed": 2, "doc_done_pct": 0.8},
+    }
+
+    for station_id, profile in station_profiles.items():
+        fp = profile["fill_pct"]
+        doc_pct = profile["doc_done_pct"]
+
+        # Offene Fälle
+        for i in range(profile["n_open"]):
+            c = _base_case(f"D{idx:04d}", station_id)
+            _fill_complete(c, pct=fp)
+            # Einige mit FU
+            if random.random() < 0.3:
+                c["fu_start"] = (c["admission_date"] + timedelta(days=1)).isoformat()
+                c["fu_end"] = (_today + timedelta(days=random.randint(5, 30))).isoformat()
+                c["fu_typ"] = random.choice(["aerztlich", "kesb"])
+            # Einige lang stationär (Langlieger)
+            if random.random() < 0.2:
+                c["admission_date"] = _today - timedelta(days=random.randint(30, 90))
+            all_cases.append(c)
+            idx += 1
+
+        # Geschlossene Fälle
+        for i in range(profile["n_closed"]):
+            c = _base_case(f"D{idx:04d}", station_id)
+            _fill_complete(c, pct=fp)
+            days_ago = random.choice([2, 5, 8, 12, 18, 25])
+            doc_done = random.random() < doc_pct
+            _close_case(c, days_ago, doc_done=doc_done, pct_discharge=fp)
+            all_cases.append(c)
+            idx += 1
+
+    print(f"[make_dummy_cases] {len(all_cases)} Demo-Faelle generiert über {len(station_profiles)} Stationen")
+    return all_cases
 
 
 DUMMY_CASES = make_dummy_cases()
@@ -1150,21 +1320,19 @@ def load_cases_from_db(station_id: str, ack_store=None) -> list[dict]:
 
 
 def get_station_cases(station_id: str, ack_store=None) -> list[dict]:
-    """Angereicherte Faelle fuer eine Station."""
+    """Angereicherte Fälle für eine Station. Quelle: nur DB."""
     db_cases = load_cases_from_db(station_id, ack_store)
-    if db_cases:
-        return [enrich_case(c) for c in db_cases]
-    return [enrich_case(c) for c in DUMMY_CASES if c["station_id"] == station_id]
+    return [enrich_case(c) for c in db_cases]
 
 
 def get_single_case(case_id: str) -> dict | None:
-    """Einzelnen Fall laden (ohne Auto-Expire, fuer Detail-View)."""
+    """Einzelnen Fall laden (ohne Auto-Expire, für Detail-View). Quelle: nur DB."""
     with SessionLocal() as db:
         case_obj = db.get(Case, case_id)
         if case_obj:
             raw_cases = _load_raw_cases_from_db(case_obj.station_id)
             return next((c for c in raw_cases if c["case_id"] == case_id), None)
-    return next((x for x in DUMMY_CASES if x["case_id"] == case_id), None)
+    return None
 
 
 def get_valid_shift_codes() -> set[str]:

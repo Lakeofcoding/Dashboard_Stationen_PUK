@@ -295,7 +295,9 @@ export default function ParameterGroupPanel({
                       canAck={canAck} caseId={caseId} shiftReasons={shiftReasons}
                       shiftVal={shiftSelections[item.id] ?? ""}
                       onShiftSelect={v => setShiftSelections(p => ({ ...p, [item.id]: v }))}
-                      onAckRule={onAckRule} onShiftRule={onShiftRule} onError={onError}
+                      onAckRule={async (cid, rid) => { await onAckRule?.(cid, rid); setExpandedItem(null); }}
+                      onShiftRule={async (cid, rid, sc) => { await onShiftRule?.(cid, rid, sc); setExpandedItem(null); }}
+                      onError={onError}
                     />
                   ))}
                   {/* Acked problems (dimmed, with badge) */}
@@ -305,7 +307,9 @@ export default function ParameterGroupPanel({
                       canAck={canAck} caseId={caseId} shiftReasons={shiftReasons}
                       shiftVal={shiftSelections[item.id] ?? ""}
                       onShiftSelect={v => setShiftSelections(p => ({ ...p, [item.id]: v }))}
-                      onAckRule={onAckRule} onShiftRule={onShiftRule} onError={onError}
+                      onAckRule={async (cid, rid) => { await onAckRule?.(cid, rid); setExpandedItem(null); }}
+                      onShiftRule={async (cid, rid, sc) => { await onShiftRule?.(cid, rid, sc); setExpandedItem(null); }}
+                      onError={onError}
                     />
                   ))}
                   {/* OK items (collapsed summary) */}

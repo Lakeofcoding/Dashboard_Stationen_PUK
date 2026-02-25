@@ -23,6 +23,8 @@ import ParameterGroupPanel from "./ParameterGroupPanel";
 import CaseTable from "./CaseTable";
 import MatrixReport from "./MatrixReport";
 import MonitoringPanel from "./MonitoringPanel";
+import AnalyticsPanel from "./AnalyticsPanel";
+import type { StationAnalytics } from "./AnalyticsPanel";
 
 type AuthState = {
   stationId: string;
@@ -37,6 +39,13 @@ type MetaMe = {
   roles: string[];
   permissions: string[];
   break_glass: boolean;
+  scope?: {
+    level: "global" | "klinik" | "zentrum" | "station";
+    clinic: string | null;
+    center: string | null;
+    station: string | null;
+    visible_stations: string[];
+  };
 };
 
 type ShiftReason = {
@@ -192,6 +201,14 @@ async function fetchOverview(auth: AuthState): Promise<StationOverviewItem[]> {
   });
 }
 
+async function fetchAnalytics(auth: AuthState): Promise<StationAnalytics[]> {
+  const data = await apiJson<{ stations: StationAnalytics[] }>("/api/analytics", {
+    method: "GET",
+    headers: authHeaders(auth),
+  });
+  return data.stations;
+}
+
 async function fetchCases(auth: AuthState, _view: ViewMode): Promise<CaseSummary[]> {
   const qs = new URLSearchParams({ view: "all" }).toString();
   return apiJson<CaseSummary[]>(`/api/cases?${qs}`, {
@@ -343,6 +360,7 @@ export default function App() {
   const [dayState, setDayState] = useState<DayState | null>(null);
   const [cases, setCases] = useState<CaseSummary[]>([]);
   const [overview, setOverview] = useState<StationOverviewItem[]>([]);
+  const [analytics, setAnalytics] = useState<StationAnalytics[]>([]);
   const [drillClinic, setDrillClinic] = useState<string | null>(null);
   const [drillCenter, setDrillCenter] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -410,14 +428,17 @@ export default function App() {
     return () => { alive = false; window.clearInterval(id); };
   }, [auth, viewMode]);
 
-  // Load overview data
+  // Load overview data + analytics
   useEffect(() => {
     if (viewMode !== "overview") return;
     let alive = true;
     const load = async () => {
       try {
-        const data = await fetchOverview(auth);
-        if (alive) { setOverview(data); setError(null); }
+        const [overviewData, analyticsData] = await Promise.all([
+          fetchOverview(auth),
+          fetchAnalytics(auth).catch(() => [] as StationAnalytics[]),
+        ]);
+        if (alive) { setOverview(overviewData); setAnalytics(analyticsData); setError(null); }
       } catch (e: any) {
         if (alive) setError(e?.message ?? String(e));
       }
@@ -479,11 +500,37 @@ export default function App() {
 
   // ── Hierarchische Aggregation: Klinik → Zentrum → Station ──
   const CLINIC_LABELS: Record<string, string> = {
-    APP: "Alterspsychiatrie",
     EPP: "Erwachsenenpsychiatrie",
-    FPP: "Forensische Psychiatrie",
-    KJPP: "Kinder- und Jugendpsychiatrie",
+    KPP: "Kinder- und Jugendpsychiatrie",
+    FPK: "Forensische Psychiatrie",
   };
+
+  // ── Scope-basierte Filterung ──
+  const scopeLevel = me?.scope?.level ?? "global";
+  const visibleStations = useMemo(() => {
+    const vs = me?.scope?.visible_stations;
+    if (vs && vs.length > 0) {
+      const vsSet = new Set(vs);
+      // Prüfen ob visible_stations mit tatsächlichen Stationen übereinstimmen
+      const hasMatch = stations.some(s => vsSet.has(s));
+      if (hasMatch) return vsSet;
+    }
+    // Fallback: alle Stationen zeigen
+    return new Set(stations);
+  }, [me, stations]);
+
+  // Gefilterte stations für Selector
+  const filteredStations = useMemo(() =>
+    stations.filter(s => visibleStations.has(s)),
+  [stations, visibleStations]);
+
+  // Overview + Analytics nur sichtbare Stationen zeigen
+  const filteredOverview = useMemo(() =>
+    overview.filter(s => visibleStations.has(s.station_id)),
+  [overview, visibleStations]);
+  const filteredAnalytics = useMemo(() =>
+    analytics.filter(s => visibleStations.has(s.station_id)),
+  [analytics, visibleStations]);
 
   type AggItem = { total: number; open: number; closed: number; critical: number; warn: number; ok: number; severity: Severity };
   const aggregate = (items: StationOverviewItem[]): AggItem => {
@@ -507,44 +554,64 @@ export default function App() {
 
   const clinicGroups = useMemo(() => {
     const map: Record<string, StationOverviewItem[]> = {};
-    for (const s of overview) map[s.clinic] = [...(map[s.clinic] || []), s];
+    for (const s of filteredOverview) map[s.clinic] = [...(map[s.clinic] || []), s];
     return Object.entries(map).sort(([a], [b]) => a.localeCompare(b));
-  }, [overview]);
+  }, [filteredOverview]);
 
   const centerGroups = useMemo(() => {
     if (!drillClinic) return [];
-    const items = overview.filter(s => s.clinic === drillClinic);
+    const items = filteredOverview.filter(s => s.clinic === drillClinic);
     const map: Record<string, StationOverviewItem[]> = {};
     for (const s of items) map[s.center] = [...(map[s.center] || []), s];
     return Object.entries(map).sort(([a], [b]) => a.localeCompare(b));
-  }, [overview, drillClinic]);
+  }, [filteredOverview, drillClinic]);
 
   const stationItems = useMemo(() => {
     if (!drillClinic || !drillCenter) return [];
-    return overview.filter(s => s.clinic === drillClinic && s.center === drillCenter);
-  }, [overview, drillClinic, drillCenter]);
+    return filteredOverview.filter(s => s.clinic === drillClinic && s.center === drillCenter);
+  }, [filteredOverview, drillClinic, drillCenter]);
 
-  // ── Zurück-Navigation: kennt die logische Hierarchie ──
+  // ── Scope-basierte Auto-Navigation ──
+  // Wenn Scope eingeschränkt: automatisch zum richtigen Drill-Level springen
+  useEffect(() => {
+    if (!me?.scope || viewMode !== "overview" || filteredOverview.length === 0) return;
+    const sl = me.scope.level;
+    const sc = me.scope.clinic;
+    const sz = me.scope.center;
+    // Prüfen ob Klinik/Zentrum tatsächlich in den Daten existieren
+    const availClinics = new Set(filteredOverview.map(s => s.clinic));
+    const availCenters = new Set(filteredOverview.map(s => s.center));
+    if (sl === "klinik" && sc && availClinics.has(sc) && !drillClinic) {
+      setDrillClinic(sc);
+    } else if ((sl === "zentrum" || sl === "station") && sc && sz) {
+      if (availClinics.has(sc) && !drillClinic) setDrillClinic(sc);
+      if (availCenters.has(sz) && !drillCenter) setDrillCenter(sz);
+    }
+  }, [me, viewMode, filteredOverview.length]);
+
+  // ── Zurück-Navigation: respektiert Scope-Grenzen ──
   const canGoBack = (() => {
     if (isAdminOpen) return true;
     if (selectedCaseId) return true;
     if (viewMode !== "overview") return true;
-    if (drillCenter) return true;
-    if (drillClinic) return true;
+    // Scope-Grenzen: nicht über die zugewiesene Ebene hinaus zurück
+    if (drillCenter) {
+      // Kann von Zentrum → Klinik, wenn Scope es erlaubt
+      return scopeLevel === "global" || scopeLevel === "klinik";
+    }
+    if (drillClinic) {
+      // Kann von Klinik → Gesamt, nur wenn global
+      return scopeLevel === "global";
+    }
     return false;
   })();
 
   function goBack() {
-    // 1. Admin-Modal offen → schliessen
     if (isAdminOpen) { setIsAdminOpen(false); return; }
-    // 2. Fall-Detail offen → Detail schliessen
     if (selectedCaseId) { setSelectedCaseId(null); setDetail(null); setDetailError(null); setShiftByAlert({}); return; }
-    // 3. Nicht auf Übersicht → zurück zur Übersicht
     if (viewMode !== "overview") { setViewMode("overview"); return; }
-    // 4. Übersicht: Zentrum → zurück zu Klinik
-    if (drillCenter) { setDrillCenter(null); return; }
-    // 5. Übersicht: Klinik → zurück zur Gesamtübersicht
-    if (drillClinic) { setDrillClinic(null); return; }
+    if (drillCenter && (scopeLevel === "global" || scopeLevel === "klinik")) { setDrillCenter(null); return; }
+    if (drillClinic && scopeLevel === "global") { setDrillClinic(null); return; }
   }
 
   // Browser-Back-Button integrieren
@@ -602,44 +669,32 @@ export default function App() {
 
       {/* HEADER */}
       <header style={{ backgroundColor: "#fff", borderBottom: "1px solid #e5e7eb", boxShadow: "0 1px 3px rgba(0,0,0,0.05)", zIndex: 100 }}>
-        {/* Top row: Logo + Controls */}
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 20px", gap: 16 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-            {/* Zurück-Button */}
-            <button
-              onClick={goBack}
-              disabled={!canGoBack}
-              title="Zurück"
-              style={{
-                width: 32, height: 32, borderRadius: 8, border: "1px solid #d1d5db",
-                background: canGoBack ? "#f9fafb" : "transparent",
-                color: canGoBack ? "#374151" : "#d1d5db",
-                fontSize: 16, fontWeight: 700, cursor: canGoBack ? "pointer" : "default",
-                display: "flex", alignItems: "center", justifyContent: "center",
-                transition: "all 0.15s", flexShrink: 0,
-              }}
-              onMouseEnter={(e) => { if (canGoBack) e.currentTarget.style.background = "#e5e7eb"; }}
-              onMouseLeave={(e) => { if (canGoBack) e.currentTarget.style.background = "#f9fafb"; }}
-            >
-              ←
-            </button>
-            <h1 style={{ margin: 0, fontSize: "1.15rem", color: "#1a1a1a", fontWeight: 800 }}>PUK Dashboard</h1>
+        {/* Top row: Logo + User */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 20px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <div style={{ flexShrink: 0 }}><ClinicLogo title="Klinik-Logo" /></div>
-            <label style={{ display: "flex", alignItems: "center", gap: 4, marginLeft: 8 }}>
-              <span style={{ fontSize: 11, color: "#6b7280", fontWeight: 600 }}>Station</span>
-              <select value={auth.stationId} onChange={(e) => updateAuth({ stationId: e.target.value })} style={{ padding: "4px 8px", borderRadius: 6, border: "1px solid #d1d5db", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
-                {stations.map((s) => <option key={s} value={s}>{s}</option>)}
-              </select>
-            </label>
+            <h1 style={{ margin: 0, fontSize: "1.1rem", color: "#1a1a1a", fontWeight: 800 }}>PUK Dashboard</h1>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            {/* Scope selectors (Dev-Mode) */}
             <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
-              <span style={{ fontSize: 11, color: "#6b7280", fontWeight: 600 }}>User</span>
-              <select value={auth.userId} onChange={(e) => updateAuth({ userId: e.target.value })} style={{ padding: "4px 8px", borderRadius: 6, border: "1px solid #d1d5db", fontSize: 12, cursor: "pointer" }}>
+              <span style={{ fontSize: 10, color: "#9ca3af" }}>User</span>
+              <select value={auth.userId} onChange={(e) => updateAuth({ userId: e.target.value })} style={{ padding: "3px 6px", borderRadius: 5, border: "1px solid #e5e7eb", fontSize: 11, cursor: "pointer" }}>
                 {metaUsers.map((u) => <option key={u.user_id} value={u.user_id}>{u.user_id}</option>)}
               </select>
             </label>
-            {dayState && <span style={{ color: "#9ca3af", fontSize: 11 }}>Tag: {dayState.business_date} · V{dayState.version}</span>}
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            {/* Role badge */}
+            {me && me.roles.length > 0 && (
+              <span style={{ padding: "2px 7px", borderRadius: 999, fontSize: 10, fontWeight: 600, background: "#eff6ff", color: "#1d4ed8", border: "1px solid #bfdbfe" }}>
+                {me.roles.includes("system_admin") ? "System Admin" : me.roles.includes("admin") ? "Admin"
+                  : me.roles.includes("shift_lead") ? "Schichtleitung" : me.roles.includes("clinician") ? "Klinisch"
+                  : me.roles.includes("manager") ? "Management" : me.roles[0]}
+              </span>
+            )}
+            {me?.break_glass && (
+              <span style={{ padding: "2px 7px", borderRadius: 999, fontSize: 10, fontWeight: 700, background: "#fef2f2", color: "#b91c1c", border: "1px solid #fecaca" }}>🔓 Break-Glass</span>
+            )}
+            <button onClick={() => setIsAdminOpen(true)} disabled={!canAdmin} style={{ padding: "3px 8px", fontSize: 10, borderRadius: 5, border: "1px solid #e5e7eb", background: "#fff", cursor: canAdmin ? "pointer" : "not-allowed", opacity: canAdmin ? 1 : 0.4 }}>⚙</button>
             <button
               onClick={async () => {
                 if (!canReset) return;
@@ -653,40 +708,36 @@ export default function App() {
                 } catch (e: any) { setError(e?.message ?? String(e)); }
               }}
               disabled={!canReset}
-              style={{ padding: "4px 10px", fontSize: 11, borderRadius: 6, border: "1px solid #d1d5db", background: "#fff", cursor: canReset ? "pointer" : "not-allowed", opacity: canReset ? 1 : 0.5 }}
-            >
-              Reset
-            </button>
-            <button onClick={() => setIsAdminOpen(true)} disabled={!canAdmin} style={{ padding: "4px 10px", fontSize: 11, borderRadius: 6, border: "1px solid #d1d5db", background: "#fff", cursor: canAdmin ? "pointer" : "not-allowed", opacity: canAdmin ? 1 : 0.5 }}>
-              ⚙ Admin
-            </button>
-            <div style={{ fontSize: 11, textAlign: "right", color: "#6b7280", display: "flex", alignItems: "center", gap: 8 }}>
-              {/* Role badge */}
-              {me && me.roles.length > 0 && (
-                <span style={{ padding: "2px 7px", borderRadius: 999, fontSize: 10, fontWeight: 600, background: "#eff6ff", color: "#1d4ed8", border: "1px solid #bfdbfe" }}>
-                  {me.roles.includes("system_admin") ? "System Admin"
-                    : me.roles.includes("admin") ? "Admin"
-                    : me.roles.includes("shift_lead") ? "Schichtleitung"
-                    : me.roles.includes("clinician") ? "Klinisch"
-                    : me.roles.includes("manager") ? "Management"
-                    : me.roles[0]}
-                </span>
-              )}
-              {/* Break-glass warning */}
-              {me?.break_glass && (
-                <span style={{ padding: "2px 7px", borderRadius: 999, fontSize: 10, fontWeight: 700, background: "#fef2f2", color: "#b91c1c", border: "1px solid #fecaca", animation: "pulse 2s infinite" }}>
-                  🔓 Break-Glass
-                </span>
-              )}
-              {/* User + Station context */}
-              <span style={{ fontWeight: 700, color: "#374151" }}>{me?.user_id || auth.userId}</span>
-              <span style={{ color: "#9ca3af" }}>@ {auth.stationId}</span>
-            </div>
+              style={{ padding: "3px 8px", fontSize: 10, borderRadius: 5, border: "1px solid #e5e7eb", background: "#fff", cursor: canReset ? "pointer" : "not-allowed", opacity: canReset ? 1 : 0.4 }}
+            >Reset</button>
           </div>
         </div>
 
-        {/* Tab Bar */}
-        <nav style={{ display: "flex", gap: 0, paddingLeft: 20, borderTop: "1px solid #f3f4f6" }}>
+        {/* Nav Row: Zurück + Tabs + Scope Context */}
+        <div style={{ display: "flex", alignItems: "center", gap: 0, padding: "0 20px", borderTop: "1px solid #f3f4f6" }}>
+          {/* ← Zurück Button */}
+          <button
+            onClick={goBack}
+            disabled={!canGoBack}
+            style={{
+              display: "flex", alignItems: "center", gap: 5,
+              padding: "8px 14px", marginRight: 4,
+              fontSize: 13, fontWeight: 600, border: "none", borderRadius: 6,
+              background: canGoBack ? "#f1f5f9" : "transparent",
+              color: canGoBack ? "#334155" : "#d1d5db",
+              cursor: canGoBack ? "pointer" : "default",
+              transition: "all 0.15s", whiteSpace: "nowrap",
+            }}
+            onMouseEnter={(e) => { if (canGoBack) e.currentTarget.style.background = "#e2e8f0"; }}
+            onMouseLeave={(e) => { if (canGoBack) e.currentTarget.style.background = "#f1f5f9"; }}
+          >
+            <span style={{ fontSize: 15 }}>←</span> Zurück
+          </button>
+
+          {/* Divider */}
+          <div style={{ width: 1, height: 24, background: "#e5e7eb", margin: "0 6px" }} />
+
+          {/* Tabs */}
           {([
             { key: "overview", label: "Übersicht", icon: "📋" },
             { key: "cases", label: "Fallliste", icon: "🏥" },
@@ -699,21 +750,19 @@ export default function App() {
                 key={tab.key}
                 onClick={() => {
                   setViewMode(tab.key);
+                  // Scope persistence: when leaving overview, preserve drill state
+                  // When going TO overview, reset drill
                   if (tab.key === "overview") { setSelectedCaseId(null); setDetail(null); setDrillClinic(null); setDrillCenter(null); }
+                  if (tab.key !== "overview") { setSelectedCaseId(null); setDetail(null); }
                 }}
                 style={{
-                  padding: "10px 18px",
-                  fontSize: 13,
+                  padding: "10px 16px", fontSize: 13,
                   fontWeight: isActive ? 700 : 500,
                   color: isActive ? "#1d4ed8" : "#6b7280",
-                  background: "transparent",
-                  border: "none",
+                  background: "transparent", border: "none",
                   borderBottom: isActive ? "2px solid #3b82f6" : "2px solid transparent",
-                  cursor: "pointer",
-                  transition: "all 0.15s",
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 5,
+                  cursor: "pointer", transition: "all 0.15s",
+                  display: "flex", alignItems: "center", gap: 5,
                 }}
               >
                 <span style={{ fontSize: 14 }}>{tab.icon}</span>
@@ -721,7 +770,25 @@ export default function App() {
               </button>
             );
           })}
-        </nav>
+
+          {/* Spacer */}
+          <div style={{ flex: 1 }} />
+
+          {/* Scope Context (sichtbar wenn nicht auf Übersicht) */}
+          {viewMode !== "overview" && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "#6b7280" }}>
+              {/* Station selector */}
+              <select
+                value={auth.stationId}
+                onChange={(e) => updateAuth({ stationId: e.target.value })}
+                style={{ padding: "4px 8px", borderRadius: 6, border: "1px solid #e5e7eb", fontSize: 12, fontWeight: 600, cursor: "pointer", background: "#f8fafc" }}
+              >
+                {filteredStations.map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>
+              {dayState && <span style={{ color: "#d1d5db", fontSize: 10 }}>V{dayState.version}</span>}
+            </div>
+          )}
+        </div>
       </header>
 
       {metaError ? <div style={{ padding: "10px 16px", color: "#666", background: "#fff", borderBottom: "1px solid #eee" }}>{metaError}</div> : null}
@@ -792,12 +859,17 @@ export default function App() {
                 )}
               </div>
 
-              {overview.length === 0 ? (
+              {filteredOverview.length === 0 ? (
                 <div style={{ color: "#9ca3af", padding: 20 }}>Lade Übersicht…</div>
               ) : !drillClinic ? (
                 /* ── LEVEL 1: Kliniken ── */
                 <>
-                  <h2 style={{ margin: "0 0 16px 0", fontSize: "1.2rem" }}>Kliniken</h2>
+                  {/* BI Analytics — Gesamtübersicht (Startseite) */}
+                  {filteredAnalytics.length > 0 && (
+                    <AnalyticsPanel stations={filteredAnalytics} scopeLabel="Alle Kliniken" />
+                  )}
+
+                  <h2 style={{ margin: "24px 0 16px 0", fontSize: "1.2rem" }}>Kliniken</h2>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 16 }}>
                     {clinicGroups.map(([clinic, items]) => {
                       const a = aggregate(items);
@@ -848,7 +920,15 @@ export default function App() {
               ) : !drillCenter ? (
                 /* ── LEVEL 2: Zentren einer Klinik ── */
                 <>
-                  <h2 style={{ margin: "0 0 16px 0", fontSize: "1.2rem" }}>
+                  {/* BI Analytics — Klinik-Ebene */}
+                  {filteredAnalytics.length > 0 && drillClinic && (
+                    <AnalyticsPanel
+                      stations={filteredAnalytics.filter(s => s.clinic === drillClinic)}
+                      scopeLabel={`Klinik ${drillClinic} — ${CLINIC_LABELS[drillClinic] || ""}`}
+                    />
+                  )}
+
+                  <h2 style={{ margin: "24px 0 16px 0", fontSize: "1.2rem" }}>
                     Zentren – {drillClinic} <span style={{ fontWeight: 400, fontSize: 14, color: "#6b7280" }}>({CLINIC_LABELS[drillClinic] || ""})</span>
                   </h2>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 14 }}>
@@ -898,8 +978,17 @@ export default function App() {
               ) : (
                 /* ── LEVEL 3: Stationen eines Zentrums ── */
                 <>
-                  <h2 style={{ margin: "0 0 16px 0", fontSize: "1.2rem" }}>
+                  {/* BI Analytics — Zentrum-Ebene */}
+                  {filteredAnalytics.length > 0 && drillClinic && drillCenter && (
+                    <AnalyticsPanel
+                      stations={filteredAnalytics.filter(s => s.clinic === drillClinic && s.center === drillCenter)}
+                      scopeLabel={`Zentrum ${drillCenter}`}
+                    />
+                  )}
+
+                  <h2 style={{ margin: "24px 0 16px 0", fontSize: "1.2rem" }}>
                     Stationen – {drillCenter}
+                    <span style={{ fontWeight: 400, fontSize: 12, color: "#6b7280", marginLeft: 8 }}>Klicken für Fallliste</span>
                   </h2>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 14 }}>
                     {stationItems.map((s) => {

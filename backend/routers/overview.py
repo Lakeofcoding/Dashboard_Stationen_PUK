@@ -1,41 +1,57 @@
-"""Station-Uebersicht Endpoint."""
+"""Station-Übersicht & Analytics Endpoints.
+
+Datenquellen: NUR DB (befüllt aus Excel beim Startup).
+Kein Fallback auf statische Daten. Leere DB → leere Antwort.
+"""
 from __future__ import annotations
 from fastapi import APIRouter, Depends
 from app.auth import AuthContext, get_auth_context
 from app.rbac import require_permission
 from app.schemas import StationOverviewItem
 from app.config import STATION_CENTER
-from app.case_logic import get_station_cases, DUMMY_CASES
+from app.case_logic import get_station_cases, enrich_case
 from app.rule_engine import evaluate_alerts, summarize_severity
-from app.ack_store import AckStore
+from app.bi_analytics import compute_station_analytics
 from app.db import SessionLocal
 from app.models import Case
-
-ack_store = AckStore()
 
 router = APIRouter()
 
 
+# ── Helper: Alle Stationen aus DB lesen ──────────────────────────────
 
-@router.get("/api/overview", response_model=list[StationOverviewItem])
-def station_overview(
-    ctx: AuthContext = Depends(get_auth_context),
-    _perm: None = Depends(require_permission("dashboard:view")),
-):
-    """Liefert Übersicht über ALLE Stationen mit Ampel-Status."""
-    # Alle Stationen aus DB holen
+def _get_all_stations_from_db() -> tuple[list[str], dict[str, str]]:
+    """Liest alle station_ids + deren Klinik-Zuordnung aus der DB.
+    Returns: (station_ids, {station_id: clinic})
+    """
     with SessionLocal() as db:
         db_stations = db.query(Case.station_id).distinct().all()
         station_ids = sorted({s[0] for s in db_stations})
-        # Clinic pro Station (haeufigster Wert)
         station_clinic: dict[str, str] = {}
         for sid in station_ids:
-            row = db.query(Case.clinic).filter(Case.station_id == sid, Case.clinic.isnot(None)).first()
+            row = db.query(Case.clinic).filter(
+                Case.station_id == sid, Case.clinic.isnot(None)
+            ).first()
             station_clinic[sid] = row[0] if row else "UNKNOWN"
+    return station_ids, station_clinic
+
+
+# ══════════════════════════════════════════════════════════════════════
+# /api/overview — Ampelübersicht aller Stationen
+# ══════════════════════════════════════════════════════════════════════
+
+@router.get("/api/overview", response_model=list[StationOverviewItem])
+def overview(
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("dashboard:view")),
+):
+    """Liefert Übersicht über ALLE Stationen mit Ampel-Status.
+    Datenquelle: ausschliesslich DB. Leere DB → leere Liste.
+    """
+    station_ids, station_clinic = _get_all_stations_from_db()
+
     if not station_ids:
-        station_ids = sorted({c["station_id"] for c in DUMMY_CASES})
-        for c in DUMMY_CASES:
-            station_clinic.setdefault(c["station_id"], c.get("clinic", "UNKNOWN"))
+        return []
 
     result = []
     for sid in station_ids:
@@ -60,7 +76,6 @@ def station_overview(
                 station_warn += 1
             else:
                 station_ok += 1
-            # Per-category: count cases with category-specific issues
             comp_alerts = [a for a in alerts if a.category == "completeness"]
             med_alerts = [a for a in alerts if a.category == "medical"]
             c_sev, _, _, _ = summarize_severity(comp_alerts)
@@ -74,12 +89,7 @@ def station_overview(
             elif m_sev == "WARN":
                 med_warn_n += 1
 
-        if station_critical > 0:
-            worst = "CRITICAL"
-        elif station_warn > 0:
-            worst = "WARN"
-        else:
-            worst = "OK"
+        worst = "CRITICAL" if station_critical > 0 else "WARN" if station_warn > 0 else "OK"
 
         def _sev(c, w):
             return "CRITICAL" if c > 0 else "WARN" if w > 0 else "OK"
@@ -103,3 +113,31 @@ def station_overview(
         ))
 
     return result
+
+
+# ══════════════════════════════════════════════════════════════════════
+# /api/analytics — BI-Auswertung (delegiert an app.bi_analytics)
+# ══════════════════════════════════════════════════════════════════════
+
+@router.get("/api/analytics")
+def analytics(
+    ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("dashboard:view")),
+):
+    """BI-Auswertung: Completeness-Quoten, Austrittsberichte, ACK-Aktivität.
+
+    Alle Metriken auf EINZELFALL-Ebene. Datenquelle: nur DB.
+    Berechnung: app.bi_analytics.compute_station_analytics()
+    """
+    station_ids, station_clinic = _get_all_stations_from_db()
+
+    if not station_ids:
+        return {"stations": []}
+
+    stations = []
+    for sid in station_ids:
+        cases = get_station_cases(sid)
+        clinic = station_clinic.get(sid, "UNKNOWN")
+        stations.append(compute_station_analytics(sid, cases, clinic))
+
+    return {"stations": stations}

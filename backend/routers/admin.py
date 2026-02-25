@@ -24,7 +24,7 @@ from app.schemas import (
 )
 from app.config import STATION_CENTER
 from app.rule_engine import invalidate_rule_cache, load_rules_yaml
-from app.case_logic import seed_dummy_cases_to_db, DUMMY_CASES
+from app.case_logic import seed_dummy_cases_to_db
 
 router = APIRouter()
 
@@ -1065,8 +1065,7 @@ def reload_excel_data(
 
     # Station-Center Map neu laden
     if hasattr(STATION_CENTER, '_loaded'):
-        STATION_CENTER._loaded = False
-        STATION_CENTER.clear()
+        STATION_CENTER.reload()
 
     with SessionLocal() as db:
         log_security_event(
