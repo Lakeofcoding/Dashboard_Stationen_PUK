@@ -1,21 +1,30 @@
 version: '3.8'
 
+# PUK Dashboard - Docker Compose
+#
+# PROFILE:
+#   Standard (SQLite):  docker-compose up -d backend frontend
+#   Mit PostgreSQL:     docker-compose --profile postgres up -d
+#
+# QUICKSTART:
+#   1. cp .env.example .env   (Werte anpassen)
+#   2. docker-compose up -d backend frontend
+
 services:
-  # PostgreSQL Datenbank (optional, für Produktion)
+
+  # ─── PostgreSQL (optional, nur mit --profile postgres) ───────────
   postgres:
+    profiles: ["postgres"]
     image: postgres:16-alpine
     container_name: puk_dashboard_db
     environment:
       POSTGRES_DB: puk_dashboard
       POSTGRES_USER: dashboard_user
       POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme_in_production}
-      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=de_CH.UTF-8"
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./backend/init_db.sql:/docker-entrypoint-initdb.d/init.sql:ro
-    # Port NICHT nach aussen exponiert (nur internes Docker-Netz)
-    # ports:
-    #   - "5432:5432"
     expose:
       - "5432"
     healthcheck:
@@ -26,37 +35,21 @@ services:
     networks:
       - puk_network
     restart: unless-stopped
-    # Ressourcen-Limits für klinische Umgebung
-    deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 512M
-        reservations:
-          cpus: '0.5'
-          memory: 256M
 
-  # Backend Service
+  # ─── Backend ─────────────────────────────────────────────────────
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: puk_dashboard_backend
     environment:
-      # Datenbank-Konfiguration
-      DATABASE_URL: ${DATABASE_URL:-sqlite:///app/data/app.db}
-      # Optional: PostgreSQL
-      # DATABASE_URL: postgresql://dashboard_user:${DB_PASSWORD:-changeme}@postgres:5432/puk_dashboard
-      
-      # Sicherheit
-      DASHBOARD_ALLOW_DEMO_AUTH: ${ALLOW_DEMO_AUTH:-0}
+      # Datenbank: Standard SQLite, für PostgreSQL auskommentieren
+      DATABASE_URL: ${DATABASE_URL:-sqlite:///data/app.db}
+      # Demo-Modus (für Demo: 1, für Produktion: 0)
+      DASHBOARD_ALLOW_DEMO_AUTH: ${ALLOW_DEMO_AUTH:-1}
       DASHBOARD_DEBUG: ${DEBUG:-0}
-      SECRET_KEY: ${SECRET_KEY:-change_this_in_production_to_random_string}
-      
-      # Zeitzonen
+      SECRET_KEY: ${SECRET_KEY:-}
       TZ: Europe/Zurich
-      
-      # Logging
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
       - ./backend/data:/app/data
@@ -64,28 +57,17 @@ services:
       - ./rules:/app/rules:ro
     ports:
       - "8000:8000"
-    depends_on:
-      postgres:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 15s
     networks:
       - puk_network
     restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: '2.0'
-          memory: 1G
-        reservations:
-          cpus: '0.5'
-          memory: 512M
 
-  # Frontend Service
+  # ─── Frontend ────────────────────────────────────────────────────
   frontend:
     build:
       context: ./frontend
@@ -96,24 +78,17 @@ services:
     ports:
       - "8080:8080"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 15s
     networks:
       - puk_network
     restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 256M
-        reservations:
-          cpus: '0.25'
-          memory: 128M
 
 volumes:
   postgres_data:

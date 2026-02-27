@@ -1,43 +1,48 @@
 @echo off
+setlocal EnableDelayedExpansion
 title PUK-Backend
 cd /d "%~dp0backend"
 
-:: Versuche venv
-if exist ".venv\Scripts\python.exe" goto :USE_VENV
-
-:: Kein venv -> System-Python
-where python >nul 2>&1
-if %errorlevel% neq 0 goto :NO_PYTHON
-
-:: Pruefe uvicorn
-python -c "import uvicorn" >nul 2>&1
-if %errorlevel% neq 0 goto :INSTALL_DEPS
-
-:USE_SYSTEM
-echo [Backend] Starte mit System-Python...
-python -m uvicorn main:app --host 0.0.0.0 --port 8000
-goto :CHECK_EXIT
-
-:USE_VENV
-echo [Backend] Starte mit venv...
-.venv\Scripts\python.exe -m uvicorn main:app --host 0.0.0.0 --port 8000
-goto :CHECK_EXIT
-
-:INSTALL_DEPS
-echo Backend-Pakete fehlen. Installiere...
-pip install -r requirements.txt -q --break-system-packages 2>nul
-if %errorlevel% neq 0 pip install -r requirements.txt -q
-goto :USE_SYSTEM
-
-:NO_PYTHON
-echo FEHLER: Python nicht gefunden!
-echo Bitte zuerst demo-prepare.bat ausfuehren.
-pause
-exit /b 1
-
-:CHECK_EXIT
-if %errorlevel% neq 0 (
-    echo.
-    echo Backend-Start fehlgeschlagen!
-    pause
+:: .env laden (liegt eine Ebene hoeher)
+if exist "..\.env" (
+    for /f "usebackq eol=# tokens=1,* delims==" %%a in ("..\.env") do (
+        if not "%%a"=="" set "%%a=%%b"
+    )
 )
+
+:: SECRET_KEY: kurzer Demo-Key wenn nicht gesetzt
+if not defined SECRET_KEY set "SECRET_KEY=demo-dev-key-only"
+
+:: Python aus venv bevorzugen
+set "PYTHON="
+if exist ".venv\Scripts\python.exe" (
+    set "PYTHON=.venv\Scripts\python.exe"
+) else (
+    where python >nul 2>&1
+    if !errorlevel! equ 0 (
+        set "PYTHON=python"
+    ) else (
+        where python3 >nul 2>&1
+        if !errorlevel! equ 0 set "PYTHON=python3"
+    )
+)
+if not defined PYTHON (
+    echo FEHLER: Python nicht gefunden.
+    echo Bitte RUN_DEMO.bat verwenden oder Python installieren.
+    pause
+    exit /b 1
+)
+
+echo Backend startet auf http://127.0.0.1:8000 ...
+
+:: Port 8000 freigeben falls noch belegt
+for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":8000.*LISTENING" 2^>nul') do (
+    echo   Beende alten Prozess auf Port 8000 ^(PID %%p^)...
+    taskkill /f /pid %%p >nul 2>&1
+    timeout /t 1 /nobreak >nul
+)
+
+!PYTHON! -m uvicorn main:app --host 127.0.0.1 --port 8000
+echo.
+echo Backend wurde beendet.
+pause

@@ -15,6 +15,7 @@ alembic==1.14.1              # Database Migrations
 
 # CSV/Excel Import
 pandas==2.2.3
+numpy>=2.0.0                  # Python 3.13+ kompatibel
 openpyxl==3.1.5              # Excel support
 
 # Security
@@ -29,3 +30,6 @@ pytest==8.3.3
 httpx==0.27.2
 pytest-asyncio==0.24.0
 faker==33.1.0                # Test data generation
+
+# SSO/OIDC (optional, nur wenn SSO_ENABLED=1):
+# PyJWT[crypto]==2.9.0

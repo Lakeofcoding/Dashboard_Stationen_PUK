@@ -4,7 +4,7 @@ Zentral gesammelt damit Router und Services sie importieren koennen.
 """
 from datetime import date
 from typing import Any, Literal, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 Severity = Literal["OK", "WARN", "CRITICAL"]
 
@@ -107,12 +107,12 @@ class CaseDetail(CaseSummary):
 
 # --- ACK / Shift ---
 class AckRequest(BaseModel):
-    case_id: str
+    case_id: str = Field(..., min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.\-]{1,64}$")
     ack_scope: Literal["case", "rule"] = "rule"
-    scope_id: str = "*"
+    scope_id: str = Field(default="*", max_length=128)
     action: Literal["ACK", "SHIFT"] = "ACK"
-    shift_code: Optional[str] = None
-    comment: Optional[str] = None  # optionaler Freitext (= DB Ack.comment)
+    shift_code: Optional[str] = Field(default=None, max_length=8)
+    comment: Optional[str] = Field(default=None, max_length=500)
 
 
 # --- Day State ---
@@ -128,8 +128,8 @@ class AdminUserRoleAssignment(BaseModel):
     station_id: str = "*"
 
 class AdminUserCreate(BaseModel):
-    user_id: str
-    display_name: Optional[str] = None
+    user_id: str = Field(..., min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9_.\-@]+$")
+    display_name: Optional[str] = Field(default=None, max_length=120)
     is_active: bool = True
     roles: Optional[list[AdminUserRoleAssignment]] = None
 
@@ -142,14 +142,14 @@ class AdminAssignRole(BaseModel):
     station_id: str = "*"
 
 class AdminPermissionCreate(BaseModel):
-    perm_id: str
-    description: Optional[str] = None
+    perm_id: str = Field(..., min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9_:]+$")
+    description: Optional[str] = Field(default=None, max_length=256)
 
 class AdminPermissionUpdate(BaseModel):
     description: Optional[str] = None
 
 class AdminRoleCreate(BaseModel):
-    role_id: str
+    role_id: str = Field(..., min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9_]+$")
     description: Optional[str] = None
 
 class AdminRoleUpdate(BaseModel):

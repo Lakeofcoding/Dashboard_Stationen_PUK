@@ -9,21 +9,56 @@ ARCHITEKTUR-REGEL:
 from __future__ import annotations
 import os
 import warnings
+from pathlib import Path
+
+# ── dotenv laden (non-Docker / Demo-Modus) ───────────────────────────
+# Muss ZUERST geschehen, bevor os.getenv aufgerufen wird.
+# Lädt .env aus dem Projektroot (zwei Ebenen über app/).
+_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+if _ENV_FILE.exists():
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(dotenv_path=_ENV_FILE, override=False)
+    except ImportError:
+        # python-dotenv nicht installiert → manuell lesen
+        with open(_ENV_FILE) as _f:
+            for _line in _f:
+                _line = _line.strip()
+                if not _line or _line.startswith("#") or "=" not in _line:
+                    continue
+                _k, _v = _line.split("=", 1)
+                _k, _v = _k.strip(), _v.strip().strip('"').strip("'")
+                if _k and _k not in os.environ:
+                    os.environ[_k] = _v
 
 # ── Environment ──────────────────────────────────────────────────────
-DEBUG = os.getenv("DASHBOARD_DEBUG", "0") in ("1", "true", "True")
-SECRET_KEY = os.getenv("SECRET_KEY", "")
-DEMO_MODE = os.getenv("DASHBOARD_ALLOW_DEMO_AUTH", "1") in ("1", "true", "True")
-SECURE_COOKIES = os.getenv("DASHBOARD_SECURE_COOKIES", "0") in ("1", "true", "True")
+# HINWEIS: Env-Var-Namen sind kanonisch mit DASHBOARD_-Prefix.
+# Für Rückwärtskompatibilität werden auch die Kurzformen (ohne Prefix) akzeptiert.
+
+def _env_bool(primary: str, fallback: str | None = None, default: str = "0") -> bool:
+    """Liest eine bool-Env-Var mit optionalem Fallback-Namen."""
+    val = os.getenv(primary)
+    if val is None and fallback:
+        val = os.getenv(fallback)
+    if val is None:
+        val = default
+    return val.lower() in ("1", "true", "yes")
+
+DEBUG = _env_bool("DASHBOARD_DEBUG", "DEBUG", "0")
+DEMO_MODE = _env_bool("DASHBOARD_ALLOW_DEMO_AUTH", "ALLOW_DEMO_AUTH", "1")
+SECURE_COOKIES = _env_bool("DASHBOARD_SECURE_COOKIES", default="0")
+
+# SECRET_KEY: beide Varianten akzeptieren
+SECRET_KEY = os.getenv("SECRET_KEY", os.getenv("DASHBOARD_SECRET_KEY", ""))
 
 # ── Rollen-Scope Mapping (echte Konfiguration, nicht Daten) ─────────
 ROLE_SCOPE: dict[str, str] = {
     "system_admin":  "global",
     "admin":         "global",
-    "manager":       "klinik",      # Klinikmanager → ganze Klinik
-    "shift_lead":    "zentrum",     # Schichtleitung → Zentrum
-    "clinician":     "station",     # Arzt/Psychologe → Station
-    "viewer":        "station",     # Lesezugriff → Station
+    "manager":       "klinik",
+    "shift_lead":    "zentrum",
+    "clinician":     "station",
+    "viewer":        "station",
 }
 
 # ── Display-Labels (UI-Texte, keine Daten) ───────────────────────────
@@ -39,8 +74,7 @@ CLINIC_DEFAULT = "EPP"
 
 # ── Station-Center Proxy (lazy aus Excel) ────────────────────────────
 class _StationCenterProxy(dict):
-    """Lazy-loading dict: lädt Station→Center aus Excel beim ersten Zugriff.
-    Kein statischer Fallback. Wenn Excel fehlt → leere Map → expliziter Hinweis."""
+    """Lazy-loading dict: lädt Station→Center aus Excel beim ersten Zugriff."""
     _loaded = False
 
     def _ensure(self):
@@ -50,9 +84,6 @@ class _StationCenterProxy(dict):
                 m = get_station_center_map()
                 if m:
                     self.update(m)
-                    print(f"[config] STATION_CENTER: {len(m)} Stationen aus Excel geladen")
-                else:
-                    print("[config] WARNUNG: Keine Stations-Zuordnung in Excel gefunden")
             except Exception as e:
                 print(f"[config] WARNUNG: Station-Center-Map nicht geladen: {e}")
             self._loaded = True
@@ -68,7 +99,6 @@ class _StationCenterProxy(dict):
     def __bool__(self): self._ensure(); return super().__bool__()
 
     def reload(self):
-        """Cache leeren — wird beim nächsten Zugriff neu geladen."""
         self._loaded = False
         self.clear()
 
@@ -77,15 +107,16 @@ STATION_CENTER: dict[str, str] = _StationCenterProxy()
 
 
 # ── Startup-Warnungen ────────────────────────────────────────────────
-if not SECRET_KEY or SECRET_KEY == "change_this_in_production_to_random_string":
+if not SECRET_KEY or SECRET_KEY in ("change_this_in_production_to_random_string", "CHANGE_THIS_TO_A_RANDOM_STRING_IN_PRODUCTION"):
     warnings.warn(
         "SECRET_KEY nicht gesetzt oder Default! "
-        "Fuer Produktion: SECRET_KEY=<random 64 hex> setzen.",
+        "Im Demo-Modus wird ein temporärer Key verwendet. "
+        "Für Produktion: SECRET_KEY=<random 64 hex> in .env setzen.",
         stacklevel=1,
     )
 if DEMO_MODE:
     warnings.warn(
-        "DEMO-MODUS aktiv (DASHBOARD_ALLOW_DEMO_AUTH=1). "
-        "Authentifizierung ist NICHT sicher. Nur fuer Demo/Pilot!",
+        "DEMO-MODUS aktiv (ALLOW_DEMO_AUTH=1). "
+        "Authentifizierung ist vereinfacht. Nur für Demo/Pilot!",
         stacklevel=1,
     )

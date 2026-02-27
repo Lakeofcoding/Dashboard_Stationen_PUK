@@ -5,7 +5,7 @@ import json
 import uuid
 from datetime import date, datetime, timezone
 from typing import Any, Literal, Optional
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File, Form
 from pydantic import BaseModel
 from app.auth import AuthContext, get_auth_context, require_ctx
 from app.rbac import require_permission, activate_break_glass, revoke_break_glass
@@ -782,6 +782,19 @@ def csv_upload(
         fname = (file.filename or "").strip()
         if fname and not fname.lower().endswith((".csv", ".txt")):
             raise HTTPException(status_code=400, detail="Nur CSV-Dateien erlaubt (.csv, .txt)")
+        # Magic Bytes Check: Excel/Office-Dateien ablehnen (könnten Macros enthalten)
+        OFFICE_MAGIC = [
+            b"\xd0\xcf\x11\xe0",  # Old Office (XLS, DOC)
+            b"PK\x03\x04",           # XLSX/DOCX (ZIP-Archiv)
+        ]
+        if any(raw.startswith(magic) for magic in OFFICE_MAGIC):
+            raise HTTPException(
+                status_code=400,
+                detail="Binäre Office-Dateien sind nicht erlaubt. Bitte als CSV exportieren."
+            )
+        # Null-Byte Check (binäre Datei getarnt als CSV)
+        if b"\x00" in raw[:1024]:
+            raise HTTPException(status_code=400, detail="Datei enthält Null-Bytes (kein gültiges CSV)")
         # Try UTF-8 first, then latin-1
         try:
             text = raw.decode("utf-8-sig")
@@ -925,10 +938,18 @@ def admin_cases_count(
 @router.delete("/api/admin/cases/all")
 def admin_delete_all_cases(
     request: Request,
+    confirm: str = Query(default="", description="Muss 'DELETE_ALL_CONFIRMED' sein"),
     ctx: AuthContext = Depends(get_auth_context),
     _perm: None = Depends(require_permission("admin:write")),
 ):
-    """Löscht ALLE importierten Fälle (Vorsicht!)."""
+    """Löscht ALLE importierten Fälle.
+    Erfordert confirm=DELETE_ALL_CONFIRMED als zweite Bestätigung.
+    """
+    if confirm != "DELETE_ALL_CONFIRMED":
+        raise HTTPException(
+            status_code=400,
+            detail="Sicherheitscheck: ?confirm=DELETE_ALL_CONFIRMED als Query-Parameter erforderlich"
+        )
     with SessionLocal() as db:
         count = db.query(Case).count()
         db.query(Case).delete()

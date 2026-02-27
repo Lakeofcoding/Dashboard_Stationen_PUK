@@ -42,7 +42,10 @@ class RateLimitMiddleware:
         self._last_cleanup = time.time()
 
     def _client_id(self, request: Request) -> str:
-        user_id = request.headers.get("X-User-Id")
+        # SECURITY FIX: X-User-Id is user-controlled, use IP as primary rate limit key
+        # Token-authenticated user_id is not available at middleware level
+        ip = request.client.host if request.client else "unknown"
+        user_id = None  # Removed: was spoofable via X-User-Id header
         if user_id:
             return f"u:{user_id}"
         ip = request.client.host if request.client else "unknown"

@@ -35,6 +35,8 @@ _EXEMPT_PATHS = (
     "/docs",
     "/openapi.json",
     "/redoc",
+    "/api/auth/login",   # Login hat noch kein CSRF-Cookie
+    "/api/auth/logout",  # Logout ist idempotent
 )
 
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}

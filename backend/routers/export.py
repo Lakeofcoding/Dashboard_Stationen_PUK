@@ -38,6 +38,22 @@ from app.rbac import require_permission
 from app.case_logic import enrich_case
 from app.day_state import today_local
 
+# ---- CSV Formula Injection Protection ----
+_CSV_INJECT_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+def _sanitize_csv(value: str | None) -> str:
+    """Verhindert CSV/Formula-Injection.
+    Excel/LibreOffice interpretieren Zellen die mit =, +, -, @ beginnen als Formeln.
+    Referenz: OWASP - CSV Injection
+    """
+    if value is None:
+        return ""
+    s = str(value).strip()
+    if s and s[0] in _CSV_INJECT_PREFIXES:
+        return "'" + s  # Prefix mit Apostroph → Excel behandelt als Text
+    return s
+
+
 router = APIRouter(tags=["export"])
 
 
@@ -174,6 +190,20 @@ def _filter_cases(cases: list[dict], report_id: str) -> list[dict]:
 
 # ---- Endpoints ----
 
+
+def _resolve_stations_for_user(ctx, station_id):
+    """BUG FIX: RBAC-Scope-Check fuer Export-Endpoints."""
+    from app.db import SessionLocal
+    from app.rbac import get_user_visible_stations
+    from fastapi import HTTPException
+    with SessionLocal() as db:
+        visible = get_user_visible_stations(db, ctx.user_id)
+    if visible is None:
+        return [station_id] if station_id else None
+    if station_id and station_id not in visible:
+        raise HTTPException(status_code=403, detail=f"Kein Zugriff auf Station: {station_id}")
+    return [s for s in ([station_id] if station_id else list(visible)) if s in visible]
+
 @router.get("/api/export/reports")
 def list_reports(
     frequency: Literal["daily", "weekly", "all"] = "all",
@@ -201,7 +231,20 @@ def export_data(
     _perm: None = Depends(require_permission("dashboard:view")),
 ):
     """Fallnummern-Liste für einen Report als JSON."""
-    stations = [station_id] if station_id else None
+    # BUG FIX: Station-Scope-Check - User darf nur sichtbare Stationen abfragen
+    from app.db import SessionLocal
+    from app.rbac import get_user_visible_stations
+    with SessionLocal() as db:
+        visible = get_user_visible_stations(db, ctx.user_id)
+    if station_id and visible is not None and station_id not in visible:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=403, detail=f"Kein Zugriff auf Station: {station_id}")
+    # Wenn kein station_id → nur sichtbare Stationen zurückgeben
+    if visible is not None:
+        stations = [s for s in ([station_id] if station_id else list(visible)) if s in visible]
+    else:
+        stations = [station_id] if station_id else None
+
     all_cases = _load_all_enriched(stations)
     hits = _filter_cases(all_cases, report_id)
 
@@ -234,7 +277,7 @@ def export_csv(
     _perm: None = Depends(require_permission("dashboard:view")),
 ):
     """Fallnummern-Liste als CSV-Download."""
-    stations = [station_id] if station_id else None
+    stations = _resolve_stations_for_user(ctx, station_id)  # BUG FIX: Scope-Check
     all_cases = _load_all_enriched(stations)
     hits = _filter_cases(all_cases, report_id)
     defn = REPORT_DEFINITIONS.get(report_id, {})
@@ -248,15 +291,17 @@ def export_csv(
     writer.writerow(["Fallnummer", "Station", "PatientenID", "Eintritt", "Austritt"])
     for c in hits:
         writer.writerow([
-            c["case_id"],
-            c["station_id"],
-            c.get("patient_id", ""),
-            str(c.get("admission_date", "")),
-            str(c.get("discharge_date", "")) if c.get("discharge_date") else "",
+            _sanitize_csv(c["case_id"]),
+            _sanitize_csv(c["station_id"]),
+            _sanitize_csv(c.get("patient_id")),
+            _sanitize_csv(str(c.get("admission_date", ""))),
+            _sanitize_csv(str(c.get("discharge_date", ""))) if c.get("discharge_date") else "",
         ])
 
     buf.seek(0)
-    filename = f"{report_id}_{today_local().isoformat()}.csv"
+    # Sicherheit: report_id im Dateinamen bereinigen (verhindert Header-Injection)
+    safe_report_id = re.sub(r'[^a-zA-Z0-9_-]', '_', report_id)
+    filename = f"{safe_report_id}_{today_local().isoformat()}.csv"
     return StreamingResponse(
         iter([buf.getvalue()]),
         media_type="text/csv",
@@ -272,7 +317,7 @@ def export_summary(
     _perm: None = Depends(require_permission("dashboard:view")),
 ):
     """Gesamtübersicht: Alle Reports einer Frequenz mit Fallzahlen."""
-    stations = [station_id] if station_id else None
+    stations = _resolve_stations_for_user(ctx, station_id)  # BUG FIX: Scope-Check
     all_cases = _load_all_enriched(stations)
 
     results = []

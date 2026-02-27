@@ -648,6 +648,7 @@ def case_efm_events(
 @router.get("/api/shift_reasons")
 def list_shift_reasons(
     ctx: AuthContext = Depends(get_auth_context),
+    _perm: None = Depends(require_permission("meta:read")),
 ):
     """Gibt alle aktiven Schiebe-Gründe zurück (für Frontend)."""
     with SessionLocal() as db:

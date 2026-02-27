@@ -29,6 +29,7 @@ import type { StationAnalytics } from "./AnalyticsPanel";
 type AuthState = {
   stationId: string;
   userId: string;
+  token?: string; // Session-Token (Bearer)
 };
 
 type MetaUser = { user_id: string; roles: string[] };
@@ -104,8 +105,13 @@ function authHeaders(auth: AuthState): HeadersInit {
   const h: Record<string, string> = {
     "Content-Type": "application/json",
     "X-Station-Id": auth.stationId,
-    "X-User-Id": auth.userId,
+    // SICHERHEIT: X-User-Id wird NICHT mehr direkt gesendet.
+    // Authentifizierung erfolgt via Bearer Token (puk_session Cookie wird automatisch gesendet).
   };
+  // Bearer Token falls vorhanden (Alternative zum Cookie)
+  if (auth.token) {
+    h["Authorization"] = `Bearer ${auth.token}`;
+  }
   // CSRF-Token aus Cookie lesen und als Header mitsenden
   const csrf = document.cookie.split("; ").find(c => c.startsWith("csrf_token=") || c.startsWith("__Host-csrf_token="));
   if (csrf) {
@@ -324,7 +330,139 @@ function ClinicLogo({ title = "Klinik" }: { title?: string }) {
   );
 }
 
+
+// ── Login Screen ─────────────────────────────────────────────────────────────
+
+type DemoUser = { user_id: string; display_name: string; roles: string[] };
+
+function LoginScreen({ onLogin }: { onLogin: (userId: string, token: string) => void }) {
+  const [users, setUsers] = useState<DemoUser[]>([]);
+  const [selectedUser, setSelectedUser] = useState<string>("demo");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Demo-User-Liste laden
+    fetch("/api/auth/users")
+      .then(r => r.json())
+      .then(d => {
+        if (d.users) {
+          setUsers(d.users);
+          if (d.users.length > 0) setSelectedUser(d.users[0].user_id);
+        }
+      })
+      .catch(() => setUsers([{ user_id: "demo", display_name: "Demo User", roles: ["admin"] }]));
+  }, []);
+
+  async function handleLogin() {
+    setLoading(true);
+    setError(null);
+    try {
+      const resp = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ user_id: selectedUser }),
+      });
+      if (!resp.ok) {
+        const d = await resp.json().catch(() => ({}));
+        throw new Error(d.detail || `Login fehlgeschlagen (${resp.status})`);
+      }
+      const data = await resp.json();
+      onLogin(data.user_id, data.token);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Unbekannter Fehler");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div style={{
+      minHeight: "100vh", background: "#f8fafc",
+      display: "flex", alignItems: "center", justifyContent: "center"
+    }}>
+      <div style={{
+        background: "#fff", borderRadius: 12, padding: "40px 48px",
+        boxShadow: "0 4px 24px rgba(0,0,0,0.1)", minWidth: 360, maxWidth: 420
+      }}>
+        <div style={{ textAlign: "center", marginBottom: 32 }}>
+          <div style={{ fontSize: 32, marginBottom: 8 }}>🏥</div>
+          <h1 style={{ margin: 0, fontSize: "1.4rem", fontWeight: 800, color: "#1a1a1a" }}>PUK Dashboard</h1>
+          <p style={{ margin: "8px 0 0", color: "#6b7280", fontSize: 13 }}>Demo-Modus · Bitte User auswählen</p>
+        </div>
+
+        <div style={{ marginBottom: 20 }}>
+          <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 6 }}>
+            Demo-User
+          </label>
+          {users.length > 0 ? (
+            <select
+              value={selectedUser}
+              onChange={e => setSelectedUser(e.target.value)}
+              style={{
+                width: "100%", padding: "10px 12px", borderRadius: 8,
+                border: "1px solid #d1d5db", fontSize: 14, outline: "none",
+                background: "#f9fafb", cursor: "pointer",
+              }}
+            >
+              {users.map(u => (
+                <option key={u.user_id} value={u.user_id}>
+                  {u.display_name} ({u.roles.join(", ")})
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              type="text"
+              value={selectedUser}
+              onChange={e => setSelectedUser(e.target.value)}
+              placeholder="User-ID eingeben..."
+              style={{
+                width: "100%", padding: "10px 12px", borderRadius: 8,
+                border: "1px solid #d1d5db", fontSize: 14, outline: "none", boxSizing: "border-box"
+              }}
+            />
+          )}
+        </div>
+
+        {error && (
+          <div style={{
+            background: "#fef2f2", border: "1px solid #fecaca",
+            borderRadius: 8, padding: "10px 14px", marginBottom: 16,
+            color: "#b91c1c", fontSize: 13
+          }}>
+            {error}
+          </div>
+        )}
+
+        <button
+          onClick={handleLogin}
+          disabled={loading || !selectedUser}
+          style={{
+            width: "100%", padding: "12px", borderRadius: 8,
+            background: loading ? "#93c5fd" : "#2563eb",
+            color: "#fff", fontWeight: 700, fontSize: 15,
+            border: "none", cursor: loading ? "not-allowed" : "pointer",
+            transition: "background 0.2s",
+          }}
+        >
+          {loading ? "Anmelden..." : "Anmelden"}
+        </button>
+
+        <p style={{ textAlign: "center", marginTop: 16, fontSize: 11, color: "#9ca3af" }}>
+          Demo-Modus: kein Passwort erforderlich
+        </p>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
+  const [isLoggedIn, setIsLoggedIn] = useState<boolean>(() => {
+    // Session-Cookie vorhanden → als eingeloggt betrachten
+    return document.cookie.split("; ").some(c => c.startsWith("puk_session="));
+  });
   const [auth, setAuth] = useState<AuthState>(() => loadAuth());
   const [me, setMe] = useState<MetaMe | null>(null);
 
@@ -343,7 +481,8 @@ export default function App() {
 
   // Rollen-basierte UI-Steuerung
   const userRoles = useMemo(() => new Set(me?.roles ?? []), [me]);
-  const canViewOverview = userRoles.has("system_admin") || userRoles.has("admin") || userRoles.has("manager");
+  // Alle authentifizierten User sehen die BI-Übersicht (Scope regelt die Tiefe)
+  const canViewOverview = !!me;
   const canViewMedical = userRoles.has("clinician") || userRoles.has("system_admin") || userRoles.has("admin");
   const [permissionInfo, setPermissionInfo] = useState<string | null>(null);
 
@@ -393,6 +532,7 @@ export default function App() {
   const [analytics, setAnalytics] = useState<StationAnalytics[]>([]);
   const [drillClinic, setDrillClinic] = useState<string | null>(null);
   const [drillCenter, setDrillCenter] = useState<string | null>(null);
+  const [drillStation, setDrillStation] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedCaseId, setSelectedCaseId] = useState<string | null>(null);
   const [detail, setDetail] = useState<CaseDetail | null>(null);
@@ -674,14 +814,21 @@ export default function App() {
     const sl = me.scope.level;
     const sc = me.scope.clinic;
     const sz = me.scope.center;
-    // Prüfen ob Klinik/Zentrum tatsächlich in den Daten existieren
+    const ss = me.scope.station;
+    // Prüfen ob Klinik/Zentrum/Station tatsächlich in den Daten existieren
     const availClinics = new Set(filteredOverview.map(s => s.clinic));
     const availCenters = new Set(filteredOverview.map(s => s.center));
+    const availStations = new Set(filteredOverview.map(s => s.station_id));
     if (sl === "klinik" && sc && availClinics.has(sc) && !drillClinic) {
       setDrillClinic(sc);
-    } else if ((sl === "zentrum" || sl === "station") && sc && sz) {
+    } else if (sl === "zentrum" && sc && sz) {
       if (availClinics.has(sc) && !drillClinic) setDrillClinic(sc);
       if (availCenters.has(sz) && !drillCenter) setDrillCenter(sz);
+    } else if (sl === "station" && sc && sz && ss) {
+      // Station-Scope: direkt bis zur Station-BI-Ebene navigieren
+      if (availClinics.has(sc) && !drillClinic) setDrillClinic(sc);
+      if (availCenters.has(sz) && !drillCenter) setDrillCenter(sz);
+      if (availStations.has(ss) && !drillStation) setDrillStation(ss);
     }
   }, [me, viewMode, filteredOverview.length]);
 
@@ -691,6 +838,10 @@ export default function App() {
     if (selectedCaseId) return true;
     if (viewMode !== "overview") return true;
     // Scope-Grenzen: nicht über die zugewiesene Ebene hinaus zurück
+    if (drillStation) {
+      // Kann von Station-BI → Stationen, wenn Scope es erlaubt
+      return scopeLevel !== "station";
+    }
     if (drillCenter) {
       // Kann von Zentrum → Klinik, wenn Scope es erlaubt
       return scopeLevel === "global" || scopeLevel === "klinik";
@@ -711,8 +862,9 @@ export default function App() {
       setBrowseClinic(""); setBrowseCenter(""); setBrowseStation("");
       return;
     }
-    if (drillCenter && (scopeLevel === "global" || scopeLevel === "klinik")) { setDrillCenter(null); return; }
-    if (drillClinic && scopeLevel === "global") { setDrillClinic(null); return; }
+    if (drillStation && scopeLevel !== "station") { setDrillStation(null); return; }
+    if (drillCenter && (scopeLevel === "global" || scopeLevel === "klinik")) { setDrillStation(null); setDrillCenter(null); return; }
+    if (drillClinic && scopeLevel === "global") { setDrillStation(null); setDrillCenter(null); setDrillClinic(null); return; }
   }
 
   // Browser-Back-Button integrieren
@@ -735,6 +887,27 @@ export default function App() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   });
+
+  // Login-Gate: Zeige Login-Screen wenn nicht eingeloggt
+  if (!isLoggedIn) {
+    return <LoginScreen onLogin={(userId, token) => {
+      // Komplett frischer Start: alle Navigation zurücksetzen
+      setViewMode("overview");
+      setDrillClinic(null);
+      setDrillCenter(null);
+      setDrillStation(null);
+      setSelectedCaseId(null);
+      setDetail(null);
+      setDetailError(null);
+      setBrowseClinic("");
+      setBrowseCenter("");
+      setBrowseStation("");
+      setMe(null);
+      // Dann erst Login-State setzen (triggert /api/meta/me fetch → Auto-Navigation)
+      setIsLoggedIn(true);
+      updateAuth({ userId, token });
+    }} />;
+  }
 
   return (
     <main style={{ display: "flex", flexDirection: "column", height: "100vh", width: "100vw", overflow: "hidden", fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial", backgroundColor: "#f4f7f6" }}>
@@ -778,19 +951,30 @@ export default function App() {
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             {/* Scope selectors (Dev-Mode) */}
-            <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
-              <span style={{ fontSize: 10, color: "#9ca3af" }}>User</span>
-              <select value={auth.userId} onChange={(e) => {
-                updateAuth({ userId: e.target.value });
-                // Scope und View zurücksetzen bei User-Wechsel
-                setBrowseClinic(""); setBrowseCenter(""); setBrowseStation("");
-                setSelectedCaseId(null); setDetail(null);
-                setDrillClinic(null); setDrillCenter(null);
-                // me-Redirect-Effect setzt den korrekten Scope nach Laden
-              }} style={{ padding: "3px 6px", borderRadius: 5, border: "1px solid #e5e7eb", fontSize: 11, cursor: "pointer" }}>
-                {metaUsers.map((u) => <option key={u.user_id} value={u.user_id}>{u.user_id}</option>)}
-              </select>
-            </label>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ fontSize: 10, color: "#6b7280" }}>👤</span>
+              <span style={{ fontSize: 11, fontWeight: 600, color: "#374151" }}>{auth.userId}</span>
+              <button
+                onClick={async () => {
+                  await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
+                  document.cookie = "puk_session=; max-age=0; path=/";
+                  document.cookie = "csrf_token=; max-age=0; path=/";
+                  // Komplett zurücksetzen
+                  setViewMode("overview");
+                  setDrillClinic(null); setDrillCenter(null); setDrillStation(null);
+                  setSelectedCaseId(null); setDetail(null);
+                  setMe(null);
+                  localStorage.removeItem(LS_KEYS.stationId);
+                  localStorage.removeItem(LS_KEYS.userId);
+                  setIsLoggedIn(false);
+                  updateAuth({ userId: "", token: undefined });
+                }}
+                title="Abmelden"
+                style={{ padding: "2px 7px", fontSize: 10, borderRadius: 5, border: "1px solid #fecaca", background: "#fef2f2", color: "#b91c1c", cursor: "pointer" }}
+              >
+                Abmelden
+              </button>
+            </div>
             {/* Role badge */}
             {me && me.roles.length > 0 && (
               <span style={{ padding: "2px 7px", borderRadius: 999, fontSize: 10, fontWeight: 600, background: "#eff6ff", color: "#1d4ed8", border: "1px solid #bfdbfe" }}>
@@ -864,13 +1048,13 @@ export default function App() {
                 key={tab.key}
                 onClick={() => {
                   if (isRestricted) {
-                    setPermissionInfo("Übersicht ist nur für Klinikleitung und Administration verfügbar.");
+                    setPermissionInfo("Bitte warten – Benutzerdaten werden geladen…");
                     return;
                   }
                   setViewMode(tab.key);
                   if (tab.key === "overview") {
                     setSelectedCaseId(null); setDetail(null);
-                    setDrillClinic(null); setDrillCenter(null);
+                    setDrillClinic(null); setDrillCenter(null); setDrillStation(null);
                   }
                   if (tab.key !== "overview") {
                     setSelectedCaseId(null); setDetail(null);
@@ -977,7 +1161,7 @@ export default function App() {
               {/* Breadcrumb */}
               <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 16, fontSize: 13, color: "#6b7280" }}>
                 <span
-                  onClick={() => { setDrillClinic(null); setDrillCenter(null); }}
+                  onClick={() => { setDrillClinic(null); setDrillCenter(null); setDrillStation(null); }}
                   style={{ cursor: "pointer", fontWeight: !drillClinic ? 700 : 400, color: !drillClinic ? "#1d4ed8" : "#6b7280" }}
                 >
                   Kliniken
@@ -986,7 +1170,7 @@ export default function App() {
                   <>
                     <span style={{ color: "#d1d5db" }}>/</span>
                     <span
-                      onClick={() => setDrillCenter(null)}
+                      onClick={() => { setDrillCenter(null); setDrillStation(null); }}
                       style={{ cursor: "pointer", fontWeight: !drillCenter ? 700 : 400, color: !drillCenter ? "#1d4ed8" : "#6b7280" }}
                     >
                       {drillClinic}
@@ -996,7 +1180,18 @@ export default function App() {
                 {drillCenter && (
                   <>
                     <span style={{ color: "#d1d5db" }}>/</span>
-                    <span style={{ fontWeight: 700, color: "#1d4ed8" }}>{drillCenter}</span>
+                    <span
+                      onClick={() => setDrillStation(null)}
+                      style={{ cursor: "pointer", fontWeight: !drillStation ? 700 : 400, color: !drillStation ? "#1d4ed8" : "#6b7280" }}
+                    >
+                      {drillCenter}
+                    </span>
+                  </>
+                )}
+                {drillStation && (
+                  <>
+                    <span style={{ color: "#d1d5db" }}>/</span>
+                    <span style={{ fontWeight: 700, color: "#1d4ed8" }}>{drillStation}</span>
                   </>
                 )}
               </div>
@@ -1117,12 +1312,12 @@ export default function App() {
                     />
                   )}
                 </>
-              ) : (
+              ) : !drillStation ? (
                 /* ── LEVEL 3: Stationen eines Zentrums ── */
                 <>
                   <h2 style={{ margin: "0 0 16px 0", fontSize: "1.2rem" }}>
                     Stationen – {drillCenter}
-                    <span style={{ fontWeight: 400, fontSize: 12, color: "#6b7280", marginLeft: 8 }}>Klicken für Fallliste</span>
+                    <span style={{ fontWeight: 400, fontSize: 12, color: "#6b7280", marginLeft: 8 }}>Klicken für Stations-Auswertung</span>
                   </h2>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 14 }}>
                     {stationItems.map((s) => {
@@ -1132,12 +1327,8 @@ export default function App() {
                       <div
                         key={s.station_id}
                         onClick={() => {
-                          setBrowseClinic(s.clinic);
-                          setBrowseCenter(s.center);
-                          setBrowseStation(s.station_id);
-                          // Auth-Kontext für Detailansicht setzen
+                          setDrillStation(s.station_id);
                           updateAuth({ stationId: s.station_id });
-                          setViewMode("cases");
                         }}
                         style={{
                           padding: 16, borderRadius: 10,
@@ -1184,6 +1375,99 @@ export default function App() {
                     />
                   )}
                 </>
+              ) : (
+                /* ── LEVEL 4: Station-BI (Einzelstation-Auswertung) ── */
+                (() => {
+                  const stationData = filteredOverview.find(s => s.station_id === drillStation);
+                  const stationAnalytics = filteredAnalytics.filter(s => s.station_id === drillStation);
+                  const eSev = stationData
+                    ? (categoryFilter === "completeness" ? (stationData.completeness_severity ?? stationData.severity)
+                      : categoryFilter === "medical" ? (stationData.medical_severity ?? stationData.severity) : stationData.severity)
+                    : "OK";
+                  return (
+                    <>
+                      {/* Station Header Card */}
+                      <div style={{
+                        padding: "20px 24px", borderRadius: 14, marginBottom: 20,
+                        background: `linear-gradient(135deg, ${eSev === "CRITICAL" ? "#fef2f2" : eSev === "WARN" ? "#fffbeb" : "#f0fdf4"}, #ffffff)`,
+                        border: `2px solid ${eSev === "CRITICAL" ? "#fca5a5" : eSev === "WARN" ? "#fcd34d" : "#86efac"}`,
+                      }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                          <div>
+                            <div style={{ fontSize: "1.6rem", fontWeight: 800, letterSpacing: "0.5px" }}>
+                              📊 Station {drillStation}
+                            </div>
+                            <div style={{ fontSize: 13, color: "#6b7280", marginTop: 4 }}>
+                              {drillClinic} {CLINIC_LABELS[drillClinic ?? ""] ? `— ${CLINIC_LABELS[drillClinic ?? ""]}` : ""} · {drillCenter}
+                            </div>
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                            {stationData && (
+                              <div style={{ textAlign: "center" }}>
+                                <div style={{ display: "flex", gap: 8, fontSize: 13 }}>
+                                  <span>Fälle: <strong>{stationData.total_cases}</strong></span>
+                                  <span>Offen: <strong>{stationData.open_cases}</strong></span>
+                                </div>
+                                <div style={{ display: "flex", gap: 6, marginTop: 6, justifyContent: "flex-end" }}>
+                                  {stationData.critical_count > 0 && <span style={{ fontSize: 11, background: "#ef4444", color: "#fff", padding: "2px 8px", borderRadius: 999, fontWeight: 700 }}>{stationData.critical_count} kritisch</span>}
+                                  {stationData.warn_count > 0 && <span style={{ fontSize: 11, background: "#f59e0b", color: "#fff", padding: "2px 8px", borderRadius: 999, fontWeight: 700 }}>{stationData.warn_count} Warn.</span>}
+                                  {(stationData.critical_count === 0 && stationData.warn_count === 0) && <span style={{ fontSize: 11, background: "#22c55e", color: "#fff", padding: "2px 8px", borderRadius: 999, fontWeight: 700 }}>Alles OK</span>}
+                                </div>
+                              </div>
+                            )}
+                            <div style={{
+                              width: 48, height: 48, borderRadius: "50%",
+                              background: eSev === "CRITICAL" ? "#ef4444" : eSev === "WARN" ? "#f59e0b" : "#22c55e",
+                              display: "flex", alignItems: "center", justifyContent: "center",
+                              color: "#fff", fontWeight: 800, fontSize: 20,
+                            }}>
+                              {eSev === "CRITICAL" ? "!" : eSev === "WARN" ? "⚠" : "✓"}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Smart Jump: Zur Fallliste */}
+                      <button
+                        onClick={() => {
+                          const sd = filteredOverview.find(s => s.station_id === drillStation);
+                          if (sd) {
+                            setBrowseClinic(sd.clinic);
+                            setBrowseCenter(sd.center);
+                            setBrowseStation(sd.station_id);
+                          }
+                          setViewMode("cases");
+                        }}
+                        style={{
+                          display: "flex", alignItems: "center", gap: 10,
+                          padding: "12px 24px", marginBottom: 20,
+                          borderRadius: 10, border: "2px solid #3b82f6",
+                          background: "linear-gradient(135deg, #eff6ff, #ffffff)",
+                          cursor: "pointer", fontSize: 14, fontWeight: 700, color: "#1d4ed8",
+                          transition: "all 0.15s",
+                        }}
+                        onMouseEnter={(e) => { e.currentTarget.style.background = "#3b82f6"; e.currentTarget.style.color = "#fff"; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.background = "linear-gradient(135deg, #eff6ff, #ffffff)"; e.currentTarget.style.color = "#1d4ed8"; }}
+                      >
+                        <span style={{ fontSize: 18 }}>🏥</span>
+                        Zur Fallliste – {drillStation}
+                        <span style={{ marginLeft: "auto", fontSize: 16 }}>→</span>
+                      </button>
+
+                      {/* BI Analytics — Station-Ebene */}
+                      {stationAnalytics.length > 0 ? (
+                        <AnalyticsPanel
+                          stations={stationAnalytics}
+                          scopeLabel={`Station ${drillStation}`}
+                        />
+                      ) : (
+                        <div style={{ padding: 20, textAlign: "center", color: "#9ca3af", fontSize: 14 }}>
+                          Keine Analytics-Daten für diese Station verfügbar.
+                        </div>
+                      )}
+                    </>
+                  );
+                })()
               )}
             </div>
           </div>
