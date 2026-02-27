@@ -37,7 +37,7 @@ interface BsclData {
   consistency: Consistency; hierarchy: Hierarchy;
 }
 
-interface Props { auth: { token: string }; canView: boolean; }
+interface Props { auth: { token: string }; canView: boolean; monat?: string; onMonatChange?: (m: string) => void; }
 
 /* ─── Helpers ─── */
 const CC: Record<string, string> = { EPP: "#2563eb", FPP: "#dc2626", APP: "#059669", KJPP: "#d97706" };
@@ -59,7 +59,7 @@ function KPI({ label, value, sub, color, unit }: { label: string; value: string;
 }
 
 /* ═══ MAIN PANEL ═══ */
-const BsclReportPanel = forwardRef<ReportPanelHandle, Props>(function BsclReportPanel({ auth, canView }, ref) {
+const BsclReportPanel = forwardRef<ReportPanelHandle, Props>(function BsclReportPanel({ auth, canView, monat, onMonatChange }, ref) {
   const [data, setData] = useState<BsclData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -85,12 +85,13 @@ const BsclReportPanel = forwardRef<ReportPanelHandle, Props>(function BsclReport
     setLoading(true);
     const p = new URLSearchParams();
     if (fClinic) p.set("clinic", fClinic); if (fCenter) p.set("center", fCenter); if (fStation) p.set("station", fStation);
+    if (monat) p.set("monat", monat);
     fetch(`/api/reporting/bscl?${p}`, { headers: { Authorization: `Bearer ${auth.token}` } })
       .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
       .then(d => { setData(d); setError(null); })
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
-  }, [fClinic, fCenter, fStation, auth.token]);
+  }, [fClinic, fCenter, fStation, auth.token, monat]);
 
   if (!canView) return <div style={{ padding: 40, textAlign: "center", color: "#9ca3af" }}>Keine Berechtigung.</div>;
   if (loading) return <div style={{ padding: 40, textAlign: "center", color: "#9ca3af" }}>Lade BSCL-Daten…</div>;

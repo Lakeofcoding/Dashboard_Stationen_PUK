@@ -42,7 +42,7 @@ interface HonosData {
   histogram: HistBucket[]; worse_list: WorseCase[];
   consistency: Consistency; hierarchy: Hierarchy;
 }
-interface Props { auth: { token: string; stationId: string }; canView: boolean; }
+interface Props { auth: { token: string; stationId: string }; canView: boolean; monat?: string; onMonatChange?: (m: string) => void; }
 
 const CC: Record<string, string> = { EPP: "#3b82f6", KJPP: "#a855f7", FPP: "#f59e0b", APP: "#10b981" };
 const cc = (c: string) => CC[c] || "#6b7280";
@@ -192,7 +192,7 @@ function Kpi({label,value,unit,sub,color,icon}:{label:string;value:string|number
 /* ═══════════════════════════════════════════════════════════════ */
 /*  MAIN PANEL                                                    */
 /* ═══════════════════════════════════════════════════════════════ */
-const HonosReportPanel = forwardRef<ReportPanelHandle, Props>(function HonosReportPanel({auth, canView}, ref) {
+const HonosReportPanel = forwardRef<ReportPanelHandle, Props>(function HonosReportPanel({auth, canView, monat, onMonatChange}, ref) {
   const [data, setData] = useState<HonosData|null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string|null>(null);
@@ -218,12 +218,13 @@ const HonosReportPanel = forwardRef<ReportPanelHandle, Props>(function HonosRepo
     setLoading(true);
     const p = new URLSearchParams();
     if(fClinic)p.set("clinic",fClinic); if(fCenter)p.set("center",fCenter); if(fStation)p.set("station",fStation);
+    if(monat)p.set("monat",monat);
     fetch(`/api/reporting/honos?${p}`,{headers:{Authorization:`Bearer ${auth.token}`}})
       .then(r=>{if(!r.ok)throw new Error(`HTTP ${r.status}`);return r.json()})
       .then(d=>{setData(d);setError(null)})
       .catch(e=>setError(e.message))
       .finally(()=>setLoading(false));
-  }, [auth.token, fClinic, fCenter, fStation]);
+  }, [auth.token, fClinic, fCenter, fStation, monat]);
 
   if (!canView) return (
     <div style={{padding:60,textAlign:"center"}}>

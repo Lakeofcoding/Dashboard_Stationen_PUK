@@ -18,8 +18,9 @@ from fastapi import APIRouter, Depends, Query
 from app.auth import AuthContext, get_auth_context
 from app.case_logic import get_all_cases_enriched
 from app.bi_analytics import _q_honos
-from app.excel_loader import get_station_klinik_map, get_station_center_map
+from app.excel_loader import get_station_klinik_map, get_station_center_map, get_all_efm_reporting, get_sichtkontakte
 from typing import Optional
+from datetime import datetime as _dt
 
 router = APIRouter()
 
@@ -144,6 +145,7 @@ def honos_report(
     center: Optional[str] = Query(None),
     station: Optional[str] = Query(None),
     year: Optional[int] = Query(None),
+    monat: Optional[str] = Query(None, description="YYYY-MM Filter"),
 ):
     all_cases = get_all_cases_enriched()
     hierarchy = _build_hierarchy()
@@ -153,6 +155,12 @@ def honos_report(
         if clinic and c.get("clinic") != clinic: continue
         if center and c.get("center") != center: continue
         if station and c.get("station_id") != station: continue
+        if monat:
+            dd = c.get("discharge_date") or c.get("admission_date")
+            if dd and hasattr(dd, "strftime") and dd.strftime("%Y-%m") != monat:
+                continue
+            elif isinstance(dd, str) and not dd.startswith(monat):
+                continue
         if year:
             adm = c.get("admission_date")
             if adm:
@@ -429,6 +437,7 @@ def bscl_report(
     center: Optional[str] = Query(None),
     station: Optional[str] = Query(None),
     year: Optional[int] = Query(None),
+    monat: Optional[str] = Query(None, description="YYYY-MM Filter"),
 ):
     """BSCL (Erwachsene) + HoNOSCA-SR (KJPP) Selbstbeurteilungs-Reporting."""
     all_cases = get_all_cases_enriched()
@@ -439,6 +448,12 @@ def bscl_report(
         if clinic and c.get("clinic") != clinic: continue
         if center and c.get("center") != center: continue
         if station and c.get("station_id") != station: continue
+        if monat:
+            dd = c.get("discharge_date") or c.get("admission_date")
+            if dd and hasattr(dd, "strftime") and dd.strftime("%Y-%m") != monat:
+                continue
+            elif isinstance(dd, str) and not dd.startswith(monat):
+                continue
         if year:
             adm = c.get("admission_date")
             if adm:
@@ -603,4 +618,291 @@ def bscl_report(
         "by_clinic": by_clinic, "by_station": by_station,
         "histogram": histogram, "worse_list": worse_list,
         "consistency": consistency, "hierarchy": hierarchy,
+    }
+
+
+# ══════════════════════════════════════════════════════════════
+# EFM (Freiheitsbeschränkende Massnahmen) Reporting
+# ANQ-konform: Isolation, Fixierung, Festhalten, Zwangsmedikation
+# ══════════════════════════════════════════════════════════════
+
+EFM_TYPES_ORDER = [
+    "Isolation", "Fixierung", "Festhalten",
+    "Zwangsmedikation oral", "Zwangsmedikation Injektion",
+]
+
+# Monitoring rules (SAMW/NKVF/Klinikstandard)
+SICHT_INTERVAL_MAX_MIN = 30     # Max 30 min between visual checks
+ISO_WARN_H = 24                 # Isolation >24h = warning
+ISO_CRIT_H = 72                 # Isolation >72h = critical
+FIX_WARN_H = 12                 # Fixation >12h = warning
+
+
+@router.get("/api/reporting/efm")
+def efm_report(
+    ctx: AuthContext = Depends(get_auth_context),
+    clinic: Optional[str] = Query(None),
+    center: Optional[str] = Query(None),
+    station: Optional[str] = Query(None),
+    monat: Optional[str] = Query(None, description="YYYY-MM Filter"),
+):
+    """EFM Reporting: Freiheitsbeschränkende Massnahmen (ANQ).
+
+    Qualitäts-Checks: fehlende Endzeiten, Dauer-Warnungen, Sichtkontakt-Lücken,
+    EFM ausserhalb Falldauer, Überlappungen.
+    """
+    all_efm = get_all_efm_reporting()
+    all_sicht = get_sichtkontakte()
+    hierarchy = _build_hierarchy()
+
+    # Case lookup for validation (fid → case dates)
+    all_cases = get_all_cases_enriched()
+    case_map: dict[str, dict] = {}
+    for c in all_cases:
+        case_map[c["case_id"]] = c
+
+    # Filter
+    efm_list = []
+    for e in all_efm:
+        if clinic and e.get("klinik") != clinic:
+            continue
+        if center and e.get("zentrum") != center:
+            continue
+        if station and e.get("station") != station:
+            continue
+        if monat and e.get("start_dt"):
+            if not e["start_dt"].startswith(monat):
+                continue
+        efm_list.append(e)
+
+    total = len(efm_list)
+    total_cases = len(all_cases)
+
+    # Cases with EFM
+    fids_with_efm = set(e["fid"] for e in efm_list)
+    cases_with_efm = len(fids_with_efm)
+    efm_rate_pct = round(100 * cases_with_efm / total_cases, 1) if total_cases else 0
+
+    # By type
+    by_type: dict[str, dict] = {}
+    for t in EFM_TYPES_ORDER:
+        subset = [e for e in efm_list if e["art_efm"] == t]
+        durations = [e["duration_h"] for e in subset if e["duration_h"] is not None and e["duration_h"] > 0]
+        by_type[t] = {
+            "count": len(subset),
+            "avg_h": round(sum(durations) / len(durations), 1) if durations else None,
+            "max_h": round(max(durations), 1) if durations else None,
+            "median_h": round(sorted(durations)[len(durations)//2], 1) if durations else None,
+        }
+
+    # By clinic, by station
+    clinic_agg: dict[str, dict] = {}
+    station_agg: dict[str, dict] = {}
+    for e in efm_list:
+        k = e["klinik"]
+        clinic_agg.setdefault(k, {"count": 0, "fids": set()})
+        clinic_agg[k]["count"] += 1
+        clinic_agg[k]["fids"].add(e["fid"])
+
+        s = e["station"]
+        station_agg.setdefault(s, {"count": 0, "fids": set(), "klinik": k, "zentrum": e["zentrum"]})
+        station_agg[s]["count"] += 1
+        station_agg[s]["fids"].add(e["fid"])
+
+    by_clinic = [{"clinic": k, "n_efm": v["count"], "n_cases": len(v["fids"])}
+                 for k, v in sorted(clinic_agg.items())]
+    by_station_out = [{"station": k, "klinik": v["klinik"], "zentrum": v["zentrum"],
+                       "n_efm": v["count"], "n_cases": len(v["fids"])}
+                      for k, v in sorted(station_agg.items())]
+
+    # Monthly timeline
+    monthly: dict[str, dict] = {}
+    for e in efm_list:
+        if not e.get("start_dt"):
+            continue
+        m = e["start_dt"][:7]  # YYYY-MM
+        monthly.setdefault(m, {"count": 0, "fids": set()})
+        monthly[m]["count"] += 1
+        monthly[m]["fids"].add(e["fid"])
+    timeline = [{"month": m, "count": v["count"], "n_cases": len(v["fids"])}
+                for m, v in sorted(monthly.items())]
+
+    # Top patients (most EFM)
+    pat_counts: dict[int, int] = {}
+    for e in efm_list:
+        pat_counts[e["fid"]] = pat_counts.get(e["fid"], 0) + 1
+    top_patients = sorted(
+        [{"fid": f, "count": n, "station": next((e["station"] for e in efm_list if e["fid"] == f), "?")}
+         for f, n in pat_counts.items()],
+        key=lambda x: -x["count"]
+    )[:15]
+
+    # ═══ Quality Checks ═══
+    alerts: list[dict] = []
+
+    for e in efm_list:
+        eid = e["efm_id"]
+        art = e["art_efm"]
+        fid = e["fid"]
+        dur = e["duration_h"]
+
+        # 1. Missing end time (forgotten to close)
+        if art in ("Isolation", "Fixierung", "Festhalten") and e.get("end_dt") is None:
+            alerts.append({
+                "type": "missing_end", "severity": "critical",
+                "efm_id": eid, "fid": fid, "art": art, "station": e["station"],
+                "msg": f"{art} ohne Endzeit (vergessen zu schliessen?)",
+            })
+
+        # 2. Duration warnings
+        if dur is not None:
+            if art == "Isolation" and dur > ISO_CRIT_H:
+                alerts.append({
+                    "type": "duration_critical", "severity": "critical",
+                    "efm_id": eid, "fid": fid, "art": art, "station": e["station"],
+                    "msg": f"Isolation {dur:.0f}h (>{ISO_CRIT_H}h kritisch)",
+                })
+            elif art == "Isolation" and dur > ISO_WARN_H:
+                alerts.append({
+                    "type": "duration_warn", "severity": "warning",
+                    "efm_id": eid, "fid": fid, "art": art, "station": e["station"],
+                    "msg": f"Isolation {dur:.0f}h (>{ISO_WARN_H}h Warnung)",
+                })
+            if art == "Fixierung" and dur > FIX_WARN_H:
+                alerts.append({
+                    "type": "duration_warn", "severity": "warning",
+                    "efm_id": eid, "fid": fid, "art": art, "station": e["station"],
+                    "msg": f"Fixierung {dur:.0f}h (>{FIX_WARN_H}h Warnung)",
+                })
+
+        # 3. EFM outside case duration
+        case = case_map.get(str(fid))
+        if case and e.get("start_dt"):
+            try:
+                efm_start = _dt.fromisoformat(e["start_dt"])
+                adm = case.get("admission_date")
+                dis = case.get("discharge_date")
+                if adm:
+                    if hasattr(adm, "year"):
+                        adm_dt = _dt.combine(adm, _dt.min.time()) if not isinstance(adm, _dt) else adm
+                    else:
+                        adm_dt = _dt.fromisoformat(str(adm)[:10])
+                    if efm_start < adm_dt:
+                        alerts.append({
+                            "type": "outside_case", "severity": "critical",
+                            "efm_id": eid, "fid": fid, "art": art, "station": e["station"],
+                            "msg": f"EFM Start vor Eintritt ({e['start_dt'][:10]} < {str(adm)[:10]})",
+                        })
+                if dis:
+                    if hasattr(dis, "year"):
+                        dis_dt = _dt.combine(dis, _dt.max.time().replace(microsecond=0)) if not isinstance(dis, _dt) else dis
+                    else:
+                        dis_dt = _dt.fromisoformat(str(dis)[:10]).replace(hour=23, minute=59)
+                    if efm_start > dis_dt:
+                        alerts.append({
+                            "type": "outside_case", "severity": "critical",
+                            "efm_id": eid, "fid": fid, "art": art, "station": e["station"],
+                            "msg": f"EFM Start nach Austritt ({e['start_dt'][:10]} > {str(dis)[:10]})",
+                        })
+            except Exception:
+                pass
+
+        # 4. Sichtkontakt-Lücken (Isolation/Fixierung)
+        if art in ("Isolation", "Fixierung") and eid is not None:
+            checks = all_sicht.get(eid, [])
+            if not checks and dur and dur > 0.5:
+                alerts.append({
+                    "type": "no_sichtkontakt", "severity": "critical",
+                    "efm_id": eid, "fid": fid, "art": art, "station": e["station"],
+                    "msg": f"Keine Sichtkontakte dokumentiert ({dur:.0f}h {art})",
+                })
+            elif checks and dur and dur > 0.5:
+                # Check for gaps > 30 min
+                times = []
+                for sk in checks:
+                    try:
+                        times.append(_dt.fromisoformat(sk["zeitpunkt"]))
+                    except Exception:
+                        pass
+                times.sort()
+                max_gap_min = 0
+                for i in range(1, len(times)):
+                    gap = (times[i] - times[i-1]).total_seconds() / 60
+                    if gap > max_gap_min:
+                        max_gap_min = gap
+                if max_gap_min > SICHT_INTERVAL_MAX_MIN:
+                    alerts.append({
+                        "type": "sicht_gap", "severity": "warning",
+                        "efm_id": eid, "fid": fid, "art": art, "station": e["station"],
+                        "msg": f"Max. Sichtkontakt-Lücke {max_gap_min:.0f} Min (Soll ≤{SICHT_INTERVAL_MAX_MIN} Min)",
+                    })
+
+    # 5. Overlapping EFM (same patient, same type)
+    by_fid_type: dict[tuple, list] = {}
+    for e in efm_list:
+        if not e.get("start_dt") or not e.get("end_dt"):
+            continue
+        key = (e["fid"], e["art_efm"])
+        by_fid_type.setdefault(key, []).append(e)
+    for key, events in by_fid_type.items():
+        if len(events) < 2:
+            continue
+        events.sort(key=lambda x: x["start_dt"])
+        for i in range(1, len(events)):
+            prev_end = events[i-1]["end_dt"]
+            curr_start = events[i]["start_dt"]
+            if prev_end and curr_start and curr_start < prev_end:
+                alerts.append({
+                    "type": "overlap", "severity": "warning",
+                    "efm_id": events[i]["efm_id"], "fid": key[0], "art": key[1],
+                    "station": events[i]["station"],
+                    "msg": f"Überlappende {key[1]} (Fall {key[0]})",
+                })
+
+    # Sort alerts: critical first, then warning
+    alerts.sort(key=lambda a: (0 if a["severity"] == "critical" else 1, a.get("fid", 0)))
+
+    # Sichtkontakt-Statistik
+    sicht_stats = {}
+    for e in efm_list:
+        if e["art_efm"] not in ("Isolation", "Fixierung"):
+            continue
+        eid = e["efm_id"]
+        checks = all_sicht.get(eid, [])
+        sicht_stats[eid] = {
+            "efm_id": eid, "fid": e["fid"], "art": e["art_efm"],
+            "n_checks": len(checks), "duration_h": e["duration_h"],
+            "checks_per_h": round(len(checks) / e["duration_h"], 1) if e["duration_h"] and e["duration_h"] > 0 else None,
+        }
+
+    # Available months (for frontend filter)
+    available_months = sorted(set(
+        e["start_dt"][:7] for e in all_efm if e.get("start_dt")
+    ), reverse=True)
+
+    kpis = {
+        "total_efm": total,
+        "cases_with_efm": cases_with_efm,
+        "total_cases": total_cases,
+        "efm_rate_pct": efm_rate_pct,
+        "n_isolation": by_type.get("Isolation", {}).get("count", 0),
+        "n_fixierung": by_type.get("Fixierung", {}).get("count", 0),
+        "n_festhalten": by_type.get("Festhalten", {}).get("count", 0),
+        "n_zwangsmed": by_type.get("Zwangsmedikation oral", {}).get("count", 0)
+                     + by_type.get("Zwangsmedikation Injektion", {}).get("count", 0),
+        "n_alerts_critical": sum(1 for a in alerts if a["severity"] == "critical"),
+        "n_alerts_warning": sum(1 for a in alerts if a["severity"] == "warning"),
+    }
+
+    return {
+        "kpis": kpis,
+        "by_type": by_type,
+        "by_clinic": by_clinic,
+        "by_station": by_station_out,
+        "timeline": timeline,
+        "top_patients": top_patients,
+        "alerts": alerts,
+        "efm_list": efm_list[:200],  # Limit for performance
+        "hierarchy": hierarchy,
+        "available_months": available_months,
     }

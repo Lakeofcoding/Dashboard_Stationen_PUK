@@ -26,6 +26,7 @@ import MonitoringPanel from "./MonitoringPanel";
 import AnalyticsPanel from "./AnalyticsPanel";
 import HonosReportPanel from "./HonosReportPanel";
 import BsclReportPanel from "./BsclReportPanel";
+import EfmReportPanel from "./EfmReportPanel";
 import type { ReportPanelHandle } from "./HonosReportPanel";
 import type { StationAnalytics } from "./AnalyticsPanel";
 
@@ -602,6 +603,7 @@ export default function App() {
   const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>("all");
   const [overviewMode, setOverviewMode] = useState<OverviewMode>("dokumentation");
   const [reportingTab, setReportingTab] = useState<ReportingTab>("honos");
+  const [reportingMonat, setReportingMonat] = useState<string>("");
   const reportPanelRef = useRef<ReportPanelHandle>(null);
   const [dayState, setDayState] = useState<DayState | null>(null);
   const [cases, setCases] = useState<CaseSummary[]>([]);
@@ -1397,7 +1399,7 @@ export default function App() {
             {overviewMode === "reporting" && ([
               { key: "honos" as ReportingTab, label: "HoNOS / HoNOSCA", ready: true },
               { key: "bscl" as ReportingTab, label: "BSCL / HoNOSCA-SR", ready: true },
-              { key: "efm" as ReportingTab, label: "EFM", ready: false },
+              { key: "efm" as ReportingTab, label: "EFM", ready: true },
             ]).map((t) => {
               const active = reportingTab === t.key;
               return (
@@ -1428,18 +1430,9 @@ export default function App() {
         {/* ─── TAB: ÜBERSICHT – REPORTING MODE ─── */}
         {viewMode === "overview" && overviewMode === "reporting" && (
           <div style={{ flex: 1, overflowY: "auto", padding: "24px 28px" }}>
-            {reportingTab === "honos" && <HonosReportPanel ref={reportPanelRef} auth={auth} canView={canViewReporting} />}
-            {reportingTab === "bscl" && <BsclReportPanel ref={reportPanelRef} auth={auth} canView={canViewReporting} />}
-            {reportingTab === "efm" && (
-              <div style={{ maxWidth: 800, margin: "40px auto", textAlign: "center" }}>
-                <div style={{ fontSize: 48, marginBottom: 12 }}>🔒</div>
-                <h2 style={{ margin: "0 0 8px", fontSize: 18, color: "#374151" }}>EFM Reporting</h2>
-                <p style={{ color: "#9ca3af", fontSize: 13 }}>
-                  Freiheitsbeschränkende Massnahmen: Häufigkeit, Dauer, Vergleich über Stationen und Zeiträume.
-                </p>
-                <p style={{ color: "#d1d5db", fontSize: 12, marginTop: 12 }}>Wird in einem kommenden Release implementiert.</p>
-              </div>
-            )}
+            {reportingTab === "honos" && <HonosReportPanel ref={reportPanelRef} auth={auth} canView={canViewReporting} monat={reportingMonat} onMonatChange={setReportingMonat} />}
+            {reportingTab === "bscl" && <BsclReportPanel ref={reportPanelRef} auth={auth} canView={canViewReporting} monat={reportingMonat} onMonatChange={setReportingMonat} />}
+            {reportingTab === "efm" && <EfmReportPanel ref={reportPanelRef} auth={auth} canView={canViewReporting} monat={reportingMonat} onMonatChange={setReportingMonat} />}
           </div>
         )}
         {/* ─── TAB: ÜBERSICHT – DOKUMENTATION MODE ─── */}

@@ -606,12 +606,110 @@ def get_efm_events(case_id: str) -> list[dict]:
     return _efm_events.get(case_id, [])
 
 
+# ═══════════════════════════════════════════════════════════════
+# EFM Reporting (v_efm + v_sichtkontakte)
+# ═══════════════════════════════════════════════════════════════
+
+_v_efm_cache: list[dict] | None = None
+_v_sichtkontakte_cache: dict[int, list[dict]] | None = None
+
+
+def get_all_efm_reporting() -> list[dict]:
+    """Alle EFM-Massnahmen aus v_efm (fuer Reporting). Gecached."""
+    global _v_efm_cache
+    if _v_efm_cache is not None:
+        return _v_efm_cache
+    result: list[dict] = []
+    try:
+        df = pd.read_excel(_EXCEL_PATH, sheet_name="v_efm")
+        for _, r in df.iterrows():
+            fid = _to_int(r.get("fid"))
+            if fid is None:
+                continue
+            start_d = _to_str(r.get("start_datum"))
+            start_t = _to_str(r.get("start_zeit")) or "00:00"
+            end_d = _to_str(r.get("end_datum"))
+            end_t = _to_str(r.get("end_zeit")) or "00:00"
+            start_dt = None
+            end_dt = None
+            try:
+                if start_d:
+                    start_dt = datetime.strptime(f"{start_d} {start_t}", "%Y-%m-%d %H:%M")
+            except Exception:
+                pass
+            try:
+                if end_d:
+                    end_dt = datetime.strptime(f"{end_d} {end_t}", "%Y-%m-%d %H:%M")
+            except Exception:
+                pass
+            dur_h = None
+            if start_dt and end_dt:
+                dur_h = round((end_dt - start_dt).total_seconds() / 3600, 1)
+            result.append({
+                "efm_id": _to_int(r.get("efm_id")),
+                "fid": fid,
+                "pid": _to_str(r.get("pid")),
+                "station": _to_str(r.get("station")) or "UNKNOWN",
+                "klinik": _to_str(r.get("klinik")) or "EPP",
+                "zentrum": _to_str(r.get("zentrum")) or "UNKNOWN",
+                "art_efm": _to_str(r.get("art_efm")) or "Unbekannt",
+                "start_dt": start_dt.isoformat() if start_dt else None,
+                "end_dt": end_dt.isoformat() if end_dt else None,
+                "duration_h": dur_h,
+                "angeordnet_von": _to_str(r.get("angeordnet_von")),
+                "begruendung": _to_str(r.get("begruendung")),
+            })
+        print(f"[excel_loader] v_efm: {len(result)} EFM-Massnahmen geladen")
+    except Exception as e:
+        print(f"[excel_loader] v_efm: {e}")
+    _v_efm_cache = result
+    return result
+
+
+def get_sichtkontakte() -> dict[int, list[dict]]:
+    """Sichtkontakte aus v_sichtkontakte: {efm_id: [{zeitpunkt, bemerkung, ...}]}. Gecached."""
+    global _v_sichtkontakte_cache
+    if _v_sichtkontakte_cache is not None:
+        return _v_sichtkontakte_cache
+    result: dict[int, list[dict]] = {}
+    try:
+        df = pd.read_excel(_EXCEL_PATH, sheet_name="v_sichtkontakte")
+        for _, r in df.iterrows():
+            eid = _to_int(r.get("efm_id"))
+            if eid is None:
+                continue
+            zp_str = _to_str(r.get("zeitpunkt"))
+            zp_dt = None
+            try:
+                if zp_str:
+                    zp_dt = datetime.strptime(zp_str, "%Y-%m-%d %H:%M")
+            except Exception:
+                pass
+            entry = {
+                "sk_id": _to_int(r.get("sk_id")),
+                "efm_id": eid,
+                "fid": _to_int(r.get("fid")),
+                "zeitpunkt": zp_dt.isoformat() if zp_dt else zp_str,
+                "bemerkung": _to_str(r.get("bemerkung")),
+                "durchgefuehrt_von": _to_str(r.get("durchgefuehrt_von")),
+            }
+            result.setdefault(eid, []).append(entry)
+        total = sum(len(v) for v in result.values())
+        print(f"[excel_loader] v_sichtkontakte: {total} Kontakte fuer {len(result)} EFM geladen")
+    except Exception as e:
+        print(f"[excel_loader] v_sichtkontakte: {e}")
+    _v_sichtkontakte_cache = result
+    return result
+
+
 def reload():
     """Cache leeren — wird beim naechsten Zugriff neu geladen."""
-    global _cases, _lab_history, _ekg_history, _station_map, _efm_events
+    global _cases, _lab_history, _ekg_history, _station_map, _efm_events, _v_efm_cache, _v_sichtkontakte_cache
     _cases = None
     _lab_history = None
     _ekg_history = None
     _station_map = None
     _efm_events = None
+    _v_efm_cache = None
+    _v_sichtkontakte_cache = None
     print("[excel_loader] Cache geleert, wird beim naechsten Zugriff neu geladen.")
