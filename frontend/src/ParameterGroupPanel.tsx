@@ -554,7 +554,7 @@ function ItemRow({
                 <select
                   disabled={!canAck}
                   value={shiftVal}
-                  onChange={e => onShiftSelect(e.target.value)}
+                  onChange={e => { if (!canAck) { onError?.("Keine Berechtigung für Quittierungen/Schiebungen."); return; } onShiftSelect(e.target.value); }}
                   style={{
                     padding: "5px 8px", borderRadius: 6, border: "1px solid #d1d5db",
                     fontSize: 11, cursor: canAck ? "pointer" : "not-allowed",
@@ -568,9 +568,10 @@ function ItemRow({
                   ))}
                 </select>
                 <button
-                  disabled={!canAck || !shiftVal}
                   onClick={async (e) => {
                     e.stopPropagation();
+                    if (!canAck) { onError?.("Keine Berechtigung für Schiebungen."); return; }
+                    if (!shiftVal) return;
                     try { await onShiftRule?.(caseId, item.rule_id!, shiftVal); }
                     catch (err: any) { onError?.(err?.message ?? String(err)); }
                   }}
@@ -592,9 +593,9 @@ function ItemRow({
 
               {/* ACK: Behoben / Gesehen */}
               <button
-                disabled={!canAck}
                 onClick={async (e) => {
                   e.stopPropagation();
+                  if (!canAck) { onError?.("Keine Berechtigung für Quittierungen."); return; }
                   try { await onAckRule?.(caseId, item.rule_id!); }
                   catch (err: any) { onError?.(err?.message ?? String(err)); }
                 }}

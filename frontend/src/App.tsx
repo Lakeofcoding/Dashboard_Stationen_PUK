@@ -160,6 +160,10 @@ class SessionExpiredError extends Error {
   constructor(msg: string) { super(msg); this.name = "SessionExpiredError"; }
 }
 
+class PermissionDeniedError extends Error {
+  constructor(msg: string) { super(msg); this.name = "PermissionDeniedError"; }
+}
+
 // ETag-Store: speichert letzte ETags pro URL für conditional requests
 const _etagStore: Record<string, string> = {};
 const _etagDataStore: Record<string, any> = {};
@@ -188,7 +192,7 @@ async function apiJson<T>(path: string, init: RequestInit): Promise<T> {
     if (lower.includes("user disabled") || lower.includes("unknown user") || lower.includes("session")) {
       throw new SessionExpiredError(text || "Sitzung abgelaufen");
     }
-    throw new Error(text || `Keine Berechtigung (${res.status})`);
+    throw new PermissionDeniedError(text || `Keine Berechtigung (${res.status})`);
   }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
@@ -530,6 +534,7 @@ export default function App() {
   const canViewOverview = !!me;
   const canViewMedical = userRoles.has("clinician") || userRoles.has("system_admin") || userRoles.has("admin");
   const [permissionInfo, setPermissionInfo] = useState<string | null>(null);
+  const [permissionDenied, setPermissionDenied] = useState<string | null>(null);
 
   // Auto-dismiss permission info after 3s
   useEffect(() => {
@@ -537,6 +542,21 @@ export default function App() {
     const t = setTimeout(() => setPermissionInfo(null), 3000);
     return () => clearTimeout(t);
   }, [permissionInfo]);
+
+  /** Zentrale Fehlerbehandlung: Permission → Modal, Rest → Error-State */
+  const handleApiError = useCallback((err: any, fallbackSetter?: (msg: string) => void) => {
+    if (err instanceof PermissionDeniedError) {
+      setPermissionDenied(err.message || "Sie haben keine Berechtigung für diese Aktion.");
+      return;
+    }
+    const msg = err?.message ?? String(err);
+    // Auch String-basierte 403-Erkennung (z.B. aus verschachtelten Catches)
+    if (msg.includes("403") || msg.includes("Keine Berechtigung") || msg.includes("Kein Zugriff")) {
+      setPermissionDenied(msg);
+      return;
+    }
+    if (fallbackSetter) fallbackSetter(msg);
+  }, []);
 
   // Session timeout: 30 min inactivity
   const SESSION_TIMEOUT_MS = 30 * 60 * 1000;
@@ -737,13 +757,10 @@ export default function App() {
         setError(null);
       } catch (e: any) {
         if (!alive) return;
-        const msg = e?.message ?? String(e);
-        if (msg.includes("403") || msg.includes("Kein Zugriff")) {
+        if (e instanceof PermissionDeniedError || String(e?.message).includes("403")) {
           setCases([]);
-          setPermissionInfo("Keine Berechtigung für diese Ansicht. Bitte wählen Sie einen anderen Filter.");
-        } else {
-          setError(msg);
         }
+        handleApiError(e, setError);
       }
     };
 
@@ -776,7 +793,7 @@ export default function App() {
         ]);
         if (alive) { setOverview(overviewData); setAnalytics(analyticsData); setError(null); }
       } catch (e: any) {
-        if (alive) setError(e?.message ?? String(e));
+        if (alive) handleApiError(e, setError);
       }
     };
 
@@ -802,7 +819,7 @@ export default function App() {
       .catch((err) => {
         const msg = err?.message ?? String(err);
         if (String(msg).includes("404")) { setSelectedCaseId(null); setDetail(null); return; }
-        setDetailError(msg);
+        handleApiError(err, setDetailError);
       })
       .finally(() => setDetailLoading(false));
   }, [selectedCaseId, auth, viewMode]);
@@ -976,26 +993,31 @@ export default function App() {
     if (drillClinic && scopeLevel === "global") { setDrillStation(null); setDrillCenter(null); setDrillClinic(null); return; }
   }
 
-  // Browser-Back-Button integrieren
+  // Browser-Back-Button integrieren (stabile Refs für Closure)
+  const canGoBackRef = useRef(canGoBack);
+  const goBackRef = useRef(goBack);
+  canGoBackRef.current = canGoBack;
+  goBackRef.current = goBack;
+
   useEffect(() => {
     function onPopState(e: PopStateEvent) {
       e.preventDefault();
-      if (canGoBack) goBack();
+      if (canGoBackRef.current) goBackRef.current();
     }
-    // Push einen Eintrag damit popstate feuert
+    // Einmalig einen History-Eintrag pushen
     window.history.pushState({ puk: true }, "");
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  });
+  }, []); // ← Nur einmal beim Mount
 
   // Escape-Taste → Zurück
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
-      if (e.key === "Escape" && canGoBack) { e.preventDefault(); goBack(); }
+      if (e.key === "Escape" && canGoBackRef.current) { e.preventDefault(); goBackRef.current(); }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  });
+  }, []); // ← Nur einmal beim Mount
 
   // Login-Gate: Zeige Login-Screen wenn nicht eingeloggt
   if (!isLoggedIn) {
@@ -1035,6 +1057,34 @@ export default function App() {
               style={{ padding: "10px 28px", borderRadius: 8, border: "none", background: "#3b82f6", color: "#fff", fontWeight: 700, fontSize: 14, cursor: "pointer" }}
             >
               Neu anmelden
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ═══ PERMISSION DENIED MODAL ═══ */}
+      {permissionDenied && (
+        <div
+          style={{ position: "fixed", inset: 0, zIndex: 9998, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.45)", backdropFilter: "blur(3px)" }}
+          onClick={() => setPermissionDenied(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{ background: "#fff", borderRadius: 16, padding: "32px 40px", maxWidth: 440, textAlign: "center", boxShadow: "0 20px 60px rgba(0,0,0,0.25)" }}
+          >
+            <div style={{ fontSize: 44, marginBottom: 12 }}>🚫</div>
+            <h2 style={{ margin: "0 0 8px 0", fontSize: 18, color: "#1f2937" }}>Keine Berechtigung</h2>
+            <p style={{ color: "#6b7280", fontSize: 14, margin: "0 0 8px 0", lineHeight: 1.5 }}>
+              Sie haben nicht die erforderlichen Rechte für diese Aktion.
+            </p>
+            <p style={{ color: "#9ca3af", fontSize: 12, margin: "0 0 20px 0" }}>
+              Bitte wenden Sie sich an Ihre Stationsleitung oder den Administrator, falls Sie Zugriff benötigen.
+            </p>
+            <button
+              onClick={() => setPermissionDenied(null)}
+              style={{ padding: "10px 28px", borderRadius: 8, border: "none", background: "#3b82f6", color: "#fff", fontWeight: 700, fontSize: 14, cursor: "pointer" }}
+            >
+              Verstanden
             </button>
           </div>
         </div>
@@ -1117,10 +1167,10 @@ export default function App() {
             {me?.break_glass && (
               <span style={{ padding: "2px 7px", borderRadius: 999, fontSize: 10, fontWeight: 700, background: "#fef2f2", color: "#b91c1c", border: "1px solid #fecaca" }}>🔓 Break-Glass</span>
             )}
-            <button onClick={() => setIsAdminOpen(true)} disabled={!canAdmin} style={{ padding: "3px 8px", fontSize: 10, borderRadius: 5, border: "1px solid #e5e7eb", background: "#fff", cursor: canAdmin ? "pointer" : "not-allowed", opacity: canAdmin ? 1 : 0.4 }}>⚙</button>
+            <button onClick={() => { if (!canAdmin) { setPermissionDenied("Sie benötigen Admin-Rechte für die Verwaltung."); return; } setIsAdminOpen(true); }} disabled={!canAdmin} style={{ padding: "3px 8px", fontSize: 10, borderRadius: 5, border: "1px solid #e5e7eb", background: "#fff", cursor: canAdmin ? "pointer" : "not-allowed", opacity: canAdmin ? 1 : 0.4 }}>⚙</button>
             <button
               onClick={async () => {
-                if (!canReset) return;
+                if (!canReset) { setPermissionDenied("Sie benötigen Reset-Rechte um Quittierungen zurückzusetzen."); return; }
                 if (!window.confirm(`Alle heutigen Quittierungen für Station ${auth.stationId} zurücksetzen?`)) return;
                 try {
                   const ds = await resetToday(auth);
@@ -1128,7 +1178,7 @@ export default function App() {
                   const data = await fetchBrowseCases(auth, {clinic: browseClinic || undefined, center: browseCenter || undefined, station: browseStation || undefined});
                   setCases(data);
                   setSelectedCaseId(null); setDetail(null); setDetailError(null); setShiftByAlert({});
-                } catch (e: any) { setError(e?.message ?? String(e)); }
+                } catch (e: any) { handleApiError(e, setError); }
               }}
               disabled={!canReset}
               style={{ padding: "3px 8px", fontSize: 10, borderRadius: 5, border: "1px solid #e5e7eb", background: "#fff", cursor: canReset ? "pointer" : "not-allowed", opacity: canReset ? 1 : 0.4 }}
@@ -1254,7 +1304,7 @@ export default function App() {
                 key={f.key}
                 onClick={() => {
                   if (restricted) {
-                    setPermissionInfo("Klinische Ansicht ist nur für Ärzte und Kliniker verfügbar.");
+                    setPermissionDenied("Die klinische Ansicht ist nur für Ärzte und Kliniker verfügbar.");
                     return;
                   }
                   setCategoryFilter(f.key);
@@ -1709,24 +1759,27 @@ export default function App() {
                   categoryFilter={categoryFilter}
                   onSetShift={setShift}
                   onAckRule={async (caseId, ruleId) => {
-                    const result = await ackRule(caseId, ruleId, auth);
-                    if (result.already_handled) {
-                      setToast({ msg: `Bereits quittiert von ${result.already_handled_by ?? "anderem User"} – Ihre Quittierung wurde trotzdem übernommen.`, type: "warn" });
-                    }
-                    // Cache busting: Etag-Cache löschen damit frische Daten geladen werden
-                    Object.keys(_etagStore).forEach(k => { delete _etagStore[k]; delete _etagDataStore[k]; });
-                    const [newList, newDetail] = await Promise.all([fetchBrowseCases(auth, {clinic: browseClinic || undefined, center: browseCenter || undefined, station: browseStation || undefined}), fetchCaseDetail(caseId, auth, viewMode)]);
-                    setCases(newList); setDetail(newDetail);
+                    try {
+                      const result = await ackRule(caseId, ruleId, auth);
+                      if (result.already_handled) {
+                        setToast({ msg: `Bereits quittiert von ${result.already_handled_by ?? "anderem User"} – Ihre Quittierung wurde trotzdem übernommen.`, type: "warn" });
+                      }
+                      Object.keys(_etagStore).forEach(k => { delete _etagStore[k]; delete _etagDataStore[k]; });
+                      const [newList, newDetail] = await Promise.all([fetchBrowseCases(auth, {clinic: browseClinic || undefined, center: browseCenter || undefined, station: browseStation || undefined}), fetchCaseDetail(caseId, auth, viewMode)]);
+                      setCases(newList); setDetail(newDetail);
+                    } catch (err: any) { handleApiError(err, (m) => setToast({ msg: m, type: "error" })); }
                   }}
                   onShiftRule={async (caseId, ruleId, shiftVal) => {
-                    const result = await shiftRule(caseId, ruleId, shiftVal, auth);
-                    if (result.already_handled) {
-                      setToast({ msg: `Bereits bearbeitet von ${result.already_handled_by ?? "anderem User"} – Ihre Schiebung wurde trotzdem übernommen.`, type: "warn" });
-                    }
-                    setShift(caseId, ruleId, "");
-                    Object.keys(_etagStore).forEach(k => { delete _etagStore[k]; delete _etagDataStore[k]; });
-                    const [newList, newDetail] = await Promise.all([fetchBrowseCases(auth, {clinic: browseClinic || undefined, center: browseCenter || undefined, station: browseStation || undefined}), fetchCaseDetail(caseId, auth, viewMode)]);
-                    setCases(newList); setDetail(newDetail);
+                    try {
+                      const result = await shiftRule(caseId, ruleId, shiftVal, auth);
+                      if (result.already_handled) {
+                        setToast({ msg: `Bereits bearbeitet von ${result.already_handled_by ?? "anderem User"} – Ihre Schiebung wurde trotzdem übernommen.`, type: "warn" });
+                      }
+                      setShift(caseId, ruleId, "");
+                      Object.keys(_etagStore).forEach(k => { delete _etagStore[k]; delete _etagDataStore[k]; });
+                      const [newList, newDetail] = await Promise.all([fetchBrowseCases(auth, {clinic: browseClinic || undefined, center: browseCenter || undefined, station: browseStation || undefined}), fetchCaseDetail(caseId, auth, viewMode)]);
+                      setCases(newList); setDetail(newDetail);
+                    } catch (err: any) { handleApiError(err, (m) => setToast({ msg: m, type: "error" })); }
                   }}
                   onUndoAck={async (caseId, ruleId) => {
                     try {
@@ -1735,12 +1788,15 @@ export default function App() {
                       Object.keys(_etagStore).forEach(k => { delete _etagStore[k]; delete _etagDataStore[k]; });
                       const [newList, newDetail] = await Promise.all([fetchBrowseCases(auth, {clinic: browseClinic || undefined, center: browseCenter || undefined, station: browseStation || undefined}), fetchCaseDetail(caseId, auth, viewMode)]);
                       setCases(newList); setDetail(newDetail);
-                    } catch (err: any) {
-                      console.error("[UNDO] Error:", err);
-                      setToast({ msg: `Rückgängig fehlgeschlagen: ${err?.message ?? String(err)}`, type: "error" });
+                    } catch (err: any) { handleApiError(err, (m) => setToast({ msg: m, type: "error" })); }
+                  }}
+                  onError={(msg) => {
+                    if (msg.includes("403") || msg.includes("Keine Berechtigung")) {
+                      setPermissionDenied(msg);
+                    } else {
+                      setError(msg);
                     }
                   }}
-                  onError={(msg) => setError(msg)}
                 />}
               </div>
             )}
