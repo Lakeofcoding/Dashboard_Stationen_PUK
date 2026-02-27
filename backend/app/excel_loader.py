@@ -368,7 +368,7 @@ def _load_cases_from_excel() -> list[dict]:
                 entry = {
                     "items": items,
                     "datum": _to_date(r.get("datum")),
-                    "total": _to_int(r.get(total_col)),
+                    "total": _to_float(r.get(total_col)),
                     "suizidalitaet": _to_int(r.get("suizidalitaet")),
                 }
                 if fid not in result:

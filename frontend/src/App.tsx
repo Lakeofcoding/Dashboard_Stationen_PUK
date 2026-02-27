@@ -25,6 +25,8 @@ import MatrixReport from "./MatrixReport";
 import MonitoringPanel from "./MonitoringPanel";
 import AnalyticsPanel from "./AnalyticsPanel";
 import HonosReportPanel from "./HonosReportPanel";
+import BsclReportPanel from "./BsclReportPanel";
+import type { ReportPanelHandle } from "./HonosReportPanel";
 import type { StationAnalytics } from "./AnalyticsPanel";
 
 type AuthState = {
@@ -93,7 +95,7 @@ function ackLabel(category: string): string {
 function loadAuth(): AuthState {
   return {
     stationId: localStorage.getItem(LS_KEYS.stationId) ?? "Station A1",
-    userId: localStorage.getItem(LS_KEYS.userId) ?? "demo",
+    userId: localStorage.getItem(LS_KEYS.userId) ?? "admin",
   };
 }
 
@@ -389,21 +391,27 @@ type DemoUser = { user_id: string; display_name: string; roles: string[] };
 
 function LoginScreen({ onLogin }: { onLogin: (userId: string, token: string) => void }) {
   const [users, setUsers] = useState<DemoUser[]>([]);
-  const [selectedUser, setSelectedUser] = useState<string>("demo");
+  const [selectedUser, setSelectedUser] = useState<string>("admin");
   const [loading, setLoading] = useState(false);
+  const [loadingUsers, setLoadingUsers] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     // Demo-User-Liste laden
+    setLoadingUsers(true);
     fetch("/api/auth/users")
       .then(r => r.json())
       .then(d => {
         if (d.users) {
           setUsers(d.users);
-          if (d.users.length > 0) setSelectedUser(d.users[0].user_id);
+          // Auto-select: admin falls vorhanden, sonst erster User
+          const adminUser = d.users.find((u: DemoUser) => u.roles.includes("system_admin"));
+          if (adminUser) setSelectedUser(adminUser.user_id);
+          else if (d.users.length > 0) setSelectedUser(d.users[0].user_id);
         }
       })
-      .catch(() => setUsers([{ user_id: "demo", display_name: "Demo User", roles: ["admin"] }]));
+      .catch(() => setUsers([{ user_id: "admin", display_name: "System Administrator", roles: ["system_admin"] }]))
+      .finally(() => setLoadingUsers(false));
   }, []);
 
   async function handleLogin() {
@@ -490,16 +498,16 @@ function LoginScreen({ onLogin }: { onLogin: (userId: string, token: string) => 
 
         <button
           onClick={handleLogin}
-          disabled={loading || !selectedUser}
+          disabled={loading || loadingUsers || !selectedUser}
           style={{
             width: "100%", padding: "12px", borderRadius: 8,
-            background: loading ? "#93c5fd" : "#2563eb",
+            background: (loading || loadingUsers) ? "#93c5fd" : "#2563eb",
             color: "#fff", fontWeight: 700, fontSize: 15,
-            border: "none", cursor: loading ? "not-allowed" : "pointer",
+            border: "none", cursor: (loading || loadingUsers) ? "not-allowed" : "pointer",
             transition: "background 0.2s",
           }}
         >
-          {loading ? "Anmelden..." : "Anmelden"}
+          {loadingUsers ? "Lade User…" : loading ? "Anmelden..." : "Anmelden"}
         </button>
 
         <p style={{ textAlign: "center", marginTop: 16, fontSize: 11, color: "#9ca3af" }}>
@@ -520,7 +528,7 @@ export default function App() {
 
   const [stations, setStations] = useState<string[]>(["Station A1", "Station B0", "Station B2"]);
   const [metaUsers, setMetaUsers] = useState<MetaUser[]>([
-    { user_id: "demo", roles: ["admin"] },
+    { user_id: "admin", roles: ["system_admin"] },
   ]);
   const [metaError, setMetaError] = useState<string | null>(null);
   const [shiftReasons, setShiftReasons] = useState<ShiftReason[]>([]);
@@ -594,6 +602,7 @@ export default function App() {
   const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>("all");
   const [overviewMode, setOverviewMode] = useState<OverviewMode>("dokumentation");
   const [reportingTab, setReportingTab] = useState<ReportingTab>("honos");
+  const reportPanelRef = useRef<ReportPanelHandle>(null);
   const [dayState, setDayState] = useState<DayState | null>(null);
   const [cases, setCases] = useState<CaseSummary[]>([]);
   // Browse-Filter für Fallliste (Standard: alle Fälle)
@@ -974,17 +983,16 @@ export default function App() {
     if (isAdminOpen) return true;
     if (selectedCaseId) return true;
     if (viewMode !== "overview") return true;
+    // Reporting-Modus: Panel-intern oder zurück zu Dokumentation
+    if (overviewMode === "reporting") return true;
     // Scope-Grenzen: nicht über die zugewiesene Ebene hinaus zurück
     if (drillStation) {
-      // Kann von Station-BI → Stationen, wenn Scope es erlaubt
       return scopeLevel !== "station";
     }
     if (drillCenter) {
-      // Kann von Zentrum → Klinik, wenn Scope es erlaubt
       return scopeLevel === "global" || scopeLevel === "klinik";
     }
     if (drillClinic) {
-      // Kann von Klinik → Gesamt, nur wenn global
       return scopeLevel === "global";
     }
     return false;
@@ -995,8 +1003,17 @@ export default function App() {
     if (selectedCaseId) { setSelectedCaseId(null); setDetail(null); setDetailError(null); setShiftByAlert({}); return; }
     if (viewMode !== "overview") {
       setViewMode("overview");
-      // Browse-Filter zurücksetzen
       setBrowseClinic(""); setBrowseCenter(""); setBrowseStation("");
+      return;
+    }
+    // Reporting: Panel-interne Navigation hat Vorrang
+    if (overviewMode === "reporting") {
+      if (reportPanelRef.current?.canGoBack()) {
+        reportPanelRef.current.goBack();
+        return;
+      }
+      // Keine interne Navigation mehr → zurück zu Dokumentation
+      setOverviewMode("dokumentation");
       return;
     }
     if (drillStation && scopeLevel !== "station") { setDrillStation(null); return; }
@@ -1013,7 +1030,11 @@ export default function App() {
   useEffect(() => {
     function onPopState(e: PopStateEvent) {
       e.preventDefault();
-      if (canGoBackRef.current) goBackRef.current();
+      if (canGoBackRef.current) {
+        goBackRef.current();
+      }
+      // Re-push history entry so next browser-back also triggers internal navigation
+      window.history.pushState({ puk: true }, "");
     }
     // Einmalig einen History-Eintrag pushen
     window.history.pushState({ puk: true }, "");
@@ -1375,7 +1396,7 @@ export default function App() {
             {/* Sub-tabs for Reporting mode */}
             {overviewMode === "reporting" && ([
               { key: "honos" as ReportingTab, label: "HoNOS / HoNOSCA", ready: true },
-              { key: "bscl" as ReportingTab, label: "BSCL / HoNOSCA-SR", ready: false },
+              { key: "bscl" as ReportingTab, label: "BSCL / HoNOSCA-SR", ready: true },
               { key: "efm" as ReportingTab, label: "EFM", ready: false },
             ]).map((t) => {
               const active = reportingTab === t.key;
@@ -1407,17 +1428,8 @@ export default function App() {
         {/* ─── TAB: ÜBERSICHT – REPORTING MODE ─── */}
         {viewMode === "overview" && overviewMode === "reporting" && (
           <div style={{ flex: 1, overflowY: "auto", padding: "24px 28px" }}>
-            {reportingTab === "honos" && <HonosReportPanel auth={auth} canView={canViewReporting} />}
-            {reportingTab === "bscl" && (
-              <div style={{ maxWidth: 800, margin: "40px auto", textAlign: "center" }}>
-                <div style={{ fontSize: 48, marginBottom: 12 }}>📊</div>
-                <h2 style={{ margin: "0 0 8px", fontSize: 18, color: "#374151" }}>BSCL / HoNOSCA-SR Reporting</h2>
-                <p style={{ color: "#9ca3af", fontSize: 13 }}>
-                  Selbstbeurteilung: BSCL (53 Items, 9 Skalen) für Erwachsene, HoNOSCA-SR (13 Items) für KJPP.
-                </p>
-                <p style={{ color: "#d1d5db", fontSize: 12, marginTop: 12 }}>Wird in einem kommenden Release implementiert.</p>
-              </div>
-            )}
+            {reportingTab === "honos" && <HonosReportPanel ref={reportPanelRef} auth={auth} canView={canViewReporting} />}
+            {reportingTab === "bscl" && <BsclReportPanel ref={reportPanelRef} auth={auth} canView={canViewReporting} />}
             {reportingTab === "efm" && (
               <div style={{ maxWidth: 800, margin: "40px auto", textAlign: "center" }}>
                 <div style={{ fontSize: 48, marginBottom: 12 }}>🔒</div>

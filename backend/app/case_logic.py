@@ -1385,6 +1385,9 @@ def get_all_cases_enriched() -> list[dict]:
                 "honos_instrument": c.honos_instrument,
                 "bscl_entry_items": json.loads(c.bscl_entry_items_json) if c.bscl_entry_items_json else None,
                 "bscl_discharge_items": json.loads(c.bscl_discharge_items_json) if c.bscl_discharge_items_json else None,
+                "bscl_total_entry": c.bscl_total_entry,
+                "bscl_total_discharge": c.bscl_total_discharge,
+                "bscl_discharge_suicidality": c.bscl_discharge_suicidality,
                 "case_status": c.case_status,
             }
             result.append(case_dict)

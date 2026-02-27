@@ -5,7 +5,12 @@
  * Drill: Klinik → Zentrum → Station (Breadcrumb + Tiles)
  * Scatter, Subskalen (Grouped Bar), Item-Detail (Heatmap), Verschlechterungsliste
  */
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useImperativeHandle, forwardRef } from "react";
+
+export interface ReportPanelHandle {
+  canGoBack: () => boolean;
+  goBack: () => void;
+}
 
 /* ─── Types ─── */
 interface ScatterPoint {
@@ -187,7 +192,7 @@ function Kpi({label,value,unit,sub,color,icon}:{label:string;value:string|number
 /* ═══════════════════════════════════════════════════════════════ */
 /*  MAIN PANEL                                                    */
 /* ═══════════════════════════════════════════════════════════════ */
-export default function HonosReportPanel({auth, canView}: Props) {
+const HonosReportPanel = forwardRef<ReportPanelHandle, Props>(function HonosReportPanel({auth, canView}, ref) {
   const [data, setData] = useState<HonosData|null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string|null>(null);
@@ -197,6 +202,15 @@ export default function HonosReportPanel({auth, canView}: Props) {
   const [hov, setHov] = useState<ScatterPoint|null>(null);
   const [wSort, setWSort] = useState<"diff"|"case_id"|"station">("diff");
   const [showItems, setShowItems] = useState(false);
+
+  useImperativeHandle(ref, () => ({
+    canGoBack: () => !!(drillStation || drillCenter || drillClinic),
+    goBack: () => {
+      if (drillStation) { setDrillStation(null); }
+      else if (drillCenter) { setDrillCenter(null); }
+      else if (drillClinic) { setDrillClinic(null); }
+    },
+  }), [drillClinic, drillCenter, drillStation]);
 
   const fClinic = drillClinic||"", fCenter = drillCenter||"", fStation = drillStation||"";
 
@@ -420,4 +434,5 @@ export default function HonosReportPanel({auth, canView}: Props) {
       </div>
     </div>
   );
-}
+});
+export default HonosReportPanel;

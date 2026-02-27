@@ -329,3 +329,278 @@ def honos_report(
         "consistency": consistency, "hierarchy": hierarchy,
         "data_sources": data_sources,
     }
+
+
+# ══════════════════════════════════════════════════════════════
+# BSCL / HoNOSCA-SR Reporting
+# ══════════════════════════════════════════════════════════════
+
+BSCL_SHORT = {
+    "soma": "Somatisierung", "zwan": "Zwanghaftigkeit", "unsi": "Unsicherheit",
+    "depr": "Depressivität", "angs": "Ängstlichkeit", "aggr": "Aggressivität",
+    "phob": "Phobische Angst", "para": "Paranoid", "psyc": "Psychotizismus",
+}
+
+# Offizielle BSCL-53 Item-Labels (Franke 2000/2016, dt. Fassung nach Derogatis)
+BSCL_ITEM_LABELS = {
+    1:  "Nervosität oder innerem Zittern",
+    2:  "Ohnmachts- oder Schwindelgefühlen",
+    3:  "der Idee, dass irgend jemand Macht über Ihre Gedanken hat",
+    4:  "dem Gefühl, dass andere an den meisten Ihrer Schwierigkeiten Schuld sind",
+    5:  "Gedächtnisschwierigkeiten",
+    6:  "dem Gefühl, leicht reizbar oder verärgerbar zu sein",
+    7:  "Herz- oder Brustschmerzen",
+    8:  "Furcht auf offenen Plätzen oder auf der Strasse",
+    9:  "Gedanken, sich das Leben zu nehmen",
+    10: "dem Gefühl, dass man den meisten Menschen nicht trauen kann",
+    11: "schlechtem Appetit",
+    12: "plötzlichem Erschrecken ohne Grund",
+    13: "Gefühlsausbrüchen, denen gegenüber Sie machtlos waren",
+    14: "Einsamkeitsgefühlen, selbst wenn Sie in Gesellschaft sind",
+    15: "dem Gefühl, dass es Ihnen schwer fällt, etwas anzufangen",
+    16: "Einsamkeitsgefühlen",
+    17: "Schwermut",
+    18: "dem Gefühl, sich für nichts zu interessieren",
+    19: "Furchtsamkeit",
+    20: "Verletzlichkeit in Gefühlsdingen",
+    21: "dem Gefühl, dass die Leute unfreundlich sind oder Sie nicht leiden können",
+    22: "Minderwertigkeitsgefühlen gegenüber anderen",
+    23: "Übelkeit oder Magenverstimmung",
+    24: "dem Gefühl, dass andere Sie beobachten oder über Sie reden",
+    25: "Einschlafschwierigkeiten",
+    26: "dem Zwang, wieder und wieder nachzukontrollieren, was Sie tun",
+    27: "Schwierigkeiten, sich zu entscheiden",
+    28: "Furcht vor Fahrten in Bus, Strassenbahn, U-Bahn oder Zug",
+    29: "Schwierigkeiten beim Atmen",
+    30: "Hitzewallungen oder Kälteschauern",
+    31: "der Notwendigkeit, bestimmte Dinge, Orte oder Tätigkeiten zu meiden",
+    32: "Leere im Kopf",
+    33: "Taubheit oder Kribbeln in einzelnen Körperteilen",
+    34: "dem Gefühl, dass Sie für Ihre Sünden bestraft werden sollten",
+    35: "einem Gefühl der Hoffnungslosigkeit angesichts der Zukunft",
+    36: "Konzentrationsschwierigkeiten",
+    37: "Schwächegefühl in einzelnen Körperteilen",
+    38: "dem Gefühl, angespannt oder aufgeregt zu sein",
+    39: "Gedanken an den Tod oder ans Sterben",
+    40: "dem Drang, jemanden zu schlagen, zu verletzen oder ihm Schmerz zuzufügen",
+    41: "dem Drang, Dinge zu zerbrechen oder zu zerschmettern",
+    42: "starker Befangenheit im Umgang mit anderen",
+    43: "Furcht in Menschenmengen, z.B. beim Einkaufen oder im Kino",
+    44: "dem Eindruck, sich einer anderen Person nie so richtig nahe fühlen zu können",
+    45: "Schreck- oder Panikanfällen",
+    46: "der Neigung, immer wieder in Erörterungen und Auseinandersetzungen zu geraten",
+    47: "Nervosität, wenn Sie allein gelassen werden",
+    48: "mangelnder Anerkennung Ihrer Leistungen durch andere",
+    49: "so starker Ruhelosigkeit, dass Sie nicht stillsitzen können",
+    50: "dem Gefühl, wertlos zu sein",
+    51: "dem Gefühl, dass die Leute Sie ausnutzen, wenn Sie es zulassen würden",
+    52: "Schuldgefühlen",
+    53: "dem Gedanken, dass irgendetwas mit Ihrem Verstand nicht stimmt",
+}
+
+# Map: item_nr → scale_key (for grouping)
+BSCL_ITEM_TO_SCALE = {}
+for _sk, _sd in BSCL_SCALES.items():
+    for _it in _sd["items"]:
+        BSCL_ITEM_TO_SCALE[_it] = _sk
+# Items 11,25,39,52 → "zusatz" (nur GSI)
+for _z in [11, 25, 39, 52]:
+    BSCL_ITEM_TO_SCALE[_z] = "zusatz"
+
+
+def _calc_bscl_scales(items: list | None) -> dict:
+    """Berechne 9 BSCL-Skalenmittelwerte + GSI aus 53 Items."""
+    if not items or len(items) < 53:
+        return {k: None for k in BSCL_SCALES}  | {"gsi": None, "pst": None}
+    result = {}
+    for key, info in BSCL_SCALES.items():
+        vals = [items[i - 1] for i in info["items"] if items[i - 1] is not None]
+        result[key] = round(sum(vals) / len(vals), 2) if vals else None
+    all_vals = [v for v in items if v is not None]
+    result["gsi"] = round(sum(all_vals) / len(all_vals), 2) if all_vals else None
+    result["pst"] = sum(1 for v in all_vals if v > 0)
+    return result
+
+
+@router.get("/api/reporting/bscl")
+def bscl_report(
+    ctx: AuthContext = Depends(get_auth_context),
+    clinic: Optional[str] = Query(None),
+    center: Optional[str] = Query(None),
+    station: Optional[str] = Query(None),
+    year: Optional[int] = Query(None),
+):
+    """BSCL (Erwachsene) + HoNOSCA-SR (KJPP) Selbstbeurteilungs-Reporting."""
+    all_cases = get_all_cases_enriched()
+    hierarchy = _build_hierarchy()
+
+    cases = []
+    for c in all_cases:
+        if clinic and c.get("clinic") != clinic: continue
+        if center and c.get("center") != center: continue
+        if station and c.get("station_id") != station: continue
+        if year:
+            adm = c.get("admission_date")
+            if adm:
+                try:
+                    if int(str(adm)[:4]) != year: continue
+                except (ValueError, TypeError): continue
+            else: continue
+        cases.append(c)
+
+    scatter, worse_list = [], []
+    with_entry = with_both = improved = same = worse = 0
+    diffs_gsi, entries_gsi, discharges_gsi = [], [], []
+    # Per-scale aggregation
+    scale_keys = list(BSCL_SCALES.keys())
+    scale_e_agg = {k: [] for k in scale_keys}
+    scale_d_agg = {k: [] for k in scale_keys}
+    # Per-item aggregation (1-indexed)
+    item_entry_agg = {i: [] for i in range(1, 54)}
+    item_discharge_agg = {i: [] for i in range(1, 54)}
+    clinic_data, station_data = {}, {}
+
+    for c in cases:
+        is_kjpp = c.get("clinic") == "KJPP"
+        e_items = c.get("bscl_entry_items")
+        d_items = c.get("bscl_discharge_items")
+        entry_gsi = c.get("bscl_total_entry")   # GSI for BSCL, normalized for HoNOSCA-SR
+        discharge_gsi = c.get("bscl_total_discharge")
+
+        instrument = "HoNOSCA-SR" if is_kjpp else "BSCL"
+
+        if entry_gsi is not None:
+            with_entry += 1
+            entries_gsi.append(entry_gsi)
+
+        if entry_gsi is not None and discharge_gsi is not None:
+            with_both += 1
+            diff = round(entry_gsi - discharge_gsi, 2)
+            diffs_gsi.append(diff)
+            discharges_gsi.append(discharge_gsi)
+            if diff > 0.05: improved += 1
+            elif diff < -0.05: worse += 1
+            else: same += 1
+
+            # Scale means (only for BSCL, not HoNOSCA-SR)
+            if not is_kjpp and e_items and len(e_items) >= 53:
+                scales_e = _calc_bscl_scales(e_items)
+                scales_d = _calc_bscl_scales(d_items)
+                for k in scale_keys:
+                    if scales_e.get(k) is not None: scale_e_agg[k].append(scales_e[k])
+                    if scales_d.get(k) is not None: scale_d_agg[k].append(scales_d[k])
+                # Per-item aggregation
+                for idx in range(53):
+                    item_nr = idx + 1
+                    if e_items[idx] is not None:
+                        item_entry_agg[item_nr].append(e_items[idx])
+                    if d_items and idx < len(d_items) and d_items[idx] is not None:
+                        item_discharge_agg[item_nr].append(d_items[idx])
+
+            clin = c.get("clinic", "?")
+            sid = c.get("station_id", "")
+            ctr = c.get("center", "")
+
+            if clin not in clinic_data:
+                clinic_data[clin] = {"n": 0, "diffs": [], "improved": 0}
+            clinic_data[clin]["n"] += 1
+            clinic_data[clin]["diffs"].append(diff)
+            if diff > 0.05: clinic_data[clin]["improved"] += 1
+
+            if sid not in station_data:
+                station_data[sid] = {"n": 0, "diffs": [], "improved": 0, "clinic": clin, "center": ctr}
+            station_data[sid]["n"] += 1
+            station_data[sid]["diffs"].append(diff)
+            if diff > 0.05: station_data[sid]["improved"] += 1
+
+            scatter.append({
+                "case_id": c.get("case_id"), "entry": entry_gsi, "discharge": discharge_gsi,
+                "diff": diff, "clinic": clin, "station": sid, "center": ctr,
+                "instrument": instrument,
+                "admission": str(c.get("admission_date", ""))[:10],
+                "discharge_date": str(c.get("discharge_date", ""))[:10] if c.get("discharge_date") else None,
+                "suicidality_discharge": c.get("bscl_discharge_suicidality"),
+            })
+            if diff < -0.05:
+                worse_list.append({
+                    "case_id": c.get("case_id"), "station": sid, "clinic": clin,
+                    "center": ctr, "entry": entry_gsi, "discharge": discharge_gsi, "diff": diff,
+                    "admission": str(c.get("admission_date", ""))[:10],
+                    "discharge_date": str(c.get("discharge_date", ""))[:10] if c.get("discharge_date") else None,
+                })
+
+    total = len(cases)
+    sd = lambda a, b: round(a / b, 2) if b else 0
+    kpis = {
+        "total": total, "with_entry": with_entry, "with_both": with_both,
+        "improved": improved, "same": same, "worse": worse,
+        "avg_diff": sd(sum(diffs_gsi), len(diffs_gsi)) if diffs_gsi else None,
+        "avg_entry": sd(sum(entries_gsi), len(entries_gsi)) if entries_gsi else None,
+        "avg_discharge": sd(sum(discharges_gsi), len(discharges_gsi)) if discharges_gsi else None,
+        "entry_completion_pct": sd(100 * with_entry, total),
+        "pair_completion_pct": sd(100 * with_both, total),
+        "improved_pct": sd(100 * improved, with_both),
+        "worse_pct": sd(100 * worse, with_both),
+    }
+
+    # BSCL scales
+    subscales = {}
+    for k in scale_keys:
+        e, d = scale_e_agg[k], scale_d_agg[k]
+        subscales[k] = {
+            "label": BSCL_SCALES[k]["label"], "max": 4.0,
+            "avg_entry": sd(sum(e), len(e)) if e else None,
+            "avg_discharge": sd(sum(d), len(d)) if d else None,
+            "avg_diff": round((sum(e)/len(e)) - (sum(d)/len(d)), 2) if e and d else None,
+        }
+
+    # Per-item detail grouped by scale
+    items_by_scale = {}
+    for item_nr in range(1, 54):
+        scale_key = BSCL_ITEM_TO_SCALE.get(item_nr, "zusatz")
+        e_vals = item_entry_agg[item_nr]
+        d_vals = item_discharge_agg[item_nr]
+        detail = {
+            "item": item_nr,
+            "label": BSCL_ITEM_LABELS.get(item_nr, f"Item {item_nr}"),
+            "avg_entry": sd(sum(e_vals), len(e_vals)) if e_vals else None,
+            "avg_discharge": sd(sum(d_vals), len(d_vals)) if d_vals else None,
+            "avg_diff": round((sum(e_vals)/len(e_vals)) - (sum(d_vals)/len(d_vals)), 2) if e_vals and d_vals else None,
+            "n": len(e_vals),
+        }
+        items_by_scale.setdefault(scale_key, []).append(detail)
+
+    by_clinic = [{"clinic": c, "n": d["n"],
+                   "avg_diff": sd(sum(d["diffs"]), len(d["diffs"])),
+                   "improved_pct": sd(100 * d["improved"], d["n"])}
+                  for c, d in sorted(clinic_data.items())]
+
+    by_station = [{"station": s, "clinic": d["clinic"], "center": d["center"],
+                    "n": d["n"], "avg_diff": sd(sum(d["diffs"]), len(d["diffs"])),
+                    "improved_pct": sd(100 * d["improved"], d["n"])}
+                   for s, d in sorted(station_data.items())]
+
+    hist = {}
+    for d in diffs_gsi:
+        b = round(d, 1)
+        hist[b] = hist.get(b, 0) + 1
+    histogram = [{"diff": k, "count": v} for k, v in sorted(hist.items())]
+
+    consistency = {
+        "total_cases": total,
+        "bscl_complete": with_entry,
+        "completion_pct": sd(100 * with_entry, total),
+        "has_items": any(c.get("bscl_entry_items") for c in cases),
+        "adults_bscl": sum(1 for c in cases if c.get("clinic") != "KJPP" and c.get("bscl_total_entry") is not None),
+        "kjpp_honosca_sr": sum(1 for c in cases if c.get("clinic") == "KJPP" and c.get("bscl_total_entry") is not None),
+    }
+
+    worse_list.sort(key=lambda x: x["diff"])
+
+    return {
+        "scatter": scatter, "kpis": kpis, "subscales": subscales,
+        "items_by_scale": items_by_scale,
+        "by_clinic": by_clinic, "by_station": by_station,
+        "histogram": histogram, "worse_list": worse_list,
+        "consistency": consistency, "hierarchy": hierarchy,
+    }
