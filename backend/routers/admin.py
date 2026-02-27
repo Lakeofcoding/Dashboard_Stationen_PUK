@@ -25,6 +25,15 @@ from app.schemas import (
 from app.config import STATION_CENTER
 from app.rule_engine import invalidate_rule_cache, load_rules_yaml
 from app.case_logic import seed_dummy_cases_to_db
+from app.response_cache import cache as _resp_cache
+from app.auth import invalidate_auth_cache
+
+
+def _invalidate_data_caches():
+    """Nach Datenänderungen alle Response-Caches leeren."""
+    _resp_cache.invalidate()
+    invalidate_rule_cache()
+
 
 router = APIRouter()
 
@@ -158,6 +167,7 @@ def admin_assign_role(
             success=True,
             details={"user_id": user_id, "role_id": body.role_id, "station_id": body.station_id},
         )
+        invalidate_auth_cache(user_id)
         return {"ok": True}
 
 
@@ -895,6 +905,8 @@ def csv_upload(
             "errors": errors + [{"row": 0, "error": str(e), "case_id": ""}],
         }
 
+    _invalidate_data_caches()
+
     return {
         "success": len(errors) == 0,
         "total_rows": total,
@@ -965,6 +977,7 @@ def admin_delete_all_cases(
             success=True,
             details={"deleted_count": count},
         )
+    _invalidate_data_caches()
     return {"ok": True, "deleted": count}
 
 

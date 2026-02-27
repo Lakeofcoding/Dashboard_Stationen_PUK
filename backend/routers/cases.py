@@ -31,80 +31,98 @@ def _validate_case_id(case_id: str) -> str:
 ack_store = AckStore()
 
 
+from app.response_cache import cache as _resp_cache
+
+
 router = APIRouter()
 
 
 @router.get("/api/cases/browse", response_model=list[CaseSummary])
 def browse_cases(
+    request: Request,
     clinic: Optional[str] = Query(default=None, description="Filter by clinic (e.g. EPP)"),
     center: Optional[str] = Query(default=None, description="Filter by center (e.g. ZAPE)"),
     station: Optional[str] = Query(default=None, description="Filter by station (e.g. Station G0)"),
     ctx: AuthContext = Depends(get_auth_context),
     _perm: None = Depends(require_permission("dashboard:view")),
+    if_none_match: str | None = Query(default=None, alias="If-None-Match"),
 ):
     """Alle Fälle über mehrere Stationen, gefiltert nach User-Scope.
 
     Server filtert automatisch auf sichtbare Stationen des Users.
-    Ohne Filter: alle sichtbaren Fälle.
+    Ohne Filter: alle sichtbaren Fälle. Gecached 10s.
     """
     from app.rbac import get_user_visible_stations
+    from fastapi.responses import JSONResponse, Response
 
     with SessionLocal() as db:
-        # Sichtbare Stationen für diesen User
         visible = get_user_visible_stations(db, ctx.user_id)
         q = db.query(Case.station_id).distinct()
         station_ids = sorted({s[0] for s in q.all()})
 
-    # RBAC-Filter: nur sichtbare Stationen
     if visible is not None:
         station_ids = [s for s in station_ids if s in visible]
 
-    all_cases: list[CaseSummary] = []
-    for sid in station_ids:
-        cases = get_station_cases(sid)
-        for c in cases:
-            # Filter anwenden
-            if clinic and c.get("clinic") != clinic:
-                continue
-            if center and c.get("center") != center:
-                continue
-            if station and c.get("station_id") != station:
-                continue
+    # Cache-Key: Stationen + Filter
+    cache_key = f"browse:{','.join(station_ids)}|c={clinic or ''}|z={center or ''}|s={station or ''}"
 
-            alerts = evaluate_alerts(c)
-            sev, top_alert, cc, wc = summarize_severity(alerts)
-            comp_alerts = [a for a in alerts if a.category == "completeness"]
-            med_alerts = [a for a in alerts if a.category == "medical"]
-            comp_sev, _, comp_cc, comp_wc = summarize_severity(comp_alerts)
-            med_sev, _, med_cc, med_wc = summarize_severity(med_alerts)
+    # ETag-Check
+    etag_header = request.headers.get("If-None-Match")
+    if etag_header and _resp_cache.check_etag(cache_key, etag_header):
+        return Response(status_code=304)
 
-            all_cases.append(CaseSummary(
-                case_id=c["case_id"],
-                patient_id=c["patient_id"],
-                clinic=c.get("clinic", "UNKNOWN"),
-                center=c.get("center", "UNKNOWN"),
-                station_id=c["station_id"],
-                admission_date=c["admission_date"],
-                discharge_date=c.get("discharge_date"),
-                severity=sev,
-                top_alert=top_alert,
-                critical_count=cc,
-                warn_count=wc,
-                completeness_severity=comp_sev,
-                completeness_critical=comp_cc,
-                completeness_warn=comp_wc,
-                medical_severity=med_sev,
-                medical_critical=med_cc,
-                medical_warn=med_wc,
-                case_status=c.get("case_status"),
-                responsible_person=c.get("responsible_person"),
-                acked_at=None,
-                parameter_status=build_parameter_status(c),
-                days_since_admission=(c.get("_derived") or {}).get("days_since_admission", 0),
-                langlieger=build_langlieger_status(c),
-            ))
+    def _compute():
+        all_cases = []
+        for sid in station_ids:
+            cases = get_station_cases(sid)
+            for c in cases:
+                if clinic and c.get("clinic") != clinic:
+                    continue
+                if center and c.get("center") != center:
+                    continue
+                if station and c.get("station_id") != station:
+                    continue
 
-    return all_cases
+                alerts = evaluate_alerts(c)
+                sev, top_alert, cc, wc = summarize_severity(alerts)
+                comp_alerts = [a for a in alerts if a.category == "completeness"]
+                med_alerts = [a for a in alerts if a.category == "medical"]
+                comp_sev, _, comp_cc, comp_wc = summarize_severity(comp_alerts)
+                med_sev, _, med_cc, med_wc = summarize_severity(med_alerts)
+
+                all_cases.append(dict(
+                    case_id=c["case_id"],
+                    patient_id=c["patient_id"],
+                    clinic=c.get("clinic", "UNKNOWN"),
+                    center=c.get("center", "UNKNOWN"),
+                    station_id=c["station_id"],
+                    admission_date=str(c["admission_date"]),
+                    discharge_date=str(c["discharge_date"]) if c.get("discharge_date") else None,
+                    severity=sev,
+                    top_alert=top_alert,
+                    critical_count=cc,
+                    warn_count=wc,
+                    completeness_severity=comp_sev,
+                    completeness_critical=comp_cc,
+                    completeness_warn=comp_wc,
+                    medical_severity=med_sev,
+                    medical_critical=med_cc,
+                    medical_warn=med_wc,
+                    case_status=c.get("case_status"),
+                    responsible_person=c.get("responsible_person"),
+                    acked_at=None,
+                    parameter_status=[ps.dict() if hasattr(ps, 'dict') else ps for ps in build_parameter_status(c)],
+                    days_since_admission=(c.get("_derived") or {}).get("days_since_admission", 0),
+                    langlieger=build_langlieger_status(c),
+                ))
+        return all_cases
+
+    result, etag = _resp_cache.get_or_compute(cache_key, _compute, ttl=10.0)
+
+    return JSONResponse(
+        content=result,
+        headers={"ETag": etag, "Cache-Control": "private, max-age=5"},
+    )
 
 
 
@@ -501,6 +519,9 @@ def ack(
             },
         )
 
+    # Cache invalidieren: Daten haben sich geändert
+    _resp_cache.invalidate()
+
     return {
         "case_id": ack_row.case_id,
         "station_id": ack_row.station_id,
@@ -586,6 +607,9 @@ def reset_today(
             message=f"Tages-Reset: Version {old_v} → {old_v + 1}",
             details={"business_date": bdate, "old_version": old_v, "new_version": old_v + 1},
         )
+
+    # Cache invalidieren: alle Quittierungen wurden zurückgesetzt
+    _resp_cache.invalidate()
 
     return {
         "station_id": ctx.station_id,

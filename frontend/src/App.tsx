@@ -160,11 +160,30 @@ class SessionExpiredError extends Error {
   constructor(msg: string) { super(msg); this.name = "SessionExpiredError"; }
 }
 
+// ETag-Store: speichert letzte ETags pro URL für conditional requests
+const _etagStore: Record<string, string> = {};
+const _etagDataStore: Record<string, any> = {};
+
 async function apiJson<T>(path: string, init: RequestInit): Promise<T> {
-  const res = await fetch(withCtx(path, init), init);
+  const fullPath = withCtx(path, init);
+
+  // ETag-Header mitschicken falls vorhanden (→ 304 Not Modified)
+  const etag = _etagStore[fullPath];
+  if (etag && init.method === "GET") {
+    const h = new Headers(init.headers as HeadersInit);
+    h.set("If-None-Match", etag);
+    init = { ...init, headers: h };
+  }
+
+  const res = await fetch(fullPath, init);
+
+  // 304 Not Modified → cached Daten zurückgeben
+  if (res.status === 304 && _etagDataStore[fullPath]) {
+    return _etagDataStore[fullPath] as T;
+  }
+
   if (res.status === 403 || res.status === 401) {
     const text = await res.text().catch(() => "");
-    // Check if it's a session/auth issue vs permission issue
     const lower = text.toLowerCase();
     if (lower.includes("user disabled") || lower.includes("unknown user") || lower.includes("session")) {
       throw new SessionExpiredError(text || "Sitzung abgelaufen");
@@ -175,7 +194,17 @@ async function apiJson<T>(path: string, init: RequestInit): Promise<T> {
     const text = await res.text().catch(() => "");
     throw new Error(text || `HTTP ${res.status}`);
   }
-  return (await res.json()) as T;
+
+  const data = (await res.json()) as T;
+
+  // ETag speichern für nächsten Request
+  const newEtag = res.headers.get("ETag");
+  if (newEtag) {
+    _etagStore[fullPath] = newEtag;
+    _etagDataStore[fullPath] = data;
+  }
+
+  return data;
 }
 
 type ViewMode = "overview" | "cases" | "report" | "monitoring" | "admin";
@@ -631,25 +660,29 @@ export default function App() {
   }, [auth.userId]);
 
   // Load cases + day state (skip when in overview mode)
+  // Smart Polling: 30s wenn Tab sichtbar, pausiert wenn Tab hidden
   useEffect(() => {
     if (viewMode === "overview") return;
     let alive = true;
+    let intervalId: number | null = null;
+
     const load = async () => {
+      if (document.hidden) return; // Tab nicht sichtbar → Skip
       try {
         const filters: { clinic?: string; center?: string; station?: string } = {};
         if (browseClinic) filters.clinic = browseClinic;
         if (browseCenter) filters.center = browseCenter;
         if (browseStation) filters.station = browseStation;
-        const data = await fetchBrowseCases(auth, filters);
-        // DayState optional (kann 403 werfen bei eingeschränktem Scope)
-        const ds = await fetchDayState(auth).catch(() => null);
+        const [data, ds] = await Promise.all([
+          fetchBrowseCases(auth, filters),
+          fetchDayState(auth).catch(() => null),
+        ]);
         if (!alive) return;
         setCases(data);
         if (ds) setDayState(ds);
         setError(null);
       } catch (e: any) {
         if (!alive) return;
-        // 403 Fehler → keine Berechtigung, aber kein Crash
         const msg = e?.message ?? String(e);
         if (msg.includes("403") || msg.includes("Kein Zugriff")) {
           setCases([]);
@@ -659,16 +692,29 @@ export default function App() {
         }
       }
     };
-    load();
-    const id = window.setInterval(load, 15_000);
-    return () => { alive = false; window.clearInterval(id); };
+
+    load(); // Sofort laden
+    intervalId = window.setInterval(load, 30_000);
+
+    // Bei Tab-Wechsel zurück: sofort neu laden
+    const onVisible = () => { if (!document.hidden && alive) load(); };
+    document.addEventListener("visibilitychange", onVisible);
+
+    return () => {
+      alive = false;
+      if (intervalId) window.clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [auth, viewMode, browseClinic, browseCenter, browseStation]);
 
-  // Load overview data + analytics
+  // Load overview data + analytics (Smart Polling)
   useEffect(() => {
     if (viewMode !== "overview") return;
     let alive = true;
+    let intervalId: number | null = null;
+
     const load = async () => {
+      if (document.hidden) return;
       try {
         const [overviewData, analyticsData] = await Promise.all([
           fetchOverview(auth),
@@ -679,9 +725,18 @@ export default function App() {
         if (alive) setError(e?.message ?? String(e));
       }
     };
+
     load();
-    const id = window.setInterval(load, 15_000);
-    return () => { alive = false; window.clearInterval(id); };
+    intervalId = window.setInterval(load, 30_000);
+
+    const onVisible = () => { if (!document.hidden && alive) load(); };
+    document.addEventListener("visibilitychange", onVisible);
+
+    return () => {
+      alive = false;
+      if (intervalId) window.clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [auth, viewMode]);
 
   // Load detail

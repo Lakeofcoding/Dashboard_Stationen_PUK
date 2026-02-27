@@ -57,6 +57,20 @@ TOKEN_TTL_SECONDS = 8 * 3600  # 8 Stunden
 # Produktion: Redis/DB-backed Blacklist verwenden.
 import threading as _threading
 
+# Auth-Context-Cache: {cache_key: (AuthContext, timestamp)}
+# Vermeidet DB-Hit bei jedem Request (TTL 30s)
+_auth_cache: dict[str, tuple] = {}
+
+
+def invalidate_auth_cache(user_id: str | None = None) -> None:
+    """Auth-Cache leeren (bei Rollenänderungen etc.)."""
+    if user_id:
+        keys = [k for k in _auth_cache if k.startswith(f"{user_id}:")]
+        for k in keys:
+            _auth_cache.pop(k, None)
+    else:
+        _auth_cache.clear()
+
 _token_blacklist: set[str] = set()
 _blacklist_lock = _threading.Lock()
 
@@ -289,6 +303,13 @@ def get_auth_context(
 
     station_id = _normalize_station_id(ctx)
 
+    # Auth-Cache: vermeidet DB-Hit bei jedem Request (TTL 30s)
+    _cache_key = f"{user_id}:{station_id}"
+    _now = time.time()
+    _cached = _auth_cache.get(_cache_key)
+    if _cached and (_now - _cached[1]) < 30.0:
+        return _cached[0]
+
     with SessionLocal() as db:
         u = ensure_user_exists(db, user_id)
         if not u.is_active:
@@ -296,13 +317,15 @@ def get_auth_context(
         enforce_station_scope(db, user_id=user_id, station_id=station_id)
         roles, perms, is_bg = resolve_permissions(db, user_id=user_id, station_id=station_id)
 
-    return AuthContext(
+    result = AuthContext(
         user_id=user_id,
         station_id=station_id,
         roles=roles,
         permissions=perms,
         is_break_glass=is_bg,
     )
+    _auth_cache[_cache_key] = (result, _now)
+    return result
 
 
 def require_role(ctx: AuthContext, role: str) -> None:

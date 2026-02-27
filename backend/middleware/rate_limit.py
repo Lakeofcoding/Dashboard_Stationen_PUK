@@ -31,8 +31,8 @@ class RateLimitMiddleware:
     def __init__(
         self,
         app: ASGIApp,
-        requests_per_minute: int = 120,
-        requests_per_hour: int = 3000,
+        requests_per_minute: int = 300,
+        requests_per_hour: int = 10000,
     ):
         self.app = app
         self.rpm = requests_per_minute
@@ -42,13 +42,16 @@ class RateLimitMiddleware:
         self._last_cleanup = time.time()
 
     def _client_id(self, request: Request) -> str:
-        # SECURITY FIX: X-User-Id is user-controlled, use IP as primary rate limit key
-        # Token-authenticated user_id is not available at middleware level
+        # Spital-Netzwerk: 50+ User hinter einer IP (NAT).
+        # Session-Cookie als Identifikator für authentifizierte User,
+        # IP als Fallback für unauthentifizierte.
         ip = request.client.host if request.client else "unknown"
-        user_id = None  # Removed: was spoofable via X-User-Id header
-        if user_id:
-            return f"u:{user_id}"
-        ip = request.client.host if request.client else "unknown"
+        cookies = request.cookies
+        session = cookies.get("puk_session")
+        if session:
+            # Cookie-Hash (nicht das Token selbst, um Leaks zu vermeiden)
+            import hashlib
+            return f"s:{hashlib.sha256(session.encode()).hexdigest()[:12]}"
         return f"ip:{ip}"
 
     def _cleanup(self) -> None:

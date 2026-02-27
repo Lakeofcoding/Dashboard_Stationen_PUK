@@ -36,8 +36,10 @@ _engine_kwargs = {"pool_pre_ping": True}
 if _IS_SQLITE:
     _engine_kwargs["connect_args"] = {"check_same_thread": False}
 else:
-    _engine_kwargs["pool_size"] = int(os.getenv("DB_POOL_SIZE", "5"))
-    _engine_kwargs["max_overflow"] = int(os.getenv("DB_MAX_OVERFLOW", "10"))
+    # 50 gleichzeitige User: pool_size=10, max_overflow=20 → max 30 Connections
+    _engine_kwargs["pool_size"] = int(os.getenv("DB_POOL_SIZE", "10"))
+    _engine_kwargs["max_overflow"] = int(os.getenv("DB_MAX_OVERFLOW", "20"))
+    _engine_kwargs["pool_timeout"] = int(os.getenv("DB_POOL_TIMEOUT", "10"))
 
 engine = create_engine(DB_URL, **_engine_kwargs)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -53,6 +55,9 @@ def init_db() -> None:
             conn.execute(text("PRAGMA journal_mode=WAL;"))
             conn.execute(text("PRAGMA synchronous=NORMAL;"))
             conn.execute(text("PRAGMA busy_timeout=5000;"))
+            conn.execute(text("PRAGMA cache_size=-64000;"))  # 64MB Cache
+            conn.execute(text("PRAGMA mmap_size=268435456;"))  # 256MB mmap
+            conn.execute(text("PRAGMA temp_store=MEMORY;"))
             conn.commit()
 
     Base.metadata.create_all(bind=engine)
