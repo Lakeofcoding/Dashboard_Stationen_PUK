@@ -89,6 +89,12 @@ class CaseSummary(BaseModel):
     responsible_person: Optional[str] = None
     acked_at: Optional[str] = None
     parameter_status: list[ParameterStatus] = Field(default_factory=list)
+    # ACK-Fortschritt für Arbeitsliste
+    total_alerts: int = 0       # Gesamtzahl aktive Meldungen (vor ACK-Filter)
+    open_alerts: int = 0        # Noch nicht quittiert/geschoben
+    acked_alerts: int = 0       # Heute quittiert/geschoben
+    last_ack_by: Optional[str] = None   # Wer hat zuletzt quittiert
+    last_ack_at: Optional[str] = None   # Wann zuletzt quittiert
     # Neu (v4): Aufenthaltsdauer + Langlieger
     days_since_admission: int = 0
     langlieger: Optional[LangliegerStatus] = None
@@ -113,6 +119,10 @@ class AckRequest(BaseModel):
     action: Literal["ACK", "SHIFT"] = "ACK"
     shift_code: Optional[str] = Field(default=None, max_length=8)
     comment: Optional[str] = Field(default=None, max_length=500)
+
+
+class UndoAckRequest(BaseModel):
+    rule_id: str = Field(..., min_length=1, max_length=128)
 
 
 # --- Day State ---

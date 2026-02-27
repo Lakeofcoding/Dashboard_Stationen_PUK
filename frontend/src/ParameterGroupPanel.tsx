@@ -149,6 +149,7 @@ interface AccordionProps {
   shiftReasons?: ShiftReason[];
   onAckRule?: (caseId: string, ruleId: string) => Promise<void>;
   onShiftRule?: (caseId: string, ruleId: string, shiftCode: string) => Promise<void>;
+  onUndoAck?: (caseId: string, ruleId: string) => Promise<void>;
   onError?: (msg: string) => void;
 }
 
@@ -160,6 +161,7 @@ export default function ParameterGroupPanel({
   shiftReasons = [],
   onAckRule,
   onShiftRule,
+  onUndoAck,
   onError,
 }: AccordionProps) {
   const filtered = useMemo(() => {
@@ -297,6 +299,7 @@ export default function ParameterGroupPanel({
                       onShiftSelect={v => setShiftSelections(p => ({ ...p, [item.id]: v }))}
                       onAckRule={async (cid, rid) => { await onAckRule?.(cid, rid); setExpandedItem(null); }}
                       onShiftRule={async (cid, rid, sc) => { await onShiftRule?.(cid, rid, sc); setExpandedItem(null); }}
+                      onUndoAck={onUndoAck}
                       onError={onError}
                     />
                   ))}
@@ -309,6 +312,7 @@ export default function ParameterGroupPanel({
                       onShiftSelect={v => setShiftSelections(p => ({ ...p, [item.id]: v }))}
                       onAckRule={async (cid, rid) => { await onAckRule?.(cid, rid); setExpandedItem(null); }}
                       onShiftRule={async (cid, rid, sc) => { await onShiftRule?.(cid, rid, sc); setExpandedItem(null); }}
+                      onUndoAck={onUndoAck}
                       onError={onError}
                     />
                   ))}
@@ -362,13 +366,14 @@ interface ItemRowProps {
   onShiftSelect: (v: string) => void;
   onAckRule?: (caseId: string, ruleId: string) => Promise<void>;
   onShiftRule?: (caseId: string, ruleId: string, shiftCode: string) => Promise<void>;
+  onUndoAck?: (caseId: string, ruleId: string) => Promise<void>;
   onError?: (msg: string) => void;
 }
 
 function ItemRow({
   item, acked = false, isExpanded, onToggle,
   canAck, caseId, shiftReasons = [], shiftVal, onShiftSelect,
-  onAckRule, onShiftRule, onError,
+  onAckRule, onShiftRule, onUndoAck, onError,
 }: ItemRowProps) {
   const [hovered, setHovered] = useState(false);
   const colors = ITEM_STATUS[item.status] ?? ITEM_STATUS.na;
@@ -497,7 +502,7 @@ function ItemRow({
             </div>
           )}
 
-          {/* Bereits quittiert? → Info anzeigen */}
+          {/* Bereits quittiert? → Info anzeigen + Undo */}
           {item.ack && (
             <div style={{
               fontSize: 11, color: "#6b7280", marginBottom: 10,
@@ -505,7 +510,7 @@ function ItemRow({
               borderRadius: 6, display: "flex", alignItems: "center", gap: 6,
             }}>
               <span style={{ fontSize: 14 }}>{item.ack.state === "ACK" ? "✓" : "⏭"}</span>
-              <div>
+              <div style={{ flex: 1 }}>
                 <div style={{ fontWeight: 600, color: "#374151" }}>
                   {item.ack.state === "ACK"
                     ? `Als "${ackLabel(item.group)}" markiert`
@@ -515,6 +520,25 @@ function ItemRow({
                   {fmtTs(item.ack.ts)} · Wird bei Datenänderung automatisch reaktiviert
                 </div>
               </div>
+              {/* Rückgängig-Button */}
+              {canAck && caseId && item.rule_id && onUndoAck && (
+                <button
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    if (!confirm("Quittierung rückgängig machen?")) return;
+                    try { await onUndoAck(caseId, item.rule_id!); }
+                    catch (err: any) { onError?.(err?.message ?? String(err)); }
+                  }}
+                  style={{
+                    padding: "3px 8px", fontSize: 10, borderRadius: 4, fontWeight: 600,
+                    border: "1px solid #fca5a5", background: "#fff", color: "#dc2626",
+                    cursor: "pointer", whiteSpace: "nowrap",
+                  }}
+                  title="Quittierung rückgängig machen"
+                >
+                  ↩ Rückgängig
+                </button>
+              )}
             </div>
           )}
 

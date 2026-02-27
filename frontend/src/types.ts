@@ -84,6 +84,12 @@ export interface CaseSummary {
   responsible_person?: string | null;
   acked_at?: string | null;
   parameter_status?: ParameterStatus[];
+  // ACK-Fortschritt
+  total_alerts?: number;
+  open_alerts?: number;
+  acked_alerts?: number;
+  last_ack_by?: string | null;
+  last_ack_at?: string | null;
   // v4
   days_since_admission?: number;
   langlieger?: LangliegerStatus | null;

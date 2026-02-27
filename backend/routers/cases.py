@@ -5,12 +5,13 @@ from typing import Any, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, Query, Path
 from app.auth import AuthContext, get_auth_context, require_ctx
 from app.rbac import require_permission
-from app.schemas import Alert, CaseSummary, CaseDetail, AckRequest
+from app.schemas import Alert, CaseSummary, CaseDetail, AckRequest, UndoAckRequest
 from app.day_state import today_local, get_day_version, ack_is_valid_today
 from app.rule_engine import evaluate_alerts, summarize_severity
 from app.case_logic import (
     get_station_cases, get_single_case, enrich_case, get_valid_shift_codes,
     build_parameter_status, build_parameter_groups, build_langlieger_status, build_fu_status,
+    overlay_ack_on_params,
 )
 from app.excel_loader import get_lab_history, get_ekg_history, get_efm_events
 from app.ack_store import AckStore
@@ -75,6 +76,31 @@ def browse_cases(
         all_cases = []
         for sid in station_ids:
             cases = get_station_cases(sid)
+            case_ids = [c["case_id"] for c in cases]
+            current_version = get_day_version(station_id=sid)
+
+            # ACK-Daten für diese Station laden
+            acks = ack_store.get_acks_for_cases(case_ids, sid)
+            rule_states_today: dict[str, dict[str, Any]] = {}
+            case_level_acked: dict[str, str] = {}
+            for a in acks:
+                if a.ack_scope == "case" and a.scope_id == "*":
+                    if ack_is_valid_today(
+                        acked_at_iso=a.acked_at,
+                        business_date=getattr(a, "business_date", None),
+                        version=getattr(a, "version", None),
+                        current_version=current_version,
+                    ):
+                        case_level_acked[a.case_id] = a.acked_at
+                    continue
+                if a.ack_scope == "rule" and ack_is_valid_today(
+                    acked_at_iso=a.acked_at,
+                    business_date=getattr(a, "business_date", None),
+                    version=getattr(a, "version", None),
+                    current_version=current_version,
+                ):
+                    rule_states_today.setdefault(a.case_id, {})[a.scope_id] = a
+
             for c in cases:
                 if clinic and c.get("clinic") != clinic:
                     continue
@@ -84,11 +110,50 @@ def browse_cases(
                     continue
 
                 alerts = evaluate_alerts(c)
-                sev, top_alert, cc, wc = summarize_severity(alerts)
-                comp_alerts = [a for a in alerts if a.category == "completeness"]
-                med_alerts = [a for a in alerts if a.category == "medical"]
+                rule_acks = rule_states_today.get(c["case_id"], {})
+
+                # ACK-Fortschritt: Gesamtzahl vs. quittierte
+                total_alert_count = len(alerts)
+                acked_rule_ids_set: set[str] = set()
+                for al in alerts:
+                    arow = rule_acks.get(al.rule_id)
+                    if arow and getattr(arow, "condition_hash", None) == al.condition_hash:
+                        acked_rule_ids_set.add(al.rule_id)
+                acked_count = len(acked_rule_ids_set)
+                open_count = total_alert_count - acked_count
+
+                # Visible Alerts (ohne quittierte) → für Severity-Berechnung
+                visible_alerts = [al for al in alerts if al.rule_id not in acked_rule_ids_set]
+
+                sev, top_alert, cc, wc = summarize_severity(visible_alerts)
+                comp_alerts = [a for a in visible_alerts if a.category == "completeness"]
+                med_alerts = [a for a in visible_alerts if a.category == "medical"]
                 comp_sev, _, comp_cc, comp_wc = summarize_severity(comp_alerts)
                 med_sev, _, med_cc, med_wc = summarize_severity(med_alerts)
+
+                # Letzte ACK-Aktion
+                last_by, last_at = None, None
+                for arow in rule_acks.values():
+                    ts = getattr(arow, "acked_at", None)
+                    if ts and (last_at is None or ts > last_at):
+                        last_at = ts
+                        last_by = getattr(arow, "acked_by", None)
+
+                # ACK-aware parameter_status: quittierte Parameter → "ok"
+                raw_params = [ps.dict() if hasattr(ps, 'dict') else ps for ps in build_parameter_status(c)]
+                param_status = overlay_ack_on_params(raw_params, acked_rule_ids_set)
+
+                # Fortschritt: zähle aus parameter_groups (konsistent mit Detail-Panel!)
+                # parameter_groups enthält ALLE Items inkl. Langlieger, SpiGes, FU etc.
+                all_group_items = [item for g in build_parameter_groups(c) for item in g["items"]]
+                raw_group_problems = [i for i in all_group_items if i.get("status") in ("warn", "critical")]
+                total_problems = len(raw_group_problems)
+                # Zähle quittierte: Items mit rule_id die in acked_rule_ids_set sind
+                acked_problems = sum(
+                    1 for i in raw_group_problems
+                    if i.get("rule_id") and i["rule_id"] in acked_rule_ids_set
+                )
+                open_problems = total_problems - acked_problems
 
                 all_cases.append(dict(
                     case_id=c["case_id"],
@@ -110,8 +175,13 @@ def browse_cases(
                     medical_warn=med_wc,
                     case_status=c.get("case_status"),
                     responsible_person=c.get("responsible_person"),
-                    acked_at=None,
-                    parameter_status=[ps.dict() if hasattr(ps, 'dict') else ps for ps in build_parameter_status(c)],
+                    acked_at=case_level_acked.get(c["case_id"]),
+                    parameter_status=param_status,
+                    total_alerts=total_problems,
+                    open_alerts=open_problems,
+                    acked_alerts=acked_problems,
+                    last_ack_by=last_by,
+                    last_ack_at=last_at,
                     days_since_admission=(c.get("_derived") or {}).get("days_since_admission", 0),
                     langlieger=build_langlieger_status(c),
                 ))
@@ -199,6 +269,44 @@ def list_cases(
         comp_sev, _, comp_cc, comp_wc = summarize_severity(comp_alerts)
         med_sev, _, med_cc, med_wc = summarize_severity(med_alerts)
 
+        # ACK-Fortschritt: Gesamtzahl der Meldungen vs. quittierte
+        total_alert_count = len(raw_alerts)
+        rule_acks_for_case = rule_states_today.get(c["case_id"], {})
+        acked_alert_count = 0
+        for al in raw_alerts:
+            arow = rule_acks_for_case.get(al.rule_id)
+            if arow and getattr(arow, "condition_hash", None) == al.condition_hash:
+                acked_alert_count += 1
+        open_alert_count = total_alert_count - acked_alert_count
+
+        # Letzte ACK-Aktion für diesen Fall (heute)
+        last_by: str | None = None
+        last_at: str | None = None
+        for arow in rule_acks_for_case.values():
+            ts = getattr(arow, "acked_at", None)
+            if ts and (last_at is None or ts > last_at):
+                last_at = ts
+                last_by = getattr(arow, "acked_by", None)
+
+        # ACK-aware parameter_status: quittierte Parameter → "ok"
+        acked_rule_ids_set: set[str] = set()
+        for al in raw_alerts:
+            arow = rule_acks_for_case.get(al.rule_id)
+            if arow and getattr(arow, "condition_hash", None) == al.condition_hash:
+                acked_rule_ids_set.add(al.rule_id)
+        raw_param_list = build_parameter_status(c)
+        param_status = overlay_ack_on_params(raw_param_list, acked_rule_ids_set)
+
+        # Fortschritt: zähle aus parameter_groups (konsistent mit Detail-Panel!)
+        all_group_items = [item for g in build_parameter_groups(c) for item in g["items"]]
+        raw_group_problems = [i for i in all_group_items if i.get("status") in ("warn", "critical")]
+        total_problems = len(raw_group_problems)
+        acked_problems = sum(
+            1 for i in raw_group_problems
+            if i.get("rule_id") and i["rule_id"] in acked_rule_ids_set
+        )
+        open_problems = total_problems - acked_problems
+
         out.append(
             CaseSummary(
                 case_id=c["case_id"],
@@ -221,7 +329,12 @@ def list_cases(
                 case_status=c.get("case_status"),
                 responsible_person=c.get("responsible_person"),
                 acked_at=case_level_acked_at.get(c["case_id"]),
-                parameter_status=build_parameter_status(c),
+                parameter_status=param_status,
+                total_alerts=total_problems,
+                open_alerts=open_problems,
+                acked_alerts=acked_problems,
+                last_ack_by=last_by,
+                last_ack_at=last_at,
                 days_since_admission=(c.get("_derived") or {}).get("days_since_admission", 0),
                 langlieger=build_langlieger_status(c),
             )
@@ -557,6 +670,51 @@ def ack(
         response["already_handled_at"] = already_handled_at
 
     return response
+
+
+@router.post("/api/cases/{case_id}/undo-ack")
+def undo_ack(
+    case_id: str,
+    request: Request,
+    body: UndoAckRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+    _ctx: str = Depends(require_ctx),
+    _perm: None = Depends(require_permission("ack:write")),
+):
+    """Macht eine einzelne Quittierung rückgängig (Undo)."""
+    _validate_case_id(case_id)
+    rule_id = body.rule_id
+
+    deleted = ack_store.delete_ack(
+        case_id=case_id,
+        station_id=ctx.station_id,
+        ack_scope="rule",
+        scope_id=rule_id,
+        user_id=ctx.user_id,
+    )
+
+    if not deleted:
+        raise HTTPException(status_code=404, detail="No ACK found for this rule")
+
+    # Audit
+    with SessionLocal() as audit_db:
+        log_security_event(
+            audit_db,
+            request=request,
+            actor_user_id=ctx.user_id,
+            actor_station_id=ctx.station_id,
+            action="UNDO_ACK",
+            target_type="case",
+            target_id=case_id,
+            success=True,
+            message=f"Undo ACK für Regel {rule_id}",
+            details={"rule_id": rule_id},
+        )
+
+    _resp_cache.invalidate()
+    _bump_version()
+
+    return {"case_id": case_id, "rule_id": rule_id, "undone": True}
 
 
 @router.get("/api/day_state")

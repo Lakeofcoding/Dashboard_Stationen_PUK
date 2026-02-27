@@ -308,6 +308,14 @@ async function shiftRule(
   });
 }
 
+async function undoAck(caseId: string, ruleId: string, auth: AuthState): Promise<{ undone: boolean }> {
+  return apiJson<{ undone: boolean }>(`/api/cases/${encodeURIComponent(caseId)}/undo-ack`, {
+    method: "POST",
+    headers: authHeaders(auth),
+    body: JSON.stringify({ rule_id: ruleId }),
+  });
+}
+
 async function fetchDayState(auth: AuthState): Promise<DayState> {
   return apiJson<DayState>("/api/day_state", {
     method: "GET",
@@ -578,8 +586,11 @@ export default function App() {
   const [isAdminOpen, setIsAdminOpen] = useState(false);
   const [shiftByAlert, setShiftByAlert] = useState<Record<string, string>>({});
 
+  // Matrix-Toggle: Listenansicht vs. Matrixansicht innerhalb Arbeitsliste
+  const [showMatrix, setShowMatrix] = useState(false);
+
   // ── Toast-Benachrichtigungen (z.B. Conflict-Info) ──
-  const [toast, setToast] = useState<{ msg: string; type: "info" | "warn" } | null>(null);
+  const [toast, setToast] = useState<{ msg: string; type: "info" | "warn" | "error" } | null>(null);
   useEffect(() => {
     if (!toast) return;
     const t = setTimeout(() => setToast(null), 5000);
@@ -1044,11 +1055,11 @@ export default function App() {
         <div style={{
           padding: "10px 20px", display: "flex", justifyContent: "space-between", alignItems: "center",
           fontSize: 13, zIndex: 250, transition: "opacity 0.3s",
-          background: toast.type === "warn" ? "#fff7ed" : "#eff6ff",
-          borderBottom: toast.type === "warn" ? "2px solid #f59e0b" : "2px solid #3b82f6",
-          color: toast.type === "warn" ? "#92400e" : "#1e40af",
+          background: toast.type === "error" ? "#fef2f2" : toast.type === "warn" ? "#fff7ed" : "#eff6ff",
+          borderBottom: toast.type === "error" ? "2px solid #ef4444" : toast.type === "warn" ? "2px solid #f59e0b" : "2px solid #3b82f6",
+          color: toast.type === "error" ? "#991b1b" : toast.type === "warn" ? "#92400e" : "#1e40af",
         }}>
-          <span>{toast.type === "warn" ? "⚠️" : "ℹ️"} {toast.msg}</span>
+          <span>{toast.type === "error" ? "❌" : toast.type === "warn" ? "⚠️" : "ℹ️"} {toast.msg}</span>
           <button onClick={() => setToast(null)} style={{
             padding: "2px 8px", borderRadius: 4, border: "1px solid currentColor",
             background: "transparent", color: "inherit", cursor: "pointer", fontSize: 11,
@@ -1131,6 +1142,7 @@ export default function App() {
           <button
             onClick={goBack}
             disabled={!canGoBack}
+            title="Zurück navigieren (ändert keine Quittierungen)"
             style={{
               display: "flex", alignItems: "center", gap: 5,
               padding: "8px 14px", marginRight: 4,
@@ -1152,8 +1164,7 @@ export default function App() {
           {/* Tabs */}
           {([
             { key: "overview", label: "Übersicht", icon: "📋" },
-            { key: "cases", label: "Fallliste", icon: "🏥" },
-            { key: "report", label: "Tagesbericht", icon: "📊" },
+            { key: "cases", label: "Arbeitsliste", icon: "🏥" },
             { key: "monitoring", label: "Monitoring", icon: "📈" },
           ] as { key: ViewMode; label: string; icon: string }[]).map((tab) => {
             const isActive = viewMode === tab.key;
@@ -1176,7 +1187,7 @@ export default function App() {
                   }
                   // Direkter Tab-Klick auf Fallliste/Tagesbericht/Monitoring:
                   // Browse-Filter zurücksetzen → zeige alle Fälle
-                  if (tab.key === "cases" || tab.key === "report" || tab.key === "monitoring") {
+                  if (tab.key === "cases" || tab.key === "monitoring") {
                     setBrowseClinic(""); setBrowseCenter(""); setBrowseStation("");
                   }
                 }}
@@ -1612,7 +1623,64 @@ export default function App() {
                   .map(s => <option key={s.station_id} value={s.station_id}>{s.station_id}</option>)}
               </select>
               <span style={{ fontSize: 11, color: "#94a3b8" }}>{cases.length} Fälle</span>
+
+              {/* Ansicht-Toggle + CSV-Export */}
+              <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
+                <button onClick={() => setShowMatrix(false)}
+                  style={{
+                    padding: "4px 10px", borderRadius: "6px 0 0 6px", fontSize: 11, fontWeight: 600,
+                    border: "1px solid #d1d5db", cursor: "pointer",
+                    background: !showMatrix ? "#3b82f6" : "#fff",
+                    color: !showMatrix ? "#fff" : "#6b7280",
+                    borderRight: "none",
+                  }}>📋 Liste</button>
+                <button onClick={() => { setShowMatrix(true); setSelectedCaseId(null); }}
+                  style={{
+                    padding: "4px 10px", borderRadius: "0 6px 6px 0", fontSize: 11, fontWeight: 600,
+                    border: "1px solid #d1d5db", cursor: "pointer",
+                    background: showMatrix ? "#3b82f6" : "#fff",
+                    color: showMatrix ? "#fff" : "#6b7280",
+                  }}>📊 Matrix</button>
+                <button onClick={() => {
+                  // CSV-Export der aktuellen Fallliste
+                  const rows = [["Fall-Nr", "Station", "Eintritt", "Austritt", "Tage", "Status", "Offen", "Erledigt", "Gesamt", "Letzte Aktion von", "Letzte Aktion um"]];
+                  for (const c of cases) {
+                    rows.push([
+                      c.case_id, c.station_id, c.admission_date,
+                      c.discharge_date ?? "offen",
+                      String(c.days_since_admission ?? ""),
+                      c.severity, String(c.open_alerts ?? 0), String(c.acked_alerts ?? 0),
+                      String(c.total_alerts ?? 0),
+                      c.last_ack_by ?? "", c.last_ack_at ?? "",
+                    ]);
+                  }
+                  const csv = rows.map(r => r.join(";")).join("\n");
+                  const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url; a.download = `Schichtbericht_${new Date().toISOString().slice(0,10)}.csv`;
+                  a.click(); URL.revokeObjectURL(url);
+                }}
+                  style={{
+                    padding: "4px 10px", borderRadius: 6, fontSize: 11, fontWeight: 600,
+                    border: "1px solid #d1d5db", background: "#fff", color: "#6b7280", cursor: "pointer",
+                  }}>⬇ CSV</button>
+              </div>
             </div>
+
+            {/* ── Inhalt: Liste oder Matrix ── */}
+            {showMatrix ? (
+              <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
+                <div style={{ maxWidth: 1600, margin: "0 auto" }}>
+                  <MatrixReport
+                    cases={cases}
+                    onSelectCase={(id) => { setSelectedCaseId(id); setShowMatrix(false); }}
+                    authHeaders={authHeaders(auth) as Record<string, string>}
+                    categoryFilter={categoryFilter}
+                  />
+                </div>
+              </div>
+            ) : (
             <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
             {/* Left: sortable table */}
             <div style={{ flex: selectedCaseId ? "0 0 55%" : 1, overflowY: "auto", borderRight: selectedCaseId ? "1px solid #e5e7eb" : "none" }}>
@@ -1645,6 +1713,8 @@ export default function App() {
                     if (result.already_handled) {
                       setToast({ msg: `Bereits quittiert von ${result.already_handled_by ?? "anderem User"} – Ihre Quittierung wurde trotzdem übernommen.`, type: "warn" });
                     }
+                    // Cache busting: Etag-Cache löschen damit frische Daten geladen werden
+                    Object.keys(_etagStore).forEach(k => { delete _etagStore[k]; delete _etagDataStore[k]; });
                     const [newList, newDetail] = await Promise.all([fetchBrowseCases(auth, {clinic: browseClinic || undefined, center: browseCenter || undefined, station: browseStation || undefined}), fetchCaseDetail(caseId, auth, viewMode)]);
                     setCases(newList); setDetail(newDetail);
                   }}
@@ -1654,28 +1724,28 @@ export default function App() {
                       setToast({ msg: `Bereits bearbeitet von ${result.already_handled_by ?? "anderem User"} – Ihre Schiebung wurde trotzdem übernommen.`, type: "warn" });
                     }
                     setShift(caseId, ruleId, "");
+                    Object.keys(_etagStore).forEach(k => { delete _etagStore[k]; delete _etagDataStore[k]; });
                     const [newList, newDetail] = await Promise.all([fetchBrowseCases(auth, {clinic: browseClinic || undefined, center: browseCenter || undefined, station: browseStation || undefined}), fetchCaseDetail(caseId, auth, viewMode)]);
                     setCases(newList); setDetail(newDetail);
+                  }}
+                  onUndoAck={async (caseId, ruleId) => {
+                    try {
+                      await undoAck(caseId, ruleId, auth);
+                      setToast({ msg: "Quittierung rückgängig gemacht.", type: "info" });
+                      Object.keys(_etagStore).forEach(k => { delete _etagStore[k]; delete _etagDataStore[k]; });
+                      const [newList, newDetail] = await Promise.all([fetchBrowseCases(auth, {clinic: browseClinic || undefined, center: browseCenter || undefined, station: browseStation || undefined}), fetchCaseDetail(caseId, auth, viewMode)]);
+                      setCases(newList); setDetail(newDetail);
+                    } catch (err: any) {
+                      console.error("[UNDO] Error:", err);
+                      setToast({ msg: `Rückgängig fehlgeschlagen: ${err?.message ?? String(err)}`, type: "error" });
+                    }
                   }}
                   onError={(msg) => setError(msg)}
                 />}
               </div>
             )}
           </div>
-          </div>
-        )}
-
-        {/* ─── TAB: TAGESBERICHT (Matrix-Heatmap) ─── */}
-        {viewMode === "report" && (
-          <div style={{ flex: 1, overflowY: "auto", padding: "24px 28px" }}>
-            <div style={{ maxWidth: 1400, margin: "0 auto" }}>
-              <MatrixReport
-                cases={cases}
-                onSelectCase={(id) => { setSelectedCaseId(id); setViewMode("cases"); }}
-                authHeaders={authHeaders(auth) as Record<string, string>}
-                categoryFilter={categoryFilter}
-              />
-            </div>
+          )}
           </div>
         )}
 
@@ -1724,10 +1794,11 @@ interface DetailPanelProps {
   onSetShift: (caseId: string, ruleId: string, value: string) => void;
   onAckRule: (caseId: string, ruleId: string) => Promise<void>;
   onShiftRule: (caseId: string, ruleId: string, shiftVal: string) => Promise<void>;
+  onUndoAck: (caseId: string, ruleId: string) => Promise<void>;
   onError: (msg: string) => void;
 }
 
-function DetailPanel({ detail, canAck, shiftByAlert, shiftReasons, categoryFilter, onSetShift, onAckRule, onShiftRule, onError }: DetailPanelProps) {
+function DetailPanel({ detail, canAck, shiftByAlert, shiftReasons, categoryFilter, onSetShift, onAckRule, onShiftRule, onUndoAck, onError }: DetailPanelProps) {
   const filteredAlerts = categoryFilter === "all"
     ? detail.alerts
     : detail.alerts.filter(a => a.category === categoryFilter);
@@ -1818,6 +1889,7 @@ function DetailPanel({ detail, canAck, shiftByAlert, shiftReasons, categoryFilte
             shiftReasons={shiftReasons}
             onAckRule={onAckRule}
             onShiftRule={onShiftRule}
+            onUndoAck={onUndoAck}
             onError={onError}
           />
         </div>

@@ -16,6 +16,98 @@ from app.schemas import ParameterStatus, ParameterGroup, LangliegerStatus, FuSta
 from app.excel_loader import get_demo_cases
 
 
+# ── Modul-Level Mapping: Parameter-ID+Status → Rule-IDs ──
+# Wird sowohl in build_parameter_groups als auch in overlay_ack_on_params verwendet
+PARAM_RULE_MAP: dict[tuple[str, str], list[str]] = {
+    # SpiGes Personendaten
+    ("zivilstand", "warn"): ["SPIGES_ZIVILSTAND_MISSING", "SPIGES_ZIVILSTAND_UNKNOWN"],
+    ("aufenthaltsort", "warn"): ["SPIGES_AUFENTHALTSORT_MISSING"],
+    ("beschaeftigung", "warn"): ["SPIGES_BESCHAEFTIGUNG_MISSING"],
+    ("schulbildung", "warn"): ["SPIGES_SCHULBILDUNG_MISSING"],
+    # SpiGes Eintritt
+    ("einweisende_instanz", "warn"): ["SPIGES_EINWEISENDE_INSTANZ_MISSING"],
+    ("behandlungsgrund", "warn"): ["SPIGES_BEHANDLUNGSGRUND_MISSING"],
+    # SpiGes Austritt
+    ("entscheid_austritt", "warn"): ["SPIGES_ENTSCHEID_AUSTRITT_MISSING"],
+    ("aufenthalt_nach_austritt", "warn"): ["SPIGES_AUFENTHALT_NACH_AUSTRITT_MISSING"],
+    ("behandlung_nach_austritt", "warn"): ["SPIGES_BEHANDLUNG_NACH_AUSTRITT_MISSING"],
+    ("behandlungsbereich", "warn"): ["SPIGES_BEHANDLUNGSBEREICH_MISSING"],
+    # SpiGes Behandlung
+    ("behandlung_typ", "warn"): ["SPIGES_BEHANDLUNG_TYP_MISSING"],
+    ("psychopharmaka", "warn"): ["SPIGES_PSYCHOPHARMAKA_MISSING"],
+    # MB Minimaldaten
+    ("eintrittsart", "warn"): ["MB_EINTRITTSART_MISSING"],
+    ("klasse", "warn"): ["MB_KLASSE_MISSING"],
+    # FU
+    ("fu_bei_eintritt", "critical"): ["FU_MISSING"],
+    ("fu_ablauf", "warn"): ["FU_EXPIRING_SOON"],
+    ("fu_ablauf", "critical"): ["FU_EXPIRED"],
+    # HoNOS
+    ("honos_entry", "warn"): ["HONOS_ENTRY_MISSING_WARN"],
+    ("honos_entry", "critical"): ["HONOS_ENTRY_MISSING_CRIT_3D"],
+    ("honos_discharge", "warn"): ["HONOS_DISCHARGE_MISSING_WARN"],
+    ("honos_discharge", "critical"): ["HONOS_DISCHARGE_MISSING_CRIT_3D"],
+    # BSCL
+    ("bscl_entry", "warn"): ["BSCL_ENTRY_MISSING_WARN"],
+    ("bscl_entry", "critical"): ["BSCL_ENTRY_MISSING_CRIT_3D"],
+    ("bscl_discharge", "warn"): ["BSCL_DISCHARGE_MISSING_WARN"],
+    ("bscl_discharge", "critical"): ["BSCL_DISCHARGE_MISSING_CRIT_3D"],
+    # BFS
+    ("bfs", "warn"): ["BFS_INCOMPLETE"],
+    # Dok Austritt
+    ("sdep", "critical"): ["SDEP_INCOMPLETE_AT_DISCHARGE"],
+    ("doc_completion", "warn"): ["DOC_COMPLETION_WARN"],
+    ("doc_completion", "critical"): ["DOC_COMPLETION_OVERDUE"],
+    # Behandlungsplan
+    ("treatment_plan", "critical"): ["TREATMENT_PLAN_MISSING_72H"],
+    ("treatment_plan", "warn"): ["TREATMENT_PLAN_MISSING_72H"],
+    # Klinisch
+    ("ekg", "critical"): ["EKG_NOT_REPORTED_24H"],
+    ("ekg", "warn"): ["EKG_ENTRY_MISSING_7D"],
+    ("clozapin", "critical"): ["CLOZAPIN_NEUTROPHILS_LOW"],
+    ("clozapin", "warn"): ["CLOZAPIN_CBC_MISSING_EARLY", "CLOZAPIN_TROPONIN_MISSING_EARLY"],
+    ("suicidality", "critical"): ["SUICIDALITY_HIGH_AT_DISCHARGE"],
+    ("notfall_bem", "critical"): ["EMERGENCY_BEM_OVER_3D"],
+    ("notfall_med", "critical"): ["EMERGENCY_MED_OVER_3D"],
+    ("allergies", "warn"): ["ALLERGIES_MISSING_7D"],
+    ("isolation", "critical"): ["ISOLATION_OPEN_GT_48H"],
+    ("isolation", "warn"): ["ISOLATION_MULTIPLE"],
+    # HoNOS/BSCL Delta
+    ("honos_delta", "warn"): ["HONOS_DELTA_GT_5"],
+    ("bscl_delta", "warn"): ["BSCL_DELTA_GT_5"],
+    # Langlieger
+    ("langlieger", "warn"): ["LANGLIEGER_WARN"],
+    ("langlieger", "critical"): ["LANGLIEGER_CRITICAL"],
+}
+
+
+def overlay_ack_on_params(params: list[dict], acked_rule_ids: set[str]) -> list[dict]:
+    """Überlagert ACK-Status auf parameter_status.
+
+    Wenn ein Parameter-Problem einem heute quittierten Rule-ID entspricht,
+    wird status → 'ok' und detail erhält '✓ Quittiert'-Prefix.
+    """
+    if not acked_rule_ids:
+        return params
+    result = []
+    for p in params:
+        status = p.get("status", "ok")
+        if status not in ("warn", "critical"):
+            result.append(p)
+            continue
+        key = (p.get("id", ""), status)
+        rule_ids = PARAM_RULE_MAP.get(key, [])
+        if any(rid in acked_rule_ids for rid in rule_ids):
+            result.append({
+                **p,
+                "status": "ok",
+                "detail": f"✓ Quittiert ({p.get('detail', '')})" if p.get("detail") else "✓ Quittiert",
+            })
+        else:
+            result.append(p)
+    return result
+
+
 def build_parameter_status(c: dict) -> list[dict]:
     """Baut die kompakte Parameterleiste fuer einen angereicherten Fall."""
     derived = c.get("_derived", {})
@@ -478,67 +570,6 @@ def build_parameter_groups(c: dict) -> list[dict]:
 
     # ─── Post-Processing: rule_id Mapping ───
     # Verknüpft Parameter-Items mit ihren Regel-IDs für ACK/SHIFT-Workflow
-    PARAM_RULE_MAP = {
-        # SpiGes Personendaten
-        ("zivilstand", "warn"): ["SPIGES_ZIVILSTAND_MISSING", "SPIGES_ZIVILSTAND_UNKNOWN"],
-        ("aufenthaltsort", "warn"): ["SPIGES_AUFENTHALTSORT_MISSING"],
-        ("beschaeftigung", "warn"): ["SPIGES_BESCHAEFTIGUNG_MISSING"],
-        ("schulbildung", "warn"): ["SPIGES_SCHULBILDUNG_MISSING"],
-        # SpiGes Eintritt
-        ("einweisende_instanz", "warn"): ["SPIGES_EINWEISENDE_INSTANZ_MISSING"],
-        ("behandlungsgrund", "warn"): ["SPIGES_BEHANDLUNGSGRUND_MISSING"],
-        # SpiGes Austritt
-        ("entscheid_austritt", "warn"): ["SPIGES_ENTSCHEID_AUSTRITT_MISSING"],
-        ("aufenthalt_nach_austritt", "warn"): ["SPIGES_AUFENTHALT_NACH_AUSTRITT_MISSING"],
-        ("behandlung_nach_austritt", "warn"): ["SPIGES_BEHANDLUNG_NACH_AUSTRITT_MISSING"],
-        ("behandlungsbereich", "warn"): ["SPIGES_BEHANDLUNGSBEREICH_MISSING"],
-        # SpiGes Behandlung
-        ("behandlung_typ", "warn"): ["SPIGES_BEHANDLUNG_TYP_MISSING"],
-        ("psychopharmaka", "warn"): ["SPIGES_PSYCHOPHARMAKA_MISSING"],
-        # MB Minimaldaten
-        ("eintrittsart", "warn"): ["MB_EINTRITTSART_MISSING"],
-        ("klasse", "warn"): ["MB_KLASSE_MISSING"],
-        # FU
-        ("fu_bei_eintritt", "critical"): ["FU_MISSING"],
-        ("fu_ablauf", "warn"): ["FU_EXPIRING_SOON"],
-        ("fu_ablauf", "critical"): ["FU_EXPIRED"],
-        # HoNOS
-        ("honos_entry", "warn"): ["HONOS_ENTRY_MISSING_WARN"],
-        ("honos_entry", "critical"): ["HONOS_ENTRY_MISSING_CRIT_3D"],
-        ("honos_discharge", "warn"): ["HONOS_DISCHARGE_MISSING_WARN"],
-        ("honos_discharge", "critical"): ["HONOS_DISCHARGE_MISSING_CRIT_3D"],
-        # BSCL
-        ("bscl_entry", "warn"): ["BSCL_ENTRY_MISSING_WARN"],
-        ("bscl_entry", "critical"): ["BSCL_ENTRY_MISSING_CRIT_3D"],
-        ("bscl_discharge", "warn"): ["BSCL_DISCHARGE_MISSING_WARN"],
-        ("bscl_discharge", "critical"): ["BSCL_DISCHARGE_MISSING_CRIT_3D"],
-        # BFS
-        ("bfs", "warn"): ["BFS_INCOMPLETE"],
-        # Dok Austritt
-        ("sdep", "critical"): ["SDEP_INCOMPLETE_AT_DISCHARGE"],
-        ("doc_completion", "warn"): ["DOC_COMPLETION_WARN"],
-        ("doc_completion", "critical"): ["DOC_COMPLETION_OVERDUE"],
-        # Behandlungsplan
-        ("treatment_plan", "critical"): ["TREATMENT_PLAN_MISSING_72H"],
-        ("treatment_plan", "warn"): ["TREATMENT_PLAN_MISSING_72H"],
-        # Klinisch
-        ("ekg", "critical"): ["EKG_NOT_REPORTED_24H"],
-        ("ekg", "warn"): ["EKG_ENTRY_MISSING_7D"],
-        ("clozapin", "critical"): ["CLOZAPIN_NEUTROPHILS_LOW"],
-        ("clozapin", "warn"): ["CLOZAPIN_CBC_MISSING_EARLY", "CLOZAPIN_TROPONIN_MISSING_EARLY"],
-        ("suicidality", "critical"): ["SUICIDALITY_HIGH_AT_DISCHARGE"],
-        ("notfall_bem", "critical"): ["EMERGENCY_BEM_OVER_3D"],
-        ("notfall_med", "critical"): ["EMERGENCY_MED_OVER_3D"],
-        ("allergies", "warn"): ["ALLERGIES_MISSING_7D"],
-        ("isolation", "critical"): ["ISOLATION_OPEN_GT_48H"],
-        ("isolation", "warn"): ["ISOLATION_MULTIPLE"],
-        # HoNOS/BSCL Delta
-        ("honos_delta", "warn"): ["HONOS_DELTA_GT_5"],
-        ("bscl_delta", "warn"): ["BSCL_DELTA_GT_5"],
-        # Langlieger
-        ("langlieger", "warn"): ["LANGLIEGER_WARN"],
-        ("langlieger", "critical"): ["LANGLIEGER_CRITICAL"],
-    }
     for group in groups:
         for item in group["items"]:
             if item["status"] in ("ok", "na"):

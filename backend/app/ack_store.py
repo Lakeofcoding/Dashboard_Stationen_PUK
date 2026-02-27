@@ -255,3 +255,41 @@ class AckStore:
                 stmt = stmt.where(AckEvent.case_id == case_id)
             stmt = stmt.order_by(AckEvent.ts.desc()).limit(limit)
             return list(db.execute(stmt).scalars().all())
+
+    def delete_ack(
+        self,
+        *,
+        case_id: str,
+        station_id: str,
+        ack_scope: str,
+        scope_id: str,
+        user_id: str,
+    ) -> bool:
+        """Löscht eine einzelne Quittierung (Undo). Gibt True zurück wenn gelöscht."""
+        with SessionLocal() as db:
+            existing = db.get(Ack, (case_id, station_id, ack_scope, scope_id))
+            if not existing:
+                return False
+
+            old_data = {
+                "acked_at": existing.acked_at,
+                "acked_by": existing.acked_by,
+                "condition_hash": getattr(existing, "condition_hash", None),
+                "action": getattr(existing, "action", None),
+                "shift_code": getattr(existing, "shift_code", None),
+            }
+
+            db.delete(existing)
+            db.add(
+                self._insert_event(
+                    case_id=case_id,
+                    station_id=station_id,
+                    ack_scope=ack_scope,
+                    scope_id=scope_id,
+                    event_type="UNDO",
+                    user_id=user_id,
+                    payload={"undone": old_data},
+                )
+            )
+            db.commit()
+            return True
