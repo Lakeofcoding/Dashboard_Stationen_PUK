@@ -141,3 +141,23 @@ def _compute_etag(data: Any) -> str:
 
 # ── Globale Instanz ──────────────────────────────────────────────────
 cache = ResponseCache(default_ttl=10.0)
+
+# ── Globaler Daten-Versionszähler ────────────────────────────────────
+# Wird bei jeder Schreiboperation inkrementiert.
+# Frontend pollt /api/data-version (sehr günstig) und refresht bei Änderung.
+import threading as _dv_threading
+
+_data_version = 0
+_data_version_lock = _dv_threading.Lock()
+
+
+def get_data_version() -> int:
+    return _data_version
+
+
+def bump_data_version() -> int:
+    """Inkrementiert den globalen Daten-Versionszähler. Returns: neue Version."""
+    global _data_version
+    with _data_version_lock:
+        _data_version += 1
+        return _data_version

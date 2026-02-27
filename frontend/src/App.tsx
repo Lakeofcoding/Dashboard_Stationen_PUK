@@ -273,8 +273,16 @@ async function fetchCaseDetail(caseId: string, auth: AuthState, _view: ViewMode)
   });
 }
 
-async function ackRule(caseId: string, ruleId: string, auth: AuthState): Promise<{ acked_at: string }> {
-  return apiJson<{ acked_at: string }>("/api/ack", {
+type AckResponse = {
+  acked_at: string;
+  acked_by?: string;
+  already_handled?: boolean;
+  already_handled_by?: string;
+  already_handled_at?: string;
+};
+
+async function ackRule(caseId: string, ruleId: string, auth: AuthState): Promise<AckResponse> {
+  return apiJson<AckResponse>("/api/ack", {
     method: "POST",
     headers: authHeaders(auth),
     body: JSON.stringify({ case_id: caseId, ack_scope: "rule", scope_id: ruleId }),
@@ -286,8 +294,8 @@ async function shiftRule(
   ruleId: string,
   shift: string,
   auth: AuthState
-): Promise<{ acked_at: string }> {
-  return apiJson<{ acked_at: string }>("/api/ack", {
+): Promise<AckResponse> {
+  return apiJson<AckResponse>("/api/ack", {
     method: "POST",
     headers: authHeaders(auth),
     body: JSON.stringify({
@@ -570,6 +578,41 @@ export default function App() {
   const [isAdminOpen, setIsAdminOpen] = useState(false);
   const [shiftByAlert, setShiftByAlert] = useState<Record<string, string>>({});
 
+  // ── Toast-Benachrichtigungen (z.B. Conflict-Info) ──
+  const [toast, setToast] = useState<{ msg: string; type: "info" | "warn" } | null>(null);
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 5000);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  // ── Data-Version-Polling: erkennt Änderungen durch andere User ──
+  const lastDataVersionRef = useRef<number>(-1);
+  const [refreshCounter, setRefreshCounter] = useState(0);
+  const forceRefresh = useCallback(() => setRefreshCounter(c => c + 1), []);
+
+  // Lightweight Version-Check alle 5s (kein Auth, kein Body, ~50 Bytes)
+  useEffect(() => {
+    if (!isLoggedIn) return;
+    let alive = true;
+    const check = async () => {
+      if (document.hidden) return;
+      try {
+        const res = await fetch("/api/data-version");
+        if (!res.ok) return;
+        const { v } = await res.json();
+        if (lastDataVersionRef.current >= 0 && v !== lastDataVersionRef.current) {
+          // Daten haben sich serverseitig geändert → Refresh triggern
+          if (alive) setRefreshCounter(c => c + 1);
+        }
+        lastDataVersionRef.current = v;
+      } catch { /* ignore */ }
+    };
+    check();
+    const id = window.setInterval(check, 5_000);
+    return () => { alive = false; window.clearInterval(id); };
+  }, [isLoggedIn]);
+
   const setShift = (caseId: string, ruleId: string, value: string) => {
     setShiftByAlert((prev) => ({ ...prev, [`${caseId}::${ruleId}`]: value }));
   };
@@ -705,7 +748,7 @@ export default function App() {
       if (intervalId) window.clearInterval(intervalId);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [auth, viewMode, browseClinic, browseCenter, browseStation]);
+  }, [auth, viewMode, browseClinic, browseCenter, browseStation, refreshCounter]);
 
   // Load overview data + analytics (Smart Polling)
   useEffect(() => {
@@ -737,7 +780,7 @@ export default function App() {
       if (intervalId) window.clearInterval(intervalId);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [auth, viewMode]);
+  }, [auth, viewMode, refreshCounter]);
 
   // Load detail
   useEffect(() => {
@@ -993,6 +1036,23 @@ export default function App() {
           <button onClick={() => { lastActivityRef.current = Date.now(); setSessionWarning(false); }} style={{ padding: "4px 12px", borderRadius: 6, border: "1px solid #d97706", background: "#fff", color: "#92400e", fontWeight: 600, fontSize: 12, cursor: "pointer" }}>
             Sitzung verlängern
           </button>
+        </div>
+      )}
+
+      {/* TOAST-BENACHRICHTIGUNG */}
+      {toast && (
+        <div style={{
+          padding: "10px 20px", display: "flex", justifyContent: "space-between", alignItems: "center",
+          fontSize: 13, zIndex: 250, transition: "opacity 0.3s",
+          background: toast.type === "warn" ? "#fff7ed" : "#eff6ff",
+          borderBottom: toast.type === "warn" ? "2px solid #f59e0b" : "2px solid #3b82f6",
+          color: toast.type === "warn" ? "#92400e" : "#1e40af",
+        }}>
+          <span>{toast.type === "warn" ? "⚠️" : "ℹ️"} {toast.msg}</span>
+          <button onClick={() => setToast(null)} style={{
+            padding: "2px 8px", borderRadius: 4, border: "1px solid currentColor",
+            background: "transparent", color: "inherit", cursor: "pointer", fontSize: 11,
+          }}>✕</button>
         </div>
       )}
 
@@ -1581,12 +1641,18 @@ export default function App() {
                   categoryFilter={categoryFilter}
                   onSetShift={setShift}
                   onAckRule={async (caseId, ruleId) => {
-                    await ackRule(caseId, ruleId, auth);
+                    const result = await ackRule(caseId, ruleId, auth);
+                    if (result.already_handled) {
+                      setToast({ msg: `Bereits quittiert von ${result.already_handled_by ?? "anderem User"} – Ihre Quittierung wurde trotzdem übernommen.`, type: "warn" });
+                    }
                     const [newList, newDetail] = await Promise.all([fetchBrowseCases(auth, {clinic: browseClinic || undefined, center: browseCenter || undefined, station: browseStation || undefined}), fetchCaseDetail(caseId, auth, viewMode)]);
                     setCases(newList); setDetail(newDetail);
                   }}
                   onShiftRule={async (caseId, ruleId, shiftVal) => {
-                    await shiftRule(caseId, ruleId, shiftVal, auth);
+                    const result = await shiftRule(caseId, ruleId, shiftVal, auth);
+                    if (result.already_handled) {
+                      setToast({ msg: `Bereits bearbeitet von ${result.already_handled_by ?? "anderem User"} – Ihre Schiebung wurde trotzdem übernommen.`, type: "warn" });
+                    }
                     setShift(caseId, ruleId, "");
                     const [newList, newDetail] = await Promise.all([fetchBrowseCases(auth, {clinic: browseClinic || undefined, center: browseCenter || undefined, station: browseStation || undefined}), fetchCaseDetail(caseId, auth, viewMode)]);
                     setCases(newList); setDetail(newDetail);

@@ -19,6 +19,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 _EXEMPT_PATHS = (
     "/health",
+    "/api/data-version",
     "/docs",
     "/openapi.json",
     "/redoc",

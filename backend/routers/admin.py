@@ -25,14 +25,15 @@ from app.schemas import (
 from app.config import STATION_CENTER
 from app.rule_engine import invalidate_rule_cache, load_rules_yaml
 from app.case_logic import seed_dummy_cases_to_db
-from app.response_cache import cache as _resp_cache
+from app.response_cache import cache as _resp_cache, bump_data_version as _bump_version
 from app.auth import invalidate_auth_cache
 
 
 def _invalidate_data_caches():
-    """Nach Datenänderungen alle Response-Caches leeren."""
+    """Nach Datenänderungen alle Response-Caches leeren + Version bumpen."""
     _resp_cache.invalidate()
     invalidate_rule_cache()
+    _bump_version()
 
 
 router = APIRouter()

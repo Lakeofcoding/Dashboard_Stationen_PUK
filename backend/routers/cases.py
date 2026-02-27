@@ -31,7 +31,7 @@ def _validate_case_id(case_id: str) -> str:
 ack_store = AckStore()
 
 
-from app.response_cache import cache as _resp_cache
+from app.response_cache import cache as _resp_cache, bump_data_version as _bump_version
 
 
 router = APIRouter()
@@ -482,6 +482,22 @@ def ack(
                     },
                 )
 
+    # ── Concurrent-Edit-Erkennung: wurde diese Meldung bereits von jemand anderem quittiert? ──
+    already_handled_by: str | None = None
+    already_handled_at: str | None = None
+    if req.ack_scope == "rule":
+        existing_acks = ack_store.get_acks_for_cases([req.case_id], ctx.station_id)
+        for ea in existing_acks:
+            if ea.ack_scope == "rule" and ea.scope_id == req.scope_id:
+                # Prüfe ob von einem ANDEREN User, heute, gleiche Version
+                is_other_user = ea.acked_by and ea.acked_by != ctx.user_id
+                is_today = getattr(ea, "business_date", None) == business_date
+                is_current = getattr(ea, "version", None) == current_version
+                if is_other_user and is_today and is_current:
+                    already_handled_by = ea.acked_by
+                    already_handled_at = ea.acked_at
+                break
+
     ack_row = ack_store.upsert_ack(
         case_id=req.case_id,
         station_id=ctx.station_id,
@@ -521,8 +537,9 @@ def ack(
 
     # Cache invalidieren: Daten haben sich geändert
     _resp_cache.invalidate()
+    _bump_version()
 
-    return {
+    response = {
         "case_id": ack_row.case_id,
         "station_id": ack_row.station_id,
         "ack_scope": ack_row.ack_scope,
@@ -532,6 +549,14 @@ def ack(
         "acked_by": ack_row.acked_by,
         "condition_hash": getattr(ack_row, "condition_hash", None),
     }
+
+    # Conflict-Info: wenn bereits von anderem User quittiert
+    if already_handled_by:
+        response["already_handled"] = True
+        response["already_handled_by"] = already_handled_by
+        response["already_handled_at"] = already_handled_at
+
+    return response
 
 
 @router.get("/api/day_state")
@@ -610,6 +635,7 @@ def reset_today(
 
     # Cache invalidieren: alle Quittierungen wurden zurückgesetzt
     _resp_cache.invalidate()
+    _bump_version()
 
     return {
         "station_id": ctx.station_id,

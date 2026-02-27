@@ -16,11 +16,26 @@ from app.config import STATION_CENTER
 from app.case_logic import get_station_cases
 from app.rule_engine import evaluate_alerts, summarize_severity
 from app.bi_analytics import compute_station_analytics
-from app.response_cache import cache
+from app.response_cache import cache, get_data_version
 from app.db import SessionLocal
 from app.models import Case
 
 router = APIRouter()
+
+
+# ══════════════════════════════════════════════════════════════════════
+# /api/data-version — Leichtgewichtiger Change-Detector
+# ══════════════════════════════════════════════════════════════════════
+# Kein Auth nötig, kein DB-Hit, kein Cache-Overhead.
+# Frontend pollt alle 5s: wenn Version sich ändert → voller Refresh.
+
+@router.get("/api/data-version")
+def data_version():
+    """Gibt die aktuelle globale Datenversion zurück.
+    Inkrementiert bei jeder Schreiboperation (ACK, Upload, Reset etc.).
+    Kein Auth erforderlich – enthält keine sensitiven Daten.
+    """
+    return {"v": get_data_version()}
 
 
 # ── Helper: Alle Stationen aus DB (gecached) ─────────────────────────
