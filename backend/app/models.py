@@ -326,6 +326,13 @@ class Case(Base):
     honos_discharge_total: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     honos_discharge_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     honos_discharge_suicidality: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # HoNOS Items (JSON: [item1, item2, ...], 9=not known)
+    honos_entry_items_json: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    honos_discharge_items_json: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    honos_instrument: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # "HoNOS" or "HoNOSCA"
+    # BSCL Items (JSON: [item1..item53])
+    bscl_entry_items_json: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    bscl_discharge_items_json: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
     # BSCL (Durchschnittswerte 0.0–4.0 → Float)
     bscl_total_entry: Mapped[Optional[float]] = mapped_column(Float, nullable=True)

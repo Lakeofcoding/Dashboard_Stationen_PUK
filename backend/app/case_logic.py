@@ -1250,6 +1250,11 @@ def _load_raw_cases_from_db(station_id: str) -> list[dict]:
                 "honos_discharge_total": c.honos_discharge_total,
                 "honos_discharge_date": date.fromisoformat(c.honos_discharge_date) if c.honos_discharge_date else None,
                 "honos_discharge_suicidality": c.honos_discharge_suicidality,
+                "honos_entry_items": json.loads(c.honos_entry_items_json) if c.honos_entry_items_json else None,
+                "honos_discharge_items": json.loads(c.honos_discharge_items_json) if c.honos_discharge_items_json else None,
+                "honos_instrument": c.honos_instrument,
+                "bscl_entry_items": json.loads(c.bscl_entry_items_json) if c.bscl_entry_items_json else None,
+                "bscl_discharge_items": json.loads(c.bscl_discharge_items_json) if c.bscl_discharge_items_json else None,
                 "bscl_total_entry": c.bscl_total_entry,
                 "bscl_entry_date": date.fromisoformat(c.bscl_entry_date) if c.bscl_entry_date else None,
                 "bscl_total_discharge": c.bscl_total_discharge,
@@ -1356,6 +1361,36 @@ def get_station_cases(station_id: str, ack_store=None) -> list[dict]:
     return [enrich_case(c) for c in db_cases]
 
 
+def get_all_cases_enriched() -> list[dict]:
+    """Alle Fälle aller Stationen als Rohdaten (ohne enrich, fuer Reporting)."""
+    with SessionLocal() as db:
+        all_cases = db.query(Case).all()
+        result = []
+        for c in all_cases:
+            case_dict = {
+                "case_id": c.case_id,
+                "patient_id": c.patient_id or c.case_id,
+                "clinic": c.clinic or "EPP",
+                "station_id": c.station_id,
+                "center": c.center or STATION_CENTER.get(c.station_id, "UNKNOWN"),
+                "admission_date": c.admission_date,
+                "discharge_date": c.discharge_date,
+                "honos_entry_total": c.honos_entry_total,
+                "honos_entry_date": c.honos_entry_date,
+                "honos_discharge_total": c.honos_discharge_total,
+                "honos_discharge_date": c.honos_discharge_date,
+                "honos_discharge_suicidality": c.honos_discharge_suicidality,
+                "honos_entry_items": json.loads(c.honos_entry_items_json) if c.honos_entry_items_json else None,
+                "honos_discharge_items": json.loads(c.honos_discharge_items_json) if c.honos_discharge_items_json else None,
+                "honos_instrument": c.honos_instrument,
+                "bscl_entry_items": json.loads(c.bscl_entry_items_json) if c.bscl_entry_items_json else None,
+                "bscl_discharge_items": json.loads(c.bscl_discharge_items_json) if c.bscl_discharge_items_json else None,
+                "case_status": c.case_status,
+            }
+            result.append(case_dict)
+        return result
+
+
 def get_single_case(case_id: str) -> dict | None:
     """Einzelnen Fall laden (ohne Auto-Expire, für Detail-View). Quelle: nur DB."""
     with SessionLocal() as db:
@@ -1421,6 +1456,11 @@ def seed_dummy_cases_to_db():
                 honos_discharge_total=c.get("honos_discharge_total"),
                 honos_discharge_date=_date_to_str(c.get("honos_discharge_date")),
                 honos_discharge_suicidality=c.get("honos_discharge_suicidality"),
+                honos_entry_items_json=json.dumps(c["honos_entry_items"]) if c.get("honos_entry_items") else None,
+                honos_discharge_items_json=json.dumps(c["honos_discharge_items"]) if c.get("honos_discharge_items") else None,
+                honos_instrument=c.get("honos_instrument"),
+                bscl_entry_items_json=json.dumps(c["bscl_entry_items"]) if c.get("bscl_entry_items") else None,
+                bscl_discharge_items_json=json.dumps(c["bscl_discharge_items"]) if c.get("bscl_discharge_items") else None,
                 bscl_total_entry=c.get("bscl_total_entry"),
                 bscl_entry_date=_date_to_str(c.get("bscl_entry_date")),
                 bscl_total_discharge=c.get("bscl_total_discharge"),

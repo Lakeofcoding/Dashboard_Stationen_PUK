@@ -84,6 +84,7 @@ from routers.debug import router as debug_router
 from routers.overview import router as overview_router
 from routers.notifications import router as notifications_router
 from routers.export import router as export_router
+from routers.reporting import router as reporting_router
 
 app.include_router(health_router, tags=["health"])
 app.include_router(auth_router, tags=["auth"])
@@ -96,6 +97,7 @@ if DEMO_MODE:
 app.include_router(overview_router, tags=["overview"])
 app.include_router(notifications_router, tags=["notifications"])
 app.include_router(export_router, tags=["export"])
+app.include_router(reporting_router, tags=["reporting"])
 
 # ---------------------------------------------------------------------------
 # CSRF-Exemption für Auth-Endpoints

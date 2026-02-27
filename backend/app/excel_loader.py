@@ -345,6 +345,110 @@ def _load_cases_from_excel() -> list[dict]:
     except Exception as e:
         print(f"[excel_loader] EFM-Sheet: {e}")
 
+    # ─── Instrument-Views: v_honos, v_honosca, v_bscl, v_honosca_sr ───
+    # Diese Views sind die Primärquelle für alle Outcome-Daten.
+    # Totals in HoNOS_BSCL werden hier ÜBERSCHRIEBEN mit berechneten Werten.
+    # Später: identische Abfrage auf PostgreSQL-Views.
+
+    def _read_view_items(sheet_name: str, n_items: int, total_col: str = "total") -> dict:
+        """Liest eine View und gibt {fid: {ET: {items, total, datum}, AT: {...}}} zurück."""
+        result: dict[int, dict] = {}
+        try:
+            df_v = pd.read_excel(_EXCEL_PATH, sheet_name=sheet_name)
+            for _, r in df_v.iterrows():
+                fid = _to_int(r.get("fid"))
+                if fid is None:
+                    continue
+                zp = _to_str(r.get("zeitpunkt"))  # "ET" oder "AT"
+                if zp not in ("ET", "AT"):
+                    continue
+                items = []
+                for i in range(1, n_items + 1):
+                    items.append(_to_int(r.get(f"item_{i:02d}")))
+                entry = {
+                    "items": items,
+                    "datum": _to_date(r.get("datum")),
+                    "total": _to_int(r.get(total_col)),
+                    "suizidalitaet": _to_int(r.get("suizidalitaet")),
+                }
+                if fid not in result:
+                    result[fid] = {}
+                result[fid][zp] = entry
+            print(f"[excel_loader] {sheet_name}: {len(df_v)} Zeilen → {len(result)} Fälle")
+        except Exception as e:
+            print(f"[excel_loader] {sheet_name}: {e}")
+        return result
+
+    def _sum_items(items: list) -> int | None:
+        """Summiere Items, 9=not known wird ausgeschlossen."""
+        vals = [v for v in items if v is not None and v != 9]
+        return sum(vals) if vals else None
+
+    # Lade alle 4 Views
+    v_honos = _read_view_items("v_honos", 12, "total")
+    v_honosca = _read_view_items("v_honosca", 13, "total_a")
+    v_bscl = _read_view_items("v_bscl", 53, "gsi")
+    v_honosca_sr = _read_view_items("v_honosca_sr", 13, "total")
+
+    # Merge in Cases: Fremdbeurteilung (HoNOS / HoNOSCA)
+    for fnr, c in cases_by_fnr.items():
+        is_kjpp = c.get("clinic") == "KJPP"
+
+        if not is_kjpp and fnr in v_honos:
+            c["honos_instrument"] = "HoNOS"
+            v = v_honos[fnr]
+            if "ET" in v:
+                c["honos_entry_items"] = v["ET"]["items"]
+                c["honos_entry_total"] = v["ET"]["total"] or _sum_items(v["ET"]["items"])
+                c["honos_entry_date"] = v["ET"]["datum"] or c.get("honos_entry_date")
+            if "AT" in v:
+                c["honos_discharge_items"] = v["AT"]["items"]
+                c["honos_discharge_total"] = v["AT"]["total"] or _sum_items(v["AT"]["items"])
+                c["honos_discharge_date"] = v["AT"]["datum"] or c.get("honos_discharge_date")
+                if v["AT"].get("suizidalitaet") is not None:
+                    c["honos_discharge_suicidality"] = v["AT"]["suizidalitaet"]
+
+        elif is_kjpp and fnr in v_honosca:
+            c["honos_instrument"] = "HoNOSCA"
+            v = v_honosca[fnr]
+            if "ET" in v:
+                c["honos_entry_items"] = v["ET"]["items"]
+                c["honos_entry_total"] = v["ET"]["total"] or _sum_items(v["ET"]["items"])
+                c["honos_entry_date"] = v["ET"]["datum"] or c.get("honos_entry_date")
+            if "AT" in v:
+                c["honos_discharge_items"] = v["AT"]["items"]
+                c["honos_discharge_total"] = v["AT"]["total"] or _sum_items(v["AT"]["items"])
+                c["honos_discharge_date"] = v["AT"]["datum"] or c.get("honos_discharge_date")
+
+    # Merge: Selbstbeurteilung (BSCL / HoNOSCA-SR)
+    for fnr, c in cases_by_fnr.items():
+        is_kjpp = c.get("clinic") == "KJPP"
+
+        if not is_kjpp and fnr in v_bscl:
+            v = v_bscl[fnr]
+            if "ET" in v:
+                c["bscl_entry_items"] = v["ET"]["items"]
+                c["bscl_total_entry"] = v["ET"]["total"]  # GSI
+                c["bscl_entry_date"] = v["ET"]["datum"] or c.get("bscl_entry_date")
+            if "AT" in v:
+                c["bscl_discharge_items"] = v["AT"]["items"]
+                c["bscl_total_discharge"] = v["AT"]["total"]  # GSI
+                c["bscl_discharge_date"] = v["AT"]["datum"] or c.get("bscl_discharge_date")
+                if v["AT"].get("suizidalitaet") is not None:
+                    c["bscl_discharge_suicidality"] = v["AT"]["suizidalitaet"]
+
+        elif is_kjpp and fnr in v_honosca_sr:
+            c["honosca_sr_instrument"] = "HoNOSCA-SR"
+            v = v_honosca_sr[fnr]
+            if "ET" in v:
+                c["bscl_entry_items"] = v["ET"]["items"]  # mapped to bscl fields
+                c["bscl_total_entry"] = round(v["ET"]["total"] / 13, 2) if v["ET"]["total"] else None
+                c["bscl_entry_date"] = v["ET"]["datum"] or c.get("bscl_entry_date")
+            if "AT" in v:
+                c["bscl_discharge_items"] = v["AT"]["items"]
+                c["bscl_total_discharge"] = round(v["AT"]["total"] / 13, 2) if v["AT"]["total"] else None
+                c["bscl_discharge_date"] = v["AT"]["datum"] or c.get("bscl_discharge_date")
+
     return list(cases_by_fnr.values())
 
 

@@ -24,6 +24,7 @@ import CaseTable from "./CaseTable";
 import MatrixReport from "./MatrixReport";
 import MonitoringPanel from "./MonitoringPanel";
 import AnalyticsPanel from "./AnalyticsPanel";
+import HonosReportPanel from "./HonosReportPanel";
 import type { StationAnalytics } from "./AnalyticsPanel";
 
 type AuthState = {
@@ -212,7 +213,9 @@ async function apiJson<T>(path: string, init: RequestInit): Promise<T> {
 }
 
 type ViewMode = "overview" | "cases" | "report" | "monitoring" | "admin";
+type OverviewMode = "dokumentation" | "reporting";
 type CategoryFilter = "all" | "completeness" | "medical";
+type ReportingTab = "honos" | "bscl" | "efm";
 
 type StationOverviewItem = {
   station_id: string;
@@ -533,6 +536,8 @@ export default function App() {
   // Alle authentifizierten User sehen die BI-Übersicht (Scope regelt die Tiefe)
   const canViewOverview = !!me;
   const canViewMedical = userRoles.has("clinician") || userRoles.has("system_admin") || userRoles.has("admin");
+  // Reporting: nur Klinikleitung / Zentrumsleitung / Direktion (nicht Station-Level)
+  const canViewReporting = !!me && (me.scope?.level === "global" || me.scope?.level === "klinik" || me.scope?.level === "zentrum");
   const [permissionInfo, setPermissionInfo] = useState<string | null>(null);
   const [permissionDenied, setPermissionDenied] = useState<string | null>(null);
 
@@ -587,6 +592,8 @@ export default function App() {
 
   const [viewMode, setViewMode] = useState<ViewMode>("overview");
   const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>("all");
+  const [overviewMode, setOverviewMode] = useState<OverviewMode>("dokumentation");
+  const [reportingTab, setReportingTab] = useState<ReportingTab>("honos");
   const [dayState, setDayState] = useState<DayState | null>(null);
   const [cases, setCases] = useState<CaseSummary[]>([]);
   // Browse-Filter für Fallliste (Standard: alle Fälle)
@@ -694,6 +701,10 @@ export default function App() {
     if (categoryFilter === "medical" && !canViewMedical) {
       setCategoryFilter("all");
     }
+    // 2b. Reporting nicht erlaubt → zurück auf Dokumentation
+    if (overviewMode === "reporting" && !canViewReporting) {
+      setOverviewMode("dokumentation");
+    }
 
     // 3. Aktueller Browse-Filter ausserhalb des Scopes → auf höchsten Scope setzen
     const vis = me.scope?.visible_stations ?? [];
@@ -726,7 +737,7 @@ export default function App() {
       setSelectedCaseId(null);
       setDetail(null);
     }
-  }, [me, viewMode, canViewOverview, categoryFilter, canViewMedical, browseStation, browseClinic, browseCenter]);
+  }, [me, viewMode, canViewOverview, categoryFilter, overviewMode, canViewMedical, canViewReporting, browseStation, browseClinic, browseCenter]);
 
   // Load shift reasons
   useEffect(() => {
@@ -1218,7 +1229,7 @@ export default function App() {
             { key: "monitoring", label: "Monitoring", icon: "📈" },
           ] as { key: ViewMode; label: string; icon: string }[]).map((tab) => {
             const isActive = viewMode === tab.key;
-            const isRestricted = tab.key === "overview" && !canViewOverview;
+            const isRestricted = (tab.key === "overview" && !canViewOverview);
             return (
               <button
                 key={tab.key}
@@ -1288,49 +1299,139 @@ export default function App() {
         </div>
       )}
 
-      {/* ═══ Kategorie-Filter (Dokumentation / Klinisch / Alle) ═══ */}
+      {/* ═══ Modus-Toggle + Sub-Filter ═══ */}
       {viewMode !== "admin" && (
-        <div style={{ padding: "6px 20px", background: "#f9fafb", borderBottom: "1px solid #e5e7eb", display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ fontSize: 12, color: "#6b7280", marginRight: 4 }}>Ansicht:</span>
-          {([
-            { key: "all" as CategoryFilter, label: "Alle", icon: "⊞" },
-            { key: "completeness" as CategoryFilter, label: "Dokumentation", icon: "📋" },
-            { key: "medical" as CategoryFilter, label: "Klinisch", icon: "🩺" },
-          ]).map((f) => {
-            const active = categoryFilter === f.key;
-            const restricted = f.key === "medical" && !canViewMedical;
-            return (
-              <button
-                key={f.key}
-                onClick={() => {
-                  if (restricted) {
-                    setPermissionDenied("Die klinische Ansicht ist nur für Ärzte und Kliniker verfügbar.");
-                    return;
-                  }
-                  setCategoryFilter(f.key);
-                }}
-                style={{
-                  padding: "4px 12px", fontSize: 12, fontWeight: active ? 700 : 500, borderRadius: 6,
-                  background: restricted ? "transparent" : active ? (f.key === "completeness" ? "#dbeafe" : f.key === "medical" ? "#fce7f3" : "#e5e7eb") : "transparent",
-                  color: restricted ? "#cbd5e1" : active ? (f.key === "completeness" ? "#1d4ed8" : f.key === "medical" ? "#be185d" : "#374151") : "#6b7280",
-                  border: active && !restricted ? "1px solid" : "1px solid transparent",
-                  borderColor: active && !restricted ? (f.key === "completeness" ? "#93c5fd" : f.key === "medical" ? "#f9a8d4" : "#d1d5db") : "transparent",
-                  cursor: restricted ? "not-allowed" : "pointer", transition: "all 0.15s",
-                  opacity: restricted ? 0.5 : 1,
-                }}
-              >
-                <span style={{ marginRight: 4 }}>{f.icon}</span>{f.label}
-              </button>
-            );
-          })}
+        <div style={{ borderBottom: "1px solid #e5e7eb" }}>
+          {/* Row 1: Modus-Toggle (Dokumentation / Reporting) */}
+          <div style={{ padding: "6px 20px", background: "#f9fafb", display: "flex", alignItems: "center", gap: 6 }}>
+            {([
+              { key: "dokumentation" as OverviewMode, label: "Dokumentation", icon: "📋", color: "#1d4ed8", bg: "#dbeafe", border: "#93c5fd" },
+              { key: "reporting" as OverviewMode, label: "Reporting", icon: "📊", color: "#7c3aed", bg: "#ede9fe", border: "#c4b5fd" },
+            ]).map((m) => {
+              const active = overviewMode === m.key;
+              const restricted = m.key === "reporting" && !canViewReporting;
+              return (
+                <button
+                  key={m.key}
+                  onClick={() => {
+                    if (restricted) {
+                      setPermissionDenied("Das Reporting ist nur für Klinikleitung und Direktion verfügbar.");
+                      return;
+                    }
+                    setOverviewMode(m.key);
+                    if (m.key === "reporting" && viewMode !== "overview") {
+                      setViewMode("overview");
+                    }
+                  }}
+                  style={{
+                    padding: "5px 16px", fontSize: 12, fontWeight: active ? 700 : 500, borderRadius: 6,
+                    background: restricted ? "transparent" : active ? m.bg : "transparent",
+                    color: restricted ? "#cbd5e1" : active ? m.color : "#6b7280",
+                    border: active && !restricted ? `1px solid ${m.border}` : "1px solid transparent",
+                    cursor: restricted ? "not-allowed" : "pointer", transition: "all 0.15s",
+                    opacity: restricted ? 0.5 : 1,
+                  }}
+                >
+                  <span style={{ marginRight: 4 }}>{m.icon}</span>{m.label}
+                </button>
+              );
+            })}
+
+            {/* Separator + Sub-Filter */}
+            <span style={{ width: 1, height: 18, background: "#d1d5db", margin: "0 6px" }} />
+
+            {/* Sub-filters for Dokumentation mode */}
+            {overviewMode === "dokumentation" && ([
+              { key: "all" as CategoryFilter, label: "Alle", icon: "⊞" },
+              { key: "completeness" as CategoryFilter, label: "Vollständigkeit", icon: "✓" },
+              { key: "medical" as CategoryFilter, label: "Klinisch", icon: "🩺" },
+            ]).map((f) => {
+              const active = categoryFilter === f.key;
+              const restricted = f.key === "medical" && !canViewMedical;
+              return (
+                <button
+                  key={f.key}
+                  onClick={() => {
+                    if (restricted) {
+                      setPermissionDenied("Die klinische Ansicht ist nur für Ärzte und Kliniker verfügbar.");
+                      return;
+                    }
+                    setCategoryFilter(f.key);
+                  }}
+                  style={{
+                    padding: "4px 10px", fontSize: 11, fontWeight: active ? 700 : 400, borderRadius: 5,
+                    background: restricted ? "transparent" : active ? "#f3f4f6" : "transparent",
+                    color: restricted ? "#cbd5e1" : active ? "#374151" : "#9ca3af",
+                    border: active && !restricted ? "1px solid #d1d5db" : "1px solid transparent",
+                    cursor: restricted ? "not-allowed" : "pointer", transition: "all 0.15s",
+                    opacity: restricted ? 0.5 : 1,
+                  }}
+                >
+                  <span style={{ marginRight: 3, fontSize: 10 }}>{f.icon}</span>{f.label}
+                </button>
+              );
+            })}
+
+            {/* Sub-tabs for Reporting mode */}
+            {overviewMode === "reporting" && ([
+              { key: "honos" as ReportingTab, label: "HoNOS / HoNOSCA", ready: true },
+              { key: "bscl" as ReportingTab, label: "BSCL / HoNOSCA-SR", ready: false },
+              { key: "efm" as ReportingTab, label: "EFM", ready: false },
+            ]).map((t) => {
+              const active = reportingTab === t.key;
+              return (
+                <button
+                  key={t.key}
+                  onClick={() => setReportingTab(t.key)}
+                  style={{
+                    padding: "4px 10px", fontSize: 11, fontWeight: active ? 700 : 400, borderRadius: 5,
+                    background: active ? "#f5f3ff" : "transparent",
+                    color: active ? "#7c3aed" : "#9ca3af",
+                    border: active ? "1px solid #c4b5fd" : "1px solid transparent",
+                    cursor: "pointer", transition: "all 0.15s",
+                    position: "relative",
+                  }}
+                >
+                  {t.label}
+                  {!t.ready && <span style={{ fontSize: 8, color: "#d1d5db", marginLeft: 4 }}>bald</span>}
+                </button>
+              );
+            })}
+          </div>
         </div>
       )}
 
       {/* ═══ MAIN CONTENT ═══ */}
       <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
 
-        {/* ─── TAB: ÜBERSICHT (Klinik → Zentrum → Station) ─── */}
-        {viewMode === "overview" && (
+        {/* ─── TAB: ÜBERSICHT – REPORTING MODE ─── */}
+        {viewMode === "overview" && overviewMode === "reporting" && (
+          <div style={{ flex: 1, overflowY: "auto", padding: "24px 28px" }}>
+            {reportingTab === "honos" && <HonosReportPanel auth={auth} canView={canViewReporting} />}
+            {reportingTab === "bscl" && (
+              <div style={{ maxWidth: 800, margin: "40px auto", textAlign: "center" }}>
+                <div style={{ fontSize: 48, marginBottom: 12 }}>📊</div>
+                <h2 style={{ margin: "0 0 8px", fontSize: 18, color: "#374151" }}>BSCL / HoNOSCA-SR Reporting</h2>
+                <p style={{ color: "#9ca3af", fontSize: 13 }}>
+                  Selbstbeurteilung: BSCL (53 Items, 9 Skalen) für Erwachsene, HoNOSCA-SR (13 Items) für KJPP.
+                </p>
+                <p style={{ color: "#d1d5db", fontSize: 12, marginTop: 12 }}>Wird in einem kommenden Release implementiert.</p>
+              </div>
+            )}
+            {reportingTab === "efm" && (
+              <div style={{ maxWidth: 800, margin: "40px auto", textAlign: "center" }}>
+                <div style={{ fontSize: 48, marginBottom: 12 }}>🔒</div>
+                <h2 style={{ margin: "0 0 8px", fontSize: 18, color: "#374151" }}>EFM Reporting</h2>
+                <p style={{ color: "#9ca3af", fontSize: 13 }}>
+                  Freiheitsbeschränkende Massnahmen: Häufigkeit, Dauer, Vergleich über Stationen und Zeiträume.
+                </p>
+                <p style={{ color: "#d1d5db", fontSize: 12, marginTop: 12 }}>Wird in einem kommenden Release implementiert.</p>
+              </div>
+            )}
+          </div>
+        )}
+        {/* ─── TAB: ÜBERSICHT – DOKUMENTATION MODE ─── */}
+        {viewMode === "overview" && overviewMode === "dokumentation" && (
           <div style={{ flex: 1, overflowY: "auto", padding: "24px 28px" }}>
             <div style={{ maxWidth: 1200, margin: "0 auto" }}>
 
@@ -1817,6 +1918,7 @@ export default function App() {
             </div>
           </div>
         )}
+
       </div>
 
       {/* ADMIN MODAL */}
